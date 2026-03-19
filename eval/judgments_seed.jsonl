@@ -1,0 +1,22 @@
+{"query":"SSC mode selection for PDU session","relevant_doc_ids":["23501:clause:5.6.9.3"],"relevant_specs":["23501"],"notes":"Core 23.501 clause for SSC mode selection."}
+{"query":"policy control in 5GS architecture","relevant_doc_ids":["23501:clause:5.2.6"],"relevant_specs":["23501"],"notes":"Policy control is defined in TS 23.501 stage 2."}
+{"query":"service-based interfaces in 5G system","relevant_doc_ids":["23501:clause:4.2.6"],"relevant_specs":["23501"],"notes":"SBA/SBI architecture overview in 23.501."}
+{"query":"roaming reference architecture in 5GS","relevant_doc_ids":["23501:clause:4.2.4"],"relevant_specs":["23501"],"notes":"Roaming reference architectures in 23.501."}
+{"query":"network functions and entities in 5GS","relevant_doc_ids":["23501:clause:4.2.2"],"relevant_specs":["23501"],"notes":"AMF/SMF/UPF and related entities in 23.501."}
+{"query":"UE reachability in CM-CONNECTED","relevant_doc_ids":["23501:clause:5.4.2"],"relevant_specs":["23501"],"notes":"UE reachability handling in 23.501."}
+{"query":"N2 Notification procedure","relevant_doc_ids":["23502:clause:4.8.3"],"relevant_specs":["23502"],"notes":"Procedure location in 23.502."}
+{"query":"session management subscriber data update notification to SMF","relevant_doc_ids":["23502:clause:4.5.2"],"relevant_specs":["23502"],"notes":"Subscriber data update flow toward SMF in 23.502."}
+{"query":"subscriber data update notification to AMF","relevant_doc_ids":["23502:clause:4.5.1"],"relevant_specs":["23502"],"notes":"Subscriber data update flow toward AMF in 23.502."}
+{"query":"NG-RAN location reporting procedures","relevant_doc_ids":["23502:clause:4.10"],"relevant_specs":["23502"],"notes":"Location reporting procedures in 23.502."}
+{"query":"AN Release procedure in 5GS","relevant_doc_ids":["23502:clause:4.2.6"],"relevant_specs":["23502"],"notes":"AN Release procedure in 23.502."}
+{"query":"Create SM Context service","relevant_doc_ids":["29502:table:5:row:1"],"relevant_specs":["29502"],"notes":"Stage 3 service operation listed in TS 29.502 service description table."}
+{"query":"Update SM Context service","relevant_doc_ids":["29502:table:5:row:2"],"relevant_specs":["29502"],"notes":"Stage 3 service operation listed in TS 29.502 service description table."}
+{"query":"Release SM Context service","relevant_doc_ids":["29502:table:5:row:3"],"relevant_specs":["29502"],"notes":"Stage 3 service operation listed in TS 29.502 service description table."}
+{"query":"session management services service description","relevant_doc_ids":["29502:clause:5.2.1"],"relevant_specs":["29502"],"notes":"Service description clause in TS 29.502."}
+{"query":"session management subscription data retrieval","relevant_doc_ids":["29503:clause:5.2.2.2.5"],"relevant_specs":["29503"],"notes":"UDM service operation in TS 29.503."}
+{"query":"access and mobility subscription data retrieval","relevant_doc_ids":["29503:clause:5.2.2.2.3"],"relevant_specs":["29503"],"notes":"UDM data retrieval operation in TS 29.503."}
+{"query":"data change notification to NF","relevant_doc_ids":["29503:clause:5.2.2.5.2"],"relevant_specs":["29503"],"notes":"Notification flow in TS 29.503."}
+{"query":"NGAP services overview","relevant_doc_ids":["38413:clause:5"],"relevant_specs":["38413"],"notes":"NGAP services are summarized in TS 38.413 clause 5."}
+{"query":"functions of NGAP","relevant_doc_ids":["38413:clause:7"],"relevant_specs":["38413"],"notes":"NGAP functional breakdown in TS 38.413 clause 7."}
+{"query":"procedure specification principles in NGAP","relevant_doc_ids":["38413:clause:4.1"],"relevant_specs":["38413"],"notes":"Procedure specification principles in TS 38.413."}
+{"query":"UE IP Address Allocation","relevant_doc_ids":["23501:clause:5.2.2.8"],"relevant_specs":["23501"],"notes":"UE IP Allocation Managment in TS 23.501."}

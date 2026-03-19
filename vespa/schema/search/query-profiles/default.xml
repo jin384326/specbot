@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<query-profile id="default">
+  <field name="maxHits">10</field>
+  <field name="ranking">bm25</field>
+  <field name="presentation.summary">short</field>
+  <field name="ranking.features.query(anchor_boost)">1.0</field>
+  <field name="ranking.features.query(title_boost)">1.0</field>
+  <field name="ranking.features.query(stage_boost)">1.0</field>
+</query-profile>

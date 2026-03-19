@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<deployment version="1.0">
+  <prod>
+    <region active="true">default</region>
+  </prod>
+</deployment>

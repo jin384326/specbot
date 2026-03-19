@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<validation-overrides>
+  <allow until="2026-04-10">content-cluster-removal</allow>
+  <allow until="2026-04-10">field-type-change</allow>
+</validation-overrides>

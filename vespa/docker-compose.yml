@@ -1,0 +1,15 @@
+services:
+  vespa:
+    image: vespaengine/vespa:latest
+    container_name: spec-finder-vespa
+    hostname: spec-finder-vespa
+    ports:
+      - "8080:8080"
+      - "19071:19071"
+    restart: unless-stopped
+    environment:
+      VESPA_CONFIGSERVER_HOST: localhost
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
