@@ -1,0 +1,17 @@
+# Specbot — corpus, embeddings, CLI (Python 3.12+ 권장)
+#
+# PyTorch: Linux pip 기본 휠은 CUDA 12용이라 용량이 큽니다. CPU 전용이면
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   후 나머지 패키지를 설치하거나, bitsandbytes는 GPU 4bit 로딩에만 필요해 생략 가능합니다.
+#
+# 설치: pip install -r requirements.txt
+
+python-docx>=1.1.0
+huggingface-hub>=0.24.0
+torch>=2.2.0
+transformers>=4.45.0
+sentence-transformers>=3.0.0
+bitsandbytes>=0.43.0
+
+# 테스트
+pytest>=8.0.0

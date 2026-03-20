@@ -1,1 +1,12 @@
+# Build / local artifacts
 artifacts/
+
+# Embedding / HF model weights and caches (tracked helper script only)
+models/*
+!models/download.py
+
+# Local 3GPP specification sources (DOCX, etc.)
+Specs/
+specs/
+
+**/__pycache__/
