@@ -17,6 +17,8 @@ from retrieval.llm_selector import HeuristicSelectionLLM, OpenAISelectionLLM
 from retrieval.vespa_multi_hop_backend import VespaMultiHopBackend
 from retrieval.query_normalizer import QueryFeatureRegistry, build_query_feature_registry_from_corpus, normalize_query
 from retrieval.vespa_adapter import build_vespa_query
+from download.ftp_download import download_file_ftp, download_dir_ftp
+from download.zip_extract import extract_docx_from_zip
 from vespa.export_for_vespa import export_corpus_to_vespa_feed
 from vespa.http_adapter import (
     VespaEndpoint,
@@ -91,6 +93,45 @@ def cmd_download_hf_model(args: argparse.Namespace) -> None:
         resume_download=True,
     )
     print(f"Downloaded model to {path}")
+
+
+def cmd_download_specs_ftp(args: argparse.Namespace) -> None:
+    import os
+
+    password = args.password or os.environ.get("FTP_PASSWORD", "")
+    if args.file:
+        download_file_ftp(
+            args.host,
+            args.file,
+            Path(args.local_dir) / Path(args.file).name,
+            port=args.port,
+            user=args.user,
+            password=password or None,
+            timeout=args.timeout,
+        )
+        print(f"Downloaded {args.file} to {args.local_dir}")
+    else:
+        paths = download_dir_ftp(
+            args.host,
+            args.remote_dir or "",
+            args.local_dir,
+            pattern=args.pattern,
+            port=args.port,
+            user=args.user,
+            password=password or None,
+            timeout=args.timeout,
+            recurse=not getattr(args, "no_recurse", False),
+        )
+        print(f"Downloaded {len(paths)} file(s) to {args.local_dir}")
+
+
+def cmd_extract_docx_from_zip(args: argparse.Namespace) -> None:
+    paths = extract_docx_from_zip(
+        args.input,
+        args.output,
+        flatten=args.flatten,
+    )
+    print(f"Extracted {len(paths)} .docx file(s) to {args.output}")
 
 
 def cmd_demo_query(args: argparse.Namespace) -> None:
@@ -486,6 +527,25 @@ def build_parser() -> argparse.ArgumentParser:
     download_cmd.add_argument("--repo-id", required=True, help="Hugging Face repo id, e.g. Qwen/Qwen3-Embedding-0.6B")
     download_cmd.add_argument("--local-dir", required=True, help="Local directory to store the model")
     download_cmd.set_defaults(func=cmd_download_hf_model)
+
+    ftp_cmd = subparsers.add_parser("download-specs-ftp", help="Download spec files (e.g. zip) from FTP server")
+    ftp_cmd.add_argument("--host", required=True, help="FTP host")
+    ftp_cmd.add_argument("--local-dir", required=True, help="Local directory to save files")
+    ftp_cmd.add_argument("--file", help="Single remote file path to download (e.g. specs/23501.zip)")
+    ftp_cmd.add_argument("--remote-dir", help="Remote directory to list and download from (used when --file is not set)")
+    ftp_cmd.add_argument("--pattern", default="*.zip", help="Glob pattern for files when using --remote-dir (default: *.zip)")
+    ftp_cmd.add_argument("--user", help="FTP user (optional)")
+    ftp_cmd.add_argument("--password", help="FTP password (or set FTP_PASSWORD env)")
+    ftp_cmd.add_argument("--port", type=int, default=21, help="FTP port (default: 21)")
+    ftp_cmd.add_argument("--timeout", type=float, default=60.0, help="Connection timeout in seconds")
+    ftp_cmd.add_argument("--no-recurse", action="store_true", help="Do not recurse into subdirectories when using --remote-dir")
+    ftp_cmd.set_defaults(func=cmd_download_specs_ftp)
+
+    extract_cmd = subparsers.add_parser("extract-docx-from-zip", help="Extract .docx files from a zip archive")
+    extract_cmd.add_argument("--input", required=True, help="Input zip file path")
+    extract_cmd.add_argument("--output", required=True, help="Output directory for extracted docx files")
+    extract_cmd.add_argument("--flatten", action="store_true", help="Extract all docx into output dir with basename only (no subdirs)")
+    extract_cmd.set_defaults(func=cmd_extract_docx_from_zip)
 
     demo_cmd = subparsers.add_parser("demo-query", help="Run an in-memory retrieval demo")
     demo_cmd.add_argument("--input", required=True, help="Input enriched corpus JSONL")

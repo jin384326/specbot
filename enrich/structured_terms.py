@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Iterable
 
 from embedding.text_builders import build_embedding_text_for_record
 from parser.models import DocRecord, EntityDoc
+
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\ufeff\u2060]")
 
 ABBREVIATION_TOKEN_PATTERN = re.compile(r"\b[A-Z][A-Z0-9\-]{1,}\b")
 CAMEL_CASE_PATTERN = re.compile(r"\b[a-z]+(?:[A-Z][a-z0-9]+){1,}\b|\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,}\b")
@@ -18,7 +21,14 @@ PROCEDURE_NAME_PATTERN = re.compile(
 
 
 def normalize_space(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    t = unicodedata.normalize("NFKC", text or "")
+    t = _ZERO_WIDTH_RE.sub("", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _term_fingerprint(text: str) -> str:
+    """Match parser.table cell dedupe: ignore whitespace so visually identical labels collapse."""
+    return re.sub(r"\s+", "", normalize_space(text).lower())
 
 
 def dedupe_terms(terms: Iterable[str]) -> list[str]:
@@ -29,7 +39,7 @@ def dedupe_terms(terms: Iterable[str]) -> list[str]:
         candidate = re.sub(r"^(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
         if not candidate:
             continue
-        key = candidate.lower()
+        key = _term_fingerprint(candidate)
         if key in seen:
             continue
         seen.add(key)

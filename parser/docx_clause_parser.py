@@ -9,6 +9,7 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
+from docx.oxml.simpletypes import ST_Merge
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 
@@ -65,6 +66,176 @@ def normalize_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
+def text_fingerprint(value: str) -> str:
+    """Ignore all whitespace for equality (Word line breaks inside words → spurious spaces)."""
+    return re.sub(r"\s+", "", (value or "").lower())
+
+
+BRACKET_SEGMENT_PATTERN = re.compile(r"\[([^\]]*)\]")
+
+
+def dedupe_duplicate_brackets(text: str) -> str:
+    """Drop repeated [...] blocks that have the same inner text (case-insensitive, whitespace-normalized)."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    pos = 0
+    for match in BRACKET_SEGMENT_PATTERN.finditer(text):
+        parts.append(text[pos : match.start()])
+        inner_key = text_fingerprint(match.group(1))
+        if inner_key in seen:
+            pos = match.end()
+            continue
+        seen.add(inner_key)
+        parts.append(match.group(0))
+        pos = match.end()
+    parts.append(text[pos:])
+    return normalize_whitespace("".join(parts))
+
+
+def remove_redundant_brackets_matching_outside(text: str) -> str:
+    """Remove [inner] when the same text already appears outside brackets in the cell (typical spec table duplication)."""
+    stripped = BRACKET_SEGMENT_PATTERN.sub(" ", text)
+    stripped_norm = normalize_whitespace(stripped).lower()
+    if not stripped_norm:
+        return text
+    parts: list[str] = []
+    pos = 0
+    for match in BRACKET_SEGMENT_PATTERN.finditer(text):
+        parts.append(text[pos : match.start()])
+        inner = normalize_whitespace(match.group(1))
+        key = inner.lower()
+        if len(inner) >= 3 and key and key in stripped_norm:
+            pos = match.end()
+            continue
+        parts.append(match.group(0))
+        pos = match.end()
+    parts.append(text[pos:])
+    return normalize_whitespace("".join(parts))
+
+
+def _dedupe_semicolon_list_items_in_line(line: str, *, min_segment_len: int = 14) -> str:
+    """Drop repeated fragments in 'a; b; a' style lists inside one line (common in spec table cells)."""
+    parts = re.split(r"\s*;\s*", line)
+    out: list[str] = []
+    seen: set[str] = set()
+    prev_fp: str | None = None
+    for part in parts:
+        p = normalize_whitespace(part)
+        if not p:
+            continue
+        fp = text_fingerprint(p)
+        if prev_fp is not None and fp == prev_fp:
+            continue
+        if len(p) >= min_segment_len and fp in seen:
+            continue
+        if len(p) >= min_segment_len:
+            seen.add(fp)
+        out.append(p)
+        prev_fp = fp
+    return "; ".join(out)
+
+
+def dedupe_repeated_lines_and_semicolon_lists(text: str, *, min_line_len: int = 20) -> str:
+    """Remove duplicate lines and semicolon-separated duplicates (list-like cell content)."""
+    lines = text.split("\n")
+    result_lines: list[str] = []
+    seen_fp: set[str] = set()
+    prev_line_fp: str | None = None
+    for raw_line in lines:
+        line = _dedupe_semicolon_list_items_in_line(raw_line)
+        line = normalize_whitespace(line)
+        if not line:
+            continue
+        fp = text_fingerprint(line)
+        if fp == prev_line_fp:
+            continue
+        if len(line) >= min_line_len and fp in seen_fp:
+            continue
+        if len(line) >= min_line_len:
+            seen_fp.add(fp)
+        result_lines.append(line)
+        prev_line_fp = fp
+    return "\n".join(result_lines)
+
+
+def normalize_table_cell_text(text: str) -> str:
+    """Normalize a single table cell: whitespace, dedupe bracket groups, drop brackets redundant with surrounding text."""
+    raw = normalize_whitespace(text or "")
+    if not raw:
+        return ""
+    raw = dedupe_duplicate_brackets(raw)
+    raw = remove_redundant_brackets_matching_outside(raw)
+    raw = dedupe_repeated_lines_and_semicolon_lists(raw)
+    return normalize_whitespace(raw)
+
+
+def dedupe_consecutive_duplicate_paragraphs(
+    paragraphs: list[str],
+    indices: list[int] | None = None,
+) -> tuple[list[str], list[int]]:
+    """Drop back-to-back identical paragraphs (e.g. duplicated list items in Word).
+
+    If indices is provided (same length as paragraphs), keeps the index aligned with kept paragraphs.
+    """
+    out_p: list[str] = []
+    out_i: list[int] = []
+    prev_key: str | None = None
+    for idx, paragraph in enumerate(paragraphs):
+        fp = text_fingerprint(paragraph)
+        if not fp:
+            continue
+        if fp == prev_key:
+            continue
+        out_p.append(paragraph)
+        out_i.append(indices[idx] if indices is not None and idx < len(indices) else idx + 1)
+        prev_key = fp
+    return out_p, out_i
+
+
+def linearized_row_pairs(header: list[str], row: list[str]) -> list[tuple[str, str]]:
+    """Build (label, cell) pairs; skip consecutive duplicate cell values (horizontal merged cells in Word)."""
+    pairs: list[tuple[str, str]] = []
+    prev_fp: str | None = None
+    for col_idx, cell in enumerate(row):
+        label = header[col_idx] if col_idx < len(header) and header[col_idx] else f"column_{col_idx + 1}"
+        val = normalize_whitespace(cell) if cell else ""
+        if not val:
+            continue
+        fp = text_fingerprint(val)
+        if prev_fp is not None and fp == prev_fp:
+            continue
+        pairs.append((label, val))
+        prev_fp = fp
+    return pairs
+
+
+def dedupe_duplicate_cell_texts_preserve_order(
+    row: list[str],
+    *,
+    drop_empty: bool = True,
+) -> list[str]:
+    """Remove duplicate cell strings in row order (Word merge often repeats the same label with empty cells between).
+
+    Uses text_fingerprint so spacing/unicode variants still match. Empty cells are omitted from the result when
+    drop_empty is True (cleaner JSON lists).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for cell in row:
+        raw = cell or ""
+        val = normalize_whitespace(raw)
+        if not val:
+            if not drop_empty:
+                out.append(raw)
+            continue
+        fp = text_fingerprint(val)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out.append(raw)
+    return out
+
+
 def paragraph_style_level(style_name: str) -> int | None:
     match = re.match(r"Heading\s+(\d+)$", style_name or "")
     return int(match.group(1)) if match else None
@@ -96,12 +267,66 @@ def is_probable_clause_id(clause_id: str) -> bool:
     return False
 
 
+def _flatten_table_cells_row_major(table: Table) -> list[_Cell]:
+    """Expand the table to one ``_Cell`` per layout-grid slot (same as ``Table._cells``).
+
+    Some 3GPP (and other) documents contain invalid vertical-merge markup where
+    ``w:vMerge w:val=\"continue\"`` appears before a full first row exists in the
+    grid; ``Table._cells`` then does ``cells[-col_count]`` and raises ``IndexError``.
+    In that case we fall back to a real ``w:tc`` cell so parsing can continue.
+    """
+    col_count = table._column_count
+    cells: list[_Cell] = []
+    for tc in table._tbl.iter_tcs():
+        for grid_span_idx in range(tc.grid_span):
+            if tc.vMerge == ST_Merge.CONTINUE:
+                if len(cells) >= col_count:
+                    cells.append(cells[-col_count])
+                else:
+                    cells.append(_Cell(tc, table))
+            elif grid_span_idx > 0:
+                if cells:
+                    cells.append(cells[-1])
+                else:
+                    cells.append(_Cell(tc, table))
+            else:
+                cells.append(_Cell(tc, table))
+    return cells
+
+
 def clean_table_matrix(table: Table) -> list[list[str]]:
+    """Build a logical matrix from a row-major cell grid (not ``row.cells``).
+
+    ``row.cells`` builds fresh ``_Cell`` wrappers per access; ``id(cell._tc)`` can
+    collide across rows in CPython, breaking merge detection. A flattened grid repeats
+    the same ``_Cell`` instance for horizontal spans and vertical continuations, so
+    ``id(cell)`` identifies merged regions. We use :func:`_flatten_table_cells_row_major`
+    instead of ``Table._cells`` to survive malformed ``vMerge`` in the wild.
+    """
+    col_count = table._column_count
+    flat = _flatten_table_cells_row_major(table)
+    if col_count == 0 or not flat:
+        return []
+    nrows = len(flat) // col_count
     matrix: list[list[str]] = []
-    for row in table.rows:
-        cells = [normalize_whitespace(cell.text) for cell in row.cells]
-        if any(cells):
-            matrix.append(cells)
+    emitted_cell_ids: set[int] = set()
+    for row_idx in range(nrows):
+        start = row_idx * col_count
+        row_cells = flat[start : start + col_count]
+        row_out: list[str] = []
+        prev_cell: _Cell | None = None
+        for cell in row_cells:
+            if prev_cell is not None and cell is prev_cell:
+                continue
+            prev_cell = cell
+            cid = id(cell)
+            if cid in emitted_cell_ids:
+                row_out.append("")
+            else:
+                row_out.append(normalize_table_cell_text(cell.text))
+                emitted_cell_ids.add(cid)
+        if any(normalize_whitespace(c) for c in row_out):
+            matrix.append(row_out)
     return matrix
 
 
@@ -129,11 +354,7 @@ def table_to_linearized_text(matrix: list[list[str]], table_title: str = "") -> 
         return ""
     header = matrix[0]
     for idx, row in enumerate(matrix[1:], start=1):
-        pairs = []
-        for col_idx, cell in enumerate(row):
-            label = header[col_idx] if col_idx < len(header) and header[col_idx] else f"column_{col_idx + 1}"
-            if cell:
-                pairs.append(f"{label}: {cell}")
+        pairs = [f"{label}: {cell}" for label, cell in linearized_row_pairs(header, row)]
         if pairs:
             parts.append(f"row {idx}: " + "; ".join(pairs))
     if len(matrix) == 1:
@@ -270,6 +491,8 @@ class DocxClauseParser:
                     continue
                 linearized_text = table_to_linearized_text(matrix, table_title)
                 common_fields = self._common_fields(spec_metadata, active_clause, path, table_counter)
+                header = matrix[0] if matrix else []
+                header_compact = dedupe_duplicate_cell_texts_preserve_order(header)
                 table_doc = TableDoc(
                     **common_fields,
                     doc_id=table_id,
@@ -278,17 +501,14 @@ class DocxClauseParser:
                     table_title=table_title,
                     table_raw=matrix,
                     table_markdown=table_to_markdown(matrix),
+                    table_headers=header_compact,
                     referenced_specs=referenced_specs_from_text(linearized_text),
                 )
                 records.append(table_doc)
-                header = matrix[0] if matrix else []
                 for row_index, row in enumerate(matrix[1:], start=1):
                     row_header = row[0] if row else ""
-                    row_text = "; ".join(
-                        f"{header[col_idx] if col_idx < len(header) and header[col_idx] else f'column_{col_idx + 1}'}: {cell}"
-                        for col_idx, cell in enumerate(row)
-                        if cell
-                    )
+                    row_cells_compact = dedupe_duplicate_cell_texts_preserve_order(row)
+                    row_text = "; ".join(f"{label}: {cell}" for label, cell in linearized_row_pairs(header, row))
                     row_doc = TableRowDoc(
                         **common_fields,
                         doc_id=f"{table_id}:row:{row_index}",
@@ -299,7 +519,7 @@ class DocxClauseParser:
                         table_markdown=table_doc.table_markdown,
                         row_index=row_index,
                         row_header=row_header,
-                        row_cells=row,
+                        row_cells=row_cells_compact,
                         referenced_specs=referenced_specs_from_text(row_text),
                     )
                     records.append(row_doc)
@@ -397,7 +617,11 @@ class DocxClauseParser:
     def _emit_clause_records(self, clause: ClauseBuffer, metadata: SpecMetadata) -> list[DocRecord]:
         if clause.excluded:
             return []
-        text = "\n".join(clause.paragraphs).strip()
+        paragraphs, paragraph_indices = dedupe_consecutive_duplicate_paragraphs(
+            clause.paragraphs,
+            clause.paragraph_indices if len(clause.paragraph_indices) == len(clause.paragraphs) else None,
+        )
+        text = "\n".join(paragraphs).strip()
         if not text:
             return []
         clause_id_prefix = metadata.spec_no or Path(metadata.source_file).stem
@@ -409,7 +633,7 @@ class DocxClauseParser:
             referenced_specs=referenced_specs_from_text(text),
         )
         records: list[DocRecord] = [clause_doc]
-        records.extend(self._build_passages(clause_doc, clause.paragraphs, clause.paragraph_indices))
+        records.extend(self._build_passages(clause_doc, paragraphs, paragraph_indices))
         return records
 
     def _build_passages(
