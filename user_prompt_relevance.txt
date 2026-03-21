@@ -1,0 +1,14 @@
+Original user query: {query_text}
+
+Current retrieval keyword: {current_search_term}
+
+Candidate:
+- doc_id: {doc_id}
+- title: {title}
+- context:
+{context_text}
+
+Return:
+- the same doc_id
+- is_relevant as true or false
+- a brief reason

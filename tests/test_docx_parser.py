@@ -171,7 +171,27 @@ def test_passage_splitting(tmp_path: Path) -> None:
 
 def test_annex_heading_and_false_positive_guard() -> None:
     assert split_clause_heading("Annex A (informative) Example flows") == ("Annex A", "Example flows")
+    assert split_clause_heading("5.28a.3 Topology Information for TSN TN") == ("5.28a.3", "Topology Information for TSN TN")
     assert split_clause_heading("5G architecture") is None
+
+
+def test_parser_keeps_mixed_alphanumeric_clause_ids(tmp_path: Path) -> None:
+    source = tmp_path / "mixed-clause.docx"
+    doc = Document()
+    cover = doc.add_table(rows=3, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 23.501 V18.12.0 (2025-12)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = "System architecture for the 5G System (5GS); Stage 2 (Release 18)"
+    doc.add_paragraph("5.28a.3 Topology Information for TSN TN", style="Heading 3")
+    doc.add_paragraph("Topology details.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    assert [record.clause_id for record in clause_docs] == ["5.28a.3"]
+    assert clause_docs[0].clause_title == "Topology Information for TSN TN"
 
 
 def test_spec_title_and_release_data_are_inferred_from_docx_and_path(tmp_path: Path) -> None:

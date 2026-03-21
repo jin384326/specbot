@@ -1,0 +1,14 @@
+Query: {query_text}
+
+Keyword limit: {keyword_limit}
+
+Candidate:
+- doc_id: {doc_id}
+- title: {title}
+- context:
+{context_text}
+
+Return:
+- the same doc_id
+- up to {keyword_limit} keywords
+- a brief reason

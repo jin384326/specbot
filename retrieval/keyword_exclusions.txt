@@ -1,0 +1,22 @@
+# One keyword per line. Blank lines and lines starting with # are ignored.
+# Update this file to add or remove excluded keywords from iterative retrieval.
+
+Control Plane
+User Plane
+Stage 2
+Stage 3
+Release 18
+5G System
+5GS
+PDU Session
+QoS Flow
+Session Management
+UE
+AMF
+SMF
+UPF
+PCF
+UDM
+NRF
+NG-RAN
+PSA UPF

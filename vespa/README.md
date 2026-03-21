@@ -15,7 +15,7 @@ Files:
 Typical flow:
 ```bash
 docker compose -f vespa/docker-compose.yml up -d
-python3 -m app.main build-corpus Specs/2025-12/Rel-18/23501-ic0.docx --output /tmp/spec_finder_corpus.jsonl --overwrite
+python3 -m app.main build-corpus Specs/2025-12/Rel-18/23501-ic0.docx --output ./artifact/spec_finder_corpus.jsonl --overwrite
 python3 -m app.main enrich-corpus --input /tmp/spec_finder_corpus.jsonl --output /tmp/spec_finder_enriched.jsonl
 python3 -m app.main export-vespa --input /tmp/spec_finder_enriched.jsonl --output /tmp/spec_finder_vespa.jsonl
 python3 -m app.main package-vespa-app --app-dir vespa/schema --output /tmp/spec_finder_app.zip

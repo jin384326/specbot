@@ -50,6 +50,15 @@ class MultiHopBackend(Protocol):
     ) -> list[MultiHopSearchHit]:
         ...
 
+    def lookup_clause(
+        self,
+        spec_no: str,
+        clause_id: str,
+        limit: int = 20,
+        stage_filters: list[str] | None = None,
+    ) -> list[MultiHopSearchHit]:
+        ...
+
 
 class InMemoryMultiHopBackend:
     def __init__(self, records: Iterable[DocRecord]) -> None:
@@ -82,6 +91,30 @@ class InMemoryMultiHopBackend:
                 )
             )
         return sorted(hits, key=lambda item: (-item.score, item.doc.doc_id))[:limit]
+
+    def lookup_clause(
+        self,
+        spec_no: str,
+        clause_id: str,
+        limit: int = 20,
+        stage_filters: list[str] | None = None,
+    ) -> list[MultiHopSearchHit]:
+        hits: list[MultiHopSearchHit] = []
+        for record in self.records:
+            if record.spec_no != spec_no or record.clause_id != clause_id:
+                continue
+            if stage_filters and record.stage_hint not in stage_filters:
+                continue
+            hits.append(
+                MultiHopSearchHit(
+                    doc=record,
+                    score=99.0,
+                    reason_type="clause_reference",
+                    matched_text=clause_id,
+                    metadata={"spec_no": spec_no, "clause_id": clause_id},
+                )
+            )
+        return sorted(hits, key=lambda item: item.doc.doc_id)[:limit]
 
     @staticmethod
     def _score_record(record: DocRecord, normalized_terms: list[str]) -> tuple[float, list[str]]:

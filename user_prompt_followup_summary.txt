@@ -1,0 +1,14 @@
+Query: {query_text}
+
+Follow-up sentence limit: {followup_limit}
+
+Candidate:
+- doc_id: {doc_id}
+- title: {title}
+- context:
+{context_text}
+
+Return:
+- the same doc_id
+- up to {followup_limit} follow-up search sentences
+- a brief reason

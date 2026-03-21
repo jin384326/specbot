@@ -8,7 +8,7 @@ from embedding.providers import EmbeddingProvider
 from parser.models import BaseDocRecord, DocRecord, doc_record_from_dict
 from retrieval.multi_hop_pipeline import MultiHopSearchHit
 from retrieval.query_normalizer import QueryFeatureRegistry, normalize_query
-from retrieval.vespa_adapter import build_vespa_query
+from retrieval.vespa_adapter import VespaQueryRequest, build_contains_expression, build_vespa_query
 from vespa.http_adapter import VespaEndpoint, query_vespa
 
 
@@ -150,3 +150,44 @@ class VespaMultiHopBackend:
         vector = self.embedding_provider.embed_texts([query_text], prompt_name="query")[0]
         self._query_vector_cache[query_text] = vector
         return vector
+
+    def lookup_clause(
+        self,
+        spec_no: str,
+        clause_id: str,
+        limit: int = 20,
+        stage_filters: list[str] | None = None,
+    ) -> list[MultiHopSearchHit]:
+        filters = [
+            build_contains_expression("spec_no", [spec_no]),
+            build_contains_expression("clause_id", [clause_id]),
+            build_contains_expression("doc_type", ["clause_doc"]),
+        ]
+        if stage_filters:
+            filters.append(build_contains_expression("stage_hint", stage_filters))
+        request = VespaQueryRequest(
+            yql="select * from sources * where " + " and ".join(f"({clause})" for clause in filters if clause != "false"),
+            hits=min(limit, self.max_hits_per_call),
+            ranking=self.ranking,
+            additional_params={"presentation.summary": self.summary},
+        )
+        response = query_vespa(
+            self.endpoint,
+            request.to_params(),
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+        )
+        hits: list[MultiHopSearchHit] = []
+        for child in response.get("root", {}).get("children", []):
+            record = doc_record_from_vespa_hit(child)
+            hits.append(
+                MultiHopSearchHit(
+                    doc=record,
+                    score=float(child.get("relevance", 0.0)) or 99.0,
+                    reason_type="clause_reference",
+                    matched_text=f"{clause_id} of {spec_no}",
+                    metadata={"spec_no": spec_no, "clause_id": clause_id, "raw_hit": child},
+                )
+            )
+        return sorted(hits, key=lambda item: (-item.score, item.doc.doc_id))[:limit]

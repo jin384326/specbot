@@ -15,7 +15,7 @@ from docx.oxml.text.paragraph import CT_P
 
 from parser.models import ClauseDoc, DocRecord, PassageDoc, TableDoc, TableRowDoc
 
-CLAUSE_PATTERN = re.compile(r"^(?P<clause>\d+(?:\.\d+)*(?:[A-Za-z])?)\s+(?P<title>.+)$")
+CLAUSE_PATTERN = re.compile(r"^(?P<clause>\d+(?:[A-Za-z])?(?:\.\d+(?:[A-Za-z])?)*)\s+(?P<title>.+)$")
 ANNEX_PATTERN = re.compile(r"^(?P<clause>Annex\s+[A-Z])(?:\s*\([^)]+\))?\s+(?P<title>.+)$")
 SPEC_REF_PATTERN = re.compile(r"\b(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}|\d{5})\b")
 STAGE_PATTERN = re.compile(r"\b(Stage\s+\d+)\b", re.IGNORECASE)

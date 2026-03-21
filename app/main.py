@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from embedding.config import DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL
@@ -14,6 +15,7 @@ from parser.corpus_builder import build_corpus
 from retrieval.pipeline import InMemoryBackend, RetrievalPipeline
 from retrieval.centered_multi_hop_pipeline import CenteredMultiHopRetrievalPipeline
 from retrieval.llm_selector import HeuristicSelectionLLM, OpenAISelectionLLM
+from retrieval.iterative_llm_retriever import ChatOpenAIRelevanceJudge, IterativeLLMRetriever
 from retrieval.vespa_multi_hop_backend import VespaMultiHopBackend
 from retrieval.query_normalizer import QueryFeatureRegistry, build_query_feature_registry_from_corpus, normalize_query
 from retrieval.vespa_adapter import build_vespa_query
@@ -238,6 +240,56 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
         retry_backoff_seconds=args.retry_backoff_seconds,
     )
     print(json.dumps(response, ensure_ascii=True, indent=2))
+
+
+def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    registry = QueryFeatureRegistry.from_json(args.registry)
+    embedding_provider = None
+    if args.embed_model:
+        embedding_provider = create_embedding_provider(
+            args.embed_model,
+            local_dir=args.local_model_dir,
+            output_dim=args.output_dim,
+            device=args.device,
+            load_in_4bit=not args.no_4bit,
+            max_length=args.max_length,
+        )
+    endpoint = VespaEndpoint(
+        base_url=args.base_url,
+        schema=args.schema,
+        namespace=args.namespace,
+        config_base_url=args.config_base_url,
+    )
+    backend = VespaMultiHopBackend(
+        endpoint=endpoint,
+        registry=registry,
+        embedding_provider=embedding_provider,
+        ranking=args.ranking,
+        summary=args.summary,
+        sparse_boost=args.sparse_boost,
+        vector_boost=args.vector_boost,
+        anchor_boost=args.anchor_boost,
+        title_boost=args.title_boost,
+        stage_boost=args.stage_boost,
+        timeout=args.timeout,
+        max_retries=args.max_retries,
+        retry_backoff_seconds=args.retry_backoff_seconds,
+    )
+    judge = ChatOpenAIRelevanceJudge(
+        model=args.openai_model,
+        timeout=int(args.timeout),
+        extraction_mode=args.followup_mode,
+    )
+    retriever = IterativeLLMRetriever(backend=backend, evaluator=judge)
+    result = retriever.run(
+        args.query,
+        limit=args.limit,
+        iterations=args.iterations,
+        next_iteration_limit=args.next_iteration_limit,
+    )
+    print(json.dumps(result, ensure_ascii=True, indent=2))
 
 
 def cmd_centered_query_vespa_http(args: argparse.Namespace) -> None:
@@ -630,6 +682,45 @@ def build_parser() -> argparse.ArgumentParser:
     query_http_cmd.add_argument("--max-retries", type=int, default=1, help="Retries for transient query errors")
     query_http_cmd.add_argument("--retry-backoff-seconds", type=float, default=0.5, help="Linear backoff base in seconds")
     query_http_cmd.set_defaults(func=cmd_query_vespa_http)
+
+    iterative_query_cmd = subparsers.add_parser(
+        "iterative-query-vespa-http",
+        help="Run iterative stage fan-out Vespa retrieval with ChatOpenAI relevance checks",
+    )
+    iterative_query_cmd.add_argument("--query", required=True, help="Natural language query")
+    iterative_query_cmd.add_argument("--base-url", required=True, help="Vespa base URL, e.g. http://localhost:8080")
+    iterative_query_cmd.add_argument("--config-base-url", help="Optional Vespa config server URL")
+    iterative_query_cmd.add_argument("--limit", type=int, default=4, help="Requested hit count per stage search")
+    iterative_query_cmd.add_argument("--next-iteration-limit", type=int, default=2, help="Requested hit count per stage search after the first iteration")
+    iterative_query_cmd.add_argument("--iterations", type=int, default=1, help="Number of LLM-guided search iterations")
+    iterative_query_cmd.add_argument("--schema", default="spec_finder", help="Vespa schema name")
+    iterative_query_cmd.add_argument("--namespace", default="spec_finder", help="Vespa document namespace")
+    iterative_query_cmd.add_argument("--registry", help="Optional query feature registry JSON")
+    iterative_query_cmd.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds")
+    iterative_query_cmd.add_argument("--ranking", default="hybrid", help="Vespa ranking profile")
+    iterative_query_cmd.add_argument("--summary", default="short", help="Vespa summary class")
+    iterative_query_cmd.add_argument("--anchor-boost", type=float, default=1.15, help="Query-time anchor boost")
+    iterative_query_cmd.add_argument("--title-boost", type=float, default=1.2, help="Query-time title boost")
+    iterative_query_cmd.add_argument("--stage-boost", type=float, default=1.1, help="Query-time stage boost")
+    iterative_query_cmd.add_argument("--sparse-boost", type=float, default=0.0, help="Query-time sparse score boost")
+    iterative_query_cmd.add_argument("--vector-boost", type=float, default=1.0, help="Query-time vector boost")
+    iterative_query_cmd.add_argument("--embed-model", default=DEFAULT_EMBEDDING_MODEL, help="Embedding model for hybrid retrieval")
+    iterative_query_cmd.add_argument("--local-model-dir", help="Optional local Hugging Face model directory")
+    iterative_query_cmd.add_argument("--output-dim", type=int, help="Optional embedding output dimension")
+    iterative_query_cmd.add_argument("--device", default=DEFAULT_EMBEDDING_DEVICE, help="Embedding device for query vector creation")
+    iterative_query_cmd.add_argument("--max-length", type=int, default=2048, help="Max token length for supported models")
+    iterative_query_cmd.add_argument("--no-4bit", action="store_true", help="Disable 4-bit loading for supported models")
+    iterative_query_cmd.add_argument("--openai-model", default="gpt-4o-mini", help="ChatOpenAI model for relevance verification")
+    iterative_query_cmd.add_argument(
+        "--followup-mode",
+        choices=["keyword", "sentence-summary"],
+        default="keyword",
+        help="How the LLM generates next-hop retrieval queries",
+    )
+    iterative_query_cmd.add_argument("--debug", action="store_true", help="Enable debug logging for each retrieval step")
+    iterative_query_cmd.add_argument("--max-retries", type=int, default=1, help="Retries for transient query errors")
+    iterative_query_cmd.add_argument("--retry-backoff-seconds", type=float, default=0.5, help="Linear backoff base in seconds")
+    iterative_query_cmd.set_defaults(func=cmd_iterative_query_vespa_http)
 
     centered_query_cmd = subparsers.add_parser("centered-query-vespa-http", help="Run the centered multi-hop retrieval flow over live Vespa stage fan-out queries")
     centered_query_cmd.add_argument("--query", required=True, help="Natural language query")
