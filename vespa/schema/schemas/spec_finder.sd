@@ -187,6 +187,8 @@ schema spec_finder {
         summary release_data {}
         summary stage_hint {}
         summary clause_id {}
+        summary clause_path {}
+        summary parent_clause_id {}
         summary clause_title {}
         summary table_title {}
         summary row_header {}

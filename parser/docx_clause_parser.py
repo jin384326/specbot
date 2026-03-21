@@ -15,7 +15,9 @@ from docx.oxml.text.paragraph import CT_P
 
 from parser.models import ClauseDoc, DocRecord, PassageDoc, TableDoc, TableRowDoc
 
-CLAUSE_PATTERN = re.compile(r"^(?P<clause>\d+(?:[A-Za-z])?(?:\.\d+(?:[A-Za-z])?)*)\s+(?P<title>.+)$")
+CLAUSE_PATTERN = re.compile(
+    r"^(?P<clause>(?:\d+(?:[A-Za-z])?(?:\.\d+(?:[A-Za-z])?)*)|(?:[A-Z](?:\.\d+(?:[A-Za-z])?)+))\s+(?P<title>.+)$"
+)
 ANNEX_PATTERN = re.compile(r"^(?P<clause>Annex\s+[A-Z])(?:\s*\([^)]+\))?\s+(?P<title>.+)$")
 SPEC_REF_PATTERN = re.compile(r"\b(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}|\d{5})\b")
 STAGE_PATTERN = re.compile(r"\b(Stage\s+\d+)\b", re.IGNORECASE)
@@ -255,6 +257,23 @@ def split_clause_heading(text: str) -> tuple[str, str] | None:
     return clause_id, match.group("title")
 
 
+def should_treat_paragraph_as_heading(
+    text: str,
+    heading_level: int | None,
+    heading: tuple[str, str] | None,
+) -> bool:
+    if heading_level is not None:
+        return True
+    if heading is None:
+        return False
+    clause_id, _clause_title = heading
+    if clause_id.startswith("Annex "):
+        return False
+    if text.endswith("."):
+        return False
+    return True
+
+
 def is_probable_clause_id(clause_id: str) -> bool:
     if clause_id.startswith("Annex "):
         return True
@@ -440,12 +459,17 @@ class DocxClauseParser:
 
                 heading_level = paragraph_style_level(style_name)
                 heading = split_clause_heading(text)
+                if not should_treat_paragraph_as_heading(text, heading_level, heading):
+                    heading = None
                 if heading_level is not None or heading is not None:
                     if active_clause is not None:
                         records.extend(self._emit_clause_records(active_clause, spec_metadata))
                     clause_counter += 1
                     paragraph_counter += 1
                     clause_id, clause_title, level = self._resolve_heading(text, heading_level, heading, clause_counter)
+                    if clause_id and clause_id[0].isdigit():
+                        while clause_stack and clause_stack[-1].clause_id.startswith("Annex "):
+                            clause_stack.pop()
                     while clause_stack and clause_stack[-1].level >= level:
                         clause_stack.pop()
                     clause_path = [*clause_stack[-1].clause_path, clause_id] if clause_stack else [clause_id]

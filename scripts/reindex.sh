@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SPECS_DIR="${SPECS_DIR:-$ROOT_DIR/Specs/2025-12/Rel-18}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$ROOT_DIR/artifacts}"
-VESPA_APP_DIR="${VESPA_APP_DIR:-$ROOT_DIR/vespa}"
+VESPA_DIR="${VESPA_DIR:-$ROOT_DIR/vespa}"
+VESPA_APP_DIR="${VESPA_APP_DIR:-$VESPA_DIR/schema}"
 MODEL_DIR="${MODEL_DIR:-$ROOT_DIR/models/Qwen3-Embedding-0.6B}"
 DEVICE="${DEVICE:-cuda}"
 
@@ -23,6 +24,7 @@ VESPA_FEED_PATH="${VESPA_FEED_PATH:-$ARTIFACTS_DIR/spec_finder_vespa_embedded_al
 BATCH_SIZE="${BATCH_SIZE:-16}"
 FEED_MAX_WORKERS="${FEED_MAX_WORKERS:-8}"
 START_VESPA="${START_VESPA:-0}"
+FROM_EMBEDDINGS="${FROM_EMBEDDINGS:-0}"
 
 print_command() {
   printf '+'
@@ -52,14 +54,15 @@ Options:
   --config-base-url URL   Vespa config URL
   --batch-size N          Embedding batch size
   --feed-max-workers N    Concurrent Vespa feed workers
+  --from-embeddings       Start from export-vespa using existing embedded artifact
   --start-vespa           Run docker compose up -d in vespa/
   -h, --help              Show this help
 
 Environment overrides:
-  SPECS_DIR ARTIFACTS_DIR VESPA_APP_DIR MODEL_DIR DEVICE
+  SPECS_DIR ARTIFACTS_DIR VESPA_DIR VESPA_APP_DIR MODEL_DIR DEVICE
   BASE_URL CONFIG_BASE_URL SCHEMA NAMESPACE
   CORPUS_PATH ENRICHED_PATH REGISTRY_PATH EMBEDDED_PATH VESPA_FEED_PATH
-  BATCH_SIZE FEED_MAX_WORKERS START_VESPA
+  BATCH_SIZE FEED_MAX_WORKERS START_VESPA FROM_EMBEDDINGS
 EOF
 }
 
@@ -97,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       FEED_MAX_WORKERS="$2"
       shift 2
       ;;
+    --from-embeddings)
+      FROM_EMBEDDINGS=1
+      shift
+      ;;
     --start-vespa)
       START_VESPA=1
       shift
@@ -123,35 +130,40 @@ echo "  device=$DEVICE"
 echo "  base_url=$BASE_URL"
 echo "  config_base_url=$CONFIG_BASE_URL"
 echo "  feed_max_workers=$FEED_MAX_WORKERS"
+echo "  from_embeddings=$FROM_EMBEDDINGS"
 
 if [[ "$START_VESPA" == "1" ]]; then
   echo "Starting Vespa containers"
-  run_cmd docker compose -f "$VESPA_APP_DIR/docker-compose.yml" up -d
+  run_cmd docker compose -f "$VESPA_DIR/docker-compose.yml" up -d
 fi
 
-echo "1/8 build-corpus"
-run_cmd python3 -m app.main build-corpus \
-  "$SPECS_DIR" \
-  --output "$CORPUS_PATH" \
-  --overwrite
+if [[ "$FROM_EMBEDDINGS" != "1" ]]; then
+  echo "1/8 build-corpus"
+  run_cmd python3 -m app.main build-corpus \
+    "$SPECS_DIR" \
+    --output "$CORPUS_PATH" \
+    --overwrite
 
-echo "2/8 enrich-corpus"
-run_cmd python3 -m app.main enrich-corpus \
-  --input "$CORPUS_PATH" \
-  --output "$ENRICHED_PATH"
+  echo "2/8 enrich-corpus"
+  run_cmd python3 -m app.main enrich-corpus \
+    --input "$CORPUS_PATH" \
+    --output "$ENRICHED_PATH"
 
-echo "3/8 build-query-registry"
-run_cmd python3 -m app.main build-query-registry \
-  --input "$ENRICHED_PATH" \
-  --output "$REGISTRY_PATH"
+  echo "3/8 build-query-registry"
+  run_cmd python3 -m app.main build-query-registry \
+    --input "$ENRICHED_PATH" \
+    --output "$REGISTRY_PATH"
 
-echo "4/8 build-embeddings"
-run_cmd python3 -m app.main build-embeddings \
-  --input "$ENRICHED_PATH" \
-  --output "$EMBEDDED_PATH" \
-  --local-model-dir "$MODEL_DIR" \
-  --device "$DEVICE" \
-  --batch-size "$BATCH_SIZE"
+  echo "4/8 build-embeddings"
+  run_cmd python3 -m app.main build-embeddings \
+    --input "$ENRICHED_PATH" \
+    --output "$EMBEDDED_PATH" \
+    --local-model-dir "$MODEL_DIR" \
+    --device "$DEVICE" \
+    --batch-size "$BATCH_SIZE"
+else
+  echo "Skipping 1/8-4/8 and starting from existing embedded artifact: $EMBEDDED_PATH"
+fi
 
 echo "5/8 export-vespa"
 run_cmd python3 -m app.main export-vespa \
@@ -166,8 +178,8 @@ run_cmd python3 -m app.main deploy-vespa-http \
   --schema "$SCHEMA" \
   --namespace "$NAMESPACE"
 
-echo "7/8 wait-vespa-http"
-run_cmd python3 -m app.main wait-vespa-http \
+echo "7/8 wait-for-vespa-http"
+run_cmd python3 -m app.main wait-for-vespa-http \
   --base-url "$BASE_URL" \
   --config-base-url "$CONFIG_BASE_URL" \
   --schema "$SCHEMA" \

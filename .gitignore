@@ -10,3 +10,7 @@ Specs/
 specs/
 
 **/__pycache__/
+
+**/.agents/
+**/.codex/
+**/AGENTS.md

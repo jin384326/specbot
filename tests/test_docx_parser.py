@@ -172,6 +172,7 @@ def test_passage_splitting(tmp_path: Path) -> None:
 def test_annex_heading_and_false_positive_guard() -> None:
     assert split_clause_heading("Annex A (informative) Example flows") == ("Annex A", "Example flows")
     assert split_clause_heading("5.28a.3 Topology Information for TSN TN") == ("5.28a.3", "Topology Information for TSN TN")
+    assert split_clause_heading("D.1 Topology information for transport") == ("D.1", "Topology information for transport")
     assert split_clause_heading("5G architecture") is None
 
 
@@ -245,3 +246,116 @@ def test_parser_skips_annex_and_change_history_sections(tmp_path: Path) -> None:
 
     clause_titles = [record.clause_title for record in records if record.doc_type == "clause_doc"]
     assert clause_titles == ["Scope"]
+
+
+def test_normal_annex_sentence_is_not_misparsed_as_annex_heading(tmp_path: Path) -> None:
+    source = tmp_path / "annex-false-positive.docx"
+    doc = Document()
+    cover = doc.add_table(rows=3, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 23.501 V18.12.0 (2025-12)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = "System architecture for the 5G System (5GS); Stage 2 (Release 18)"
+    doc.add_paragraph("5.27.2 Parent clause", style="Heading 3")
+    doc.add_paragraph("Body.")
+    doc.add_paragraph("5.27.2.2 Previous clause", style="Heading 4")
+    doc.add_paragraph("Body.")
+    doc.add_paragraph("Annex I describe how the traffic pattern information is determined.", style="Normal")
+    doc.add_paragraph("5.27.2.3 TSC Assistance Container determination by TSCTSF", style="Heading 4")
+    doc.add_paragraph("Body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    clause_ids = [record.clause_id for record in clause_docs]
+    assert "Annex I" not in clause_ids
+    target = next(record for record in clause_docs if record.clause_id == "5.27.2.3")
+    assert target.parent_clause_id == "5.27.2"
+    assert target.clause_path == ["5.27.2", "5.27.2.3"]
+
+
+def test_normal_numbered_sentence_is_not_misparsed_as_clause_heading(tmp_path: Path) -> None:
+    source = tmp_path / "numbered-false-positive.docx"
+    doc = Document()
+    cover = doc.add_table(rows=3, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 23.501 V18.12.0 (2025-12)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = "System architecture for the 5G System (5GS); Stage 2 (Release 18)"
+    doc.add_paragraph("5.15.18 Parent clause", style="Heading 3")
+    doc.add_paragraph("Body.")
+    doc.add_paragraph("5.15.18.2 Previous clause", style="Heading 4")
+    doc.add_paragraph("Body.")
+    doc.add_paragraph(
+        "3 If the UE has overlapping areas between non-allowed area, a cell inside the NS-AoS, then the non-allowed area restriction applies.",
+        style="Normal",
+    )
+    doc.add_paragraph(
+        "5.15.18.3 Network based monitoring and enforcement of Network Slice Area of Service not matching deployed Tracking Areas",
+        style="Heading 4",
+    )
+    doc.add_paragraph("Body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    clause_ids = [record.clause_id for record in clause_docs]
+    assert "3" not in clause_ids
+    target = next(record for record in clause_docs if record.clause_id == "5.15.18.3")
+    assert target.parent_clause_id == "5.15.18"
+    assert target.clause_path == ["5.15.18", "5.15.18.3"]
+
+
+def test_numeric_clause_after_annex_does_not_inherit_annex_in_clause_path(tmp_path: Path) -> None:
+    source = tmp_path / "annex-reset.docx"
+    doc = Document()
+    cover = doc.add_table(rows=3, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 23.501 V18.12.0 (2025-12)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = "System architecture for the 5G System (5GS); Stage 2 (Release 18)"
+    doc.add_paragraph("Annex I (informative) Extra material", style="Heading 1")
+    doc.add_paragraph("Annex content.")
+    doc.add_paragraph("5.37 Main clause after annex", style="Heading 2")
+    doc.add_paragraph("Main body.")
+    doc.add_paragraph("5.37.8 Child clause", style="Heading 3")
+    doc.add_paragraph("Child body.")
+    doc.add_paragraph("5.37.8.3 Leaf clause", style="Heading 4")
+    doc.add_paragraph("Leaf body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    leaf_clause = next(record for record in clause_docs if record.clause_id == "5.37.8.3")
+    assert leaf_clause.clause_path == ["5.37", "5.37.8", "5.37.8.3"]
+    assert leaf_clause.parent_clause_id == "5.37.8"
+
+
+def test_annex_letter_clause_is_parsed_as_clause(tmp_path: Path) -> None:
+    source = tmp_path / "annex-letter-clause.docx"
+    doc = Document()
+    cover = doc.add_table(rows=3, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 23.501 V18.12.0 (2025-12)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = "System architecture for the 5G System (5GS); Stage 2 (Release 18)"
+    doc.add_paragraph("Annex D (informative) Transport aspects", style="Heading 1")
+    doc.add_paragraph("Annex body.")
+    doc.add_paragraph("D.1 Topology information for transport", style="Heading 2")
+    doc.add_paragraph("Clause body.")
+    doc.add_paragraph("D.1.1 Transport topology details", style="Heading 3")
+    doc.add_paragraph("Nested clause body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    d1_clause = next(record for record in clause_docs if record.clause_id == "D.1")
+    d11_clause = next(record for record in clause_docs if record.clause_id == "D.1.1")
+    assert d1_clause.clause_path == ["Annex D", "D.1"]
+    assert d1_clause.parent_clause_id == "Annex D"
+    assert d11_clause.clause_path == ["Annex D", "D.1", "D.1.1"]
+    assert d11_clause.parent_clause_id == "D.1"
