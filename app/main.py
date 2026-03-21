@@ -196,6 +196,7 @@ def cmd_feed_vespa_http(args: argparse.Namespace) -> None:
         max_retries=args.max_retries,
         retry_backoff_seconds=args.retry_backoff_seconds,
         batch_size=args.batch_size,
+        max_workers=args.max_workers,
     )
     if args.failed_only:
         results["attempts"] = [item for item in results["attempts"] if not item["success"]]
@@ -597,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     feed_http_cmd.add_argument("--namespace", default="spec_finder", help="Vespa document namespace")
     feed_http_cmd.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds")
     feed_http_cmd.add_argument("--batch-size", type=int, default=100, help="Feed request batch size")
+    feed_http_cmd.add_argument("--max-workers", type=int, default=1, help="Concurrent HTTP feed workers")
     feed_http_cmd.add_argument("--max-retries", type=int, default=2, help="Retries per document for transient errors")
     feed_http_cmd.add_argument("--retry-backoff-seconds", type=float, default=0.5, help="Linear backoff base in seconds")
     feed_http_cmd.add_argument("--failed-only", action="store_true", help="Print only failed attempts")

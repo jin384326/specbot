@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from urllib import error
 from unittest.mock import patch
@@ -87,6 +89,34 @@ def test_http_adapter_retries_and_records_failure() -> None:
         assert result.succeeded == 1
         assert result.attempts[0].attempts == 2
         assert mock_http.call_count == 2
+
+
+def test_http_adapter_can_feed_documents_concurrently() -> None:
+    endpoint = VespaEndpoint(base_url="http://localhost:8080")
+    payloads = [
+        {"put": f"id:spec_finder:doc::{idx}", "fields": {"doc_id": str(idx)}}
+        for idx in range(4)
+    ]
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_http_json(**kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {"id": kwargs["url"]}
+
+    with patch("vespa.http_adapter._http_json", side_effect=fake_http_json):
+        result = feed_documents(endpoint, payloads, max_workers=4)
+
+    assert result.succeeded == 4
+    assert result.failed == 0
+    assert max_active >= 2
 
 
 def test_package_build_and_deploy_request(tmp_path: Path) -> None:

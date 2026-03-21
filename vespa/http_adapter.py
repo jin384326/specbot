@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import time
 import zipfile
@@ -141,49 +142,83 @@ def chunked(iterable: Iterable[dict[str, Any]], batch_size: int) -> Iterator[lis
         yield batch
 
 
+def feed_document(
+    endpoint: VespaEndpoint,
+    document: dict[str, Any],
+    timeout: float = 30.0,
+    max_retries: int = 2,
+    retry_backoff_seconds: float = 0.5,
+) -> VespaFeedAttempt:
+    put_value = document["put"]
+    doc_id = put_value.rsplit("::", 1)[-1]
+    url = f"{endpoint.document_endpoint}/{parse.quote(doc_id, safe='')}"
+    response, status_code, error_message, attempts = _request_with_retry(
+        url=url,
+        method="POST",
+        payload={"fields": document["fields"]},
+        timeout=timeout,
+        max_retries=max_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    if error_message:
+        return VespaFeedAttempt(
+            doc_id=doc_id,
+            success=False,
+            status_code=status_code,
+            error=error_message,
+            attempts=attempts,
+        )
+    return VespaFeedAttempt(
+        doc_id=doc_id,
+        success=True,
+        status_code=status_code,
+        response=response,
+        attempts=attempts,
+    )
+
+
 def feed_documents(
     endpoint: VespaEndpoint,
     feed_documents: Iterable[dict[str, Any]],
     timeout: float = 30.0,
     max_retries: int = 2,
     retry_backoff_seconds: float = 0.5,
+    max_workers: int = 1,
 ) -> VespaFeedSummary:
     summary = VespaFeedSummary()
-    for document in feed_documents:
-        put_value = document["put"]
-        doc_id = put_value.rsplit("::", 1)[-1]
-        url = f"{endpoint.document_endpoint}/{parse.quote(doc_id, safe='')}"
-        response, status_code, error_message, attempts = _request_with_retry(
-            url=url,
-            method="POST",
-            payload={"fields": document["fields"]},
-            timeout=timeout,
-            max_retries=max_retries,
-            retry_backoff_seconds=retry_backoff_seconds,
+    documents = list(feed_documents)
+    worker_count = max(1, min(max_workers, len(documents) or 1))
+    attempts: Iterable[VespaFeedAttempt]
+    if worker_count == 1:
+        attempts = (
+            feed_document(
+                endpoint,
+                document,
+                timeout=timeout,
+                max_retries=max_retries,
+                retry_backoff_seconds=retry_backoff_seconds,
+            )
+            for document in documents
         )
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            attempts = executor.map(
+                lambda document: feed_document(
+                    endpoint,
+                    document,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                ),
+                documents,
+            )
+    for attempt in attempts:
         summary.total += 1
-        if error_message:
+        if attempt.success:
+            summary.succeeded += 1
+        else:
             summary.failed += 1
-            summary.attempts.append(
-                VespaFeedAttempt(
-                    doc_id=doc_id,
-                    success=False,
-                    status_code=status_code,
-                    error=error_message,
-                    attempts=attempts,
-                )
-            )
-            continue
-        summary.succeeded += 1
-        summary.attempts.append(
-            VespaFeedAttempt(
-                doc_id=doc_id,
-                success=True,
-                status_code=status_code,
-                response=response,
-                attempts=attempts,
-            )
-        )
+        summary.attempts.append(attempt)
     return summary
 
 
@@ -194,6 +229,7 @@ def feed_jsonl_file(
     max_retries: int = 2,
     retry_backoff_seconds: float = 0.5,
     batch_size: int = 100,
+    max_workers: int = 1,
 ) -> dict[str, Any]:
     aggregate = VespaFeedSummary()
     for batch in chunked(iter_jsonl_documents(jsonl_path), batch_size=batch_size):
@@ -203,6 +239,7 @@ def feed_jsonl_file(
             timeout=timeout,
             max_retries=max_retries,
             retry_backoff_seconds=retry_backoff_seconds,
+            max_workers=max_workers,
         )
         aggregate.total += summary.total
         aggregate.succeeded += summary.succeeded

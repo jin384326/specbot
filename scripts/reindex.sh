@@ -21,7 +21,21 @@ EMBEDDED_PATH="${EMBEDDED_PATH:-$ARTIFACTS_DIR/spec_finder_embedded_all.jsonl}"
 VESPA_FEED_PATH="${VESPA_FEED_PATH:-$ARTIFACTS_DIR/spec_finder_vespa_embedded_all.jsonl}"
 
 BATCH_SIZE="${BATCH_SIZE:-16}"
+FEED_MAX_WORKERS="${FEED_MAX_WORKERS:-8}"
 START_VESPA="${START_VESPA:-0}"
+
+print_command() {
+  printf '+'
+  for arg in "$@"; do
+    printf ' %q' "$arg"
+  done
+  printf '\n'
+}
+
+run_cmd() {
+  print_command "$@"
+  "$@"
+}
 
 usage() {
   cat <<EOF
@@ -37,6 +51,7 @@ Options:
   --base-url URL          Vespa query/feed base URL
   --config-base-url URL   Vespa config URL
   --batch-size N          Embedding batch size
+  --feed-max-workers N    Concurrent Vespa feed workers
   --start-vespa           Run docker compose up -d in vespa/
   -h, --help              Show this help
 
@@ -44,7 +59,7 @@ Environment overrides:
   SPECS_DIR ARTIFACTS_DIR VESPA_APP_DIR MODEL_DIR DEVICE
   BASE_URL CONFIG_BASE_URL SCHEMA NAMESPACE
   CORPUS_PATH ENRICHED_PATH REGISTRY_PATH EMBEDDED_PATH VESPA_FEED_PATH
-  BATCH_SIZE START_VESPA
+  BATCH_SIZE FEED_MAX_WORKERS START_VESPA
 EOF
 }
 
@@ -78,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       BATCH_SIZE="$2"
       shift 2
       ;;
+    --feed-max-workers)
+      FEED_MAX_WORKERS="$2"
+      shift 2
+      ;;
     --start-vespa)
       START_VESPA=1
       shift
@@ -103,30 +122,31 @@ echo "  model_dir=$MODEL_DIR"
 echo "  device=$DEVICE"
 echo "  base_url=$BASE_URL"
 echo "  config_base_url=$CONFIG_BASE_URL"
+echo "  feed_max_workers=$FEED_MAX_WORKERS"
 
 if [[ "$START_VESPA" == "1" ]]; then
   echo "Starting Vespa containers"
-  docker compose -f "$VESPA_APP_DIR/docker-compose.yml" up -d
+  run_cmd docker compose -f "$VESPA_APP_DIR/docker-compose.yml" up -d
 fi
 
 echo "1/8 build-corpus"
-python3 -m app.main build-corpus \
-  --inputs "$SPECS_DIR" \
+run_cmd python3 -m app.main build-corpus \
+  "$SPECS_DIR" \
   --output "$CORPUS_PATH" \
   --overwrite
 
 echo "2/8 enrich-corpus"
-python3 -m app.main enrich-corpus \
+run_cmd python3 -m app.main enrich-corpus \
   --input "$CORPUS_PATH" \
   --output "$ENRICHED_PATH"
 
 echo "3/8 build-query-registry"
-python3 -m app.main build-query-registry \
+run_cmd python3 -m app.main build-query-registry \
   --input "$ENRICHED_PATH" \
   --output "$REGISTRY_PATH"
 
 echo "4/8 build-embeddings"
-python3 -m app.main build-embeddings \
+run_cmd python3 -m app.main build-embeddings \
   --input "$ENRICHED_PATH" \
   --output "$EMBEDDED_PATH" \
   --local-model-dir "$MODEL_DIR" \
@@ -134,12 +154,12 @@ python3 -m app.main build-embeddings \
   --batch-size "$BATCH_SIZE"
 
 echo "5/8 export-vespa"
-python3 -m app.main export-vespa \
+run_cmd python3 -m app.main export-vespa \
   --input "$EMBEDDED_PATH" \
   --output "$VESPA_FEED_PATH"
 
 echo "6/8 deploy-vespa-http"
-python3 -m app.main deploy-vespa-http \
+run_cmd python3 -m app.main deploy-vespa-http \
   --app-dir "$VESPA_APP_DIR" \
   --base-url "$BASE_URL" \
   --config-base-url "$CONFIG_BASE_URL" \
@@ -147,18 +167,19 @@ python3 -m app.main deploy-vespa-http \
   --namespace "$NAMESPACE"
 
 echo "7/8 wait-vespa-http"
-python3 -m app.main wait-vespa-http \
+run_cmd python3 -m app.main wait-vespa-http \
   --base-url "$BASE_URL" \
   --config-base-url "$CONFIG_BASE_URL" \
   --schema "$SCHEMA" \
   --namespace "$NAMESPACE"
 
 echo "8/8 feed-vespa-http"
-python3 -m app.main feed-vespa-http \
+run_cmd python3 -m app.main feed-vespa-http \
   --input "$VESPA_FEED_PATH" \
   --base-url "$BASE_URL" \
   --config-base-url "$CONFIG_BASE_URL" \
   --schema "$SCHEMA" \
-  --namespace "$NAMESPACE"
+  --namespace "$NAMESPACE" \
+  --max-workers "$FEED_MAX_WORKERS"
 
 echo "Reindex complete."

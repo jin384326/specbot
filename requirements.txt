@@ -5,6 +5,9 @@
 #   후 나머지 패키지를 설치하거나, bitsandbytes는 GPU 4bit 로딩에만 필요해 생략 가능합니다.
 #
 # 설치: pip install -r requirements.txt
+#
+# 참고: legacy Word `.doc` 자동 변환은 pip 패키지가 아니라 시스템 `libreoffice`/`soffice`
+# 가 필요합니다. Ubuntu/Debian 예시: `sudo apt-get install libreoffice`
 
 python-docx>=1.1.0
 huggingface-hub>=0.24.0
