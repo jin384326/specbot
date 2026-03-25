@@ -10,6 +10,8 @@
 # 가 필요합니다. Ubuntu/Debian 예시: `sudo apt-get install libreoffice`
 
 python-docx>=1.1.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
 huggingface-hub>=0.24.0
 torch>=2.2.0
 transformers>=4.45.0
