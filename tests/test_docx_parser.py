@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 
 from parser.docx_clause_parser import (
     DocxClauseParser,
@@ -193,6 +194,26 @@ def test_parser_keeps_mixed_alphanumeric_clause_ids(tmp_path: Path) -> None:
     clause_docs = [record for record in records if record.doc_type == "clause_doc"]
     assert [record.clause_id for record in clause_docs] == ["5.28a.3"]
     assert clause_docs[0].clause_title == "Topology Information for TSN TN"
+
+
+def test_parser_treats_h6_style_as_heading_but_not_b1(tmp_path: Path) -> None:
+    source = tmp_path / "h6-clause.docx"
+    doc = Document()
+    doc.styles.add_style("B1", WD_STYLE_TYPE.PARAGRAPH)
+    doc.styles.add_style("H6", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("4.11.0a Impacts to EPS Procedures", style="Heading 3")
+    doc.add_paragraph("4.11.0a.2 Interaction with PCC", style="Heading 4")
+    doc.add_paragraph("4.11.0a.2.1 Nested H6 clause", style="H6")
+    doc.add_paragraph("Nested body.")
+    doc.add_paragraph("8a to 8c. This is body text only.", style="B1")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23502"))
+
+    clause_ids = [record.clause_id for record in records if record.doc_type == "clause_doc"]
+    assert "4.11.0a.2.1" in clause_ids
+    assert "8a" not in clause_ids
 
 
 def test_spec_title_and_release_data_are_inferred_from_docx_and_path(tmp_path: Path) -> None:

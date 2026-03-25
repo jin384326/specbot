@@ -12,6 +12,7 @@ from docx.text.paragraph import Paragraph
 from docx.oxml.simpletypes import ST_Merge
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
+from docx.oxml.ns import qn
 
 from parser.models import ClauseDoc, DocRecord, PassageDoc, TableDoc, TableRowDoc
 
@@ -21,6 +22,8 @@ CLAUSE_PATTERN = re.compile(
 ANNEX_PATTERN = re.compile(r"^(?P<clause>Annex\s+[A-Z])(?:\s*\([^)]+\))?\s+(?P<title>.+)$")
 SPEC_REF_PATTERN = re.compile(r"\b(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}|\d{5})\b")
 STAGE_PATTERN = re.compile(r"\b(Stage\s+\d+)\b", re.IGNORECASE)
+CLAUSE_HEADING_STYLE_PATTERN = re.compile(r"^(?:heading|head)\s*(\d+)?(?:\s+char)?$", re.IGNORECASE)
+SHORT_HEADING_STYLE_PATTERN = re.compile(r"^h(\d+)$", re.IGNORECASE)
 
 
 @dataclass
@@ -239,8 +242,29 @@ def dedupe_duplicate_cell_texts_preserve_order(
 
 
 def paragraph_style_level(style_name: str) -> int | None:
-    match = re.match(r"Heading\s+(\d+)$", style_name or "")
-    return int(match.group(1)) if match else None
+    match = CLAUSE_HEADING_STYLE_PATTERN.match(style_name or "")
+    if match:
+        return int(match.group(1) or "1")
+    short_match = SHORT_HEADING_STYLE_PATTERN.match((style_name or "").strip())
+    if short_match:
+        return int(short_match.group(1))
+    return None
+
+
+def paragraph_outline_level(paragraph: Paragraph) -> int | None:
+    p_pr = getattr(paragraph._p, "pPr", None)
+    if p_pr is None:
+        return None
+    outline = p_pr.find(qn("w:outlineLvl"))
+    if outline is None:
+        return None
+    value = outline.get(qn("w:val"))
+    if value is None:
+        return None
+    try:
+        return int(value) + 1
+    except (TypeError, ValueError):
+        return None
 
 
 def split_clause_heading(text: str) -> tuple[str, str] | None:
@@ -258,6 +282,7 @@ def split_clause_heading(text: str) -> tuple[str, str] | None:
 
 
 def should_treat_paragraph_as_heading(
+    style_name: str,
     text: str,
     heading_level: int | None,
     heading: tuple[str, str] | None,
@@ -266,12 +291,19 @@ def should_treat_paragraph_as_heading(
         return True
     if heading is None:
         return False
+    if not is_clause_heading_style(style_name):
+        return False
     clause_id, _clause_title = heading
     if clause_id.startswith("Annex "):
         return False
     if text.endswith("."):
         return False
     return True
+
+
+def is_clause_heading_style(style_name: str) -> bool:
+    normalized = (style_name or "").strip()
+    return CLAUSE_HEADING_STYLE_PATTERN.match(normalized) is not None or SHORT_HEADING_STYLE_PATTERN.match(normalized) is not None
 
 
 def is_probable_clause_id(clause_id: str) -> bool:
@@ -457,9 +489,9 @@ class DocxClauseParser:
                 if not text or style_name.lower().startswith("toc"):
                     continue
 
-                heading_level = paragraph_style_level(style_name)
+                heading_level = paragraph_style_level(style_name) or paragraph_outline_level(block)
                 heading = split_clause_heading(text)
-                if not should_treat_paragraph_as_heading(text, heading_level, heading):
+                if not should_treat_paragraph_as_heading(style_name, text, heading_level, heading):
                     heading = None
                 if heading_level is not None or heading is not None:
                     if active_clause is not None:

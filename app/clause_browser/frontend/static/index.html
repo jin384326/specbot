@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clause Browser</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Specbot</p>
+          <h1>Clause Browser</h1>
+        </div>
+        <div class="topbar-actions">
+          <button id="open-picker-button" class="primary">문서 탐색</button>
+          <label class="field query-field">
+            <span>SpecBot Query</span>
+            <input id="specbot-query" type="search" placeholder="예: End to End Redundant Paths" />
+          </label>
+          <button id="run-specbot-query">
+            <span id="specbot-spinner" class="spinner hidden" aria-hidden="true"></span>
+            <span id="run-specbot-label">수행</span>
+          </button>
+          <button id="open-specbot-settings" class="ghost">설정</button>
+          <label class="field compact">
+            <span>DOCX 제목</span>
+            <input id="export-title" type="text" placeholder="예: Session management subset" />
+          </label>
+          <button id="export-button" class="primary">DOCX 저장</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="panel left-panel">
+          <section class="panel-section">
+            <div class="section-heading">
+              <h2>문서 탐색</h2>
+            </div>
+            <div id="picker-selection-summary" class="picker-selection-summary muted">문서를 먼저 선택하세요.</div>
+          </section>
+          <section class="panel-section selected-panel">
+            <div class="section-heading">
+              <h2>선택한 절</h2>
+              <span id="selected-clause-count" class="muted">0</span>
+            </div>
+            <div id="selected-clause-list" class="selected-clause-list"></div>
+          </section>
+        </aside>
+
+        <section class="panel center-panel">
+          <div class="panel-header">
+            <div>
+              <h2>현재 로드된 절</h2>
+              <p class="muted">절 단위 추가/제거, 접기/펼치기, 텍스트 선택 후 LLM 액션</p>
+            </div>
+            <div id="loaded-summary" class="pill">0 clauses</div>
+          </div>
+          <div id="message-bar" class="message-bar" aria-live="polite"></div>
+          <div id="tree-container" class="tree-container"></div>
+        </section>
+
+        <aside class="panel right-panel">
+          <section class="panel-section">
+            <div class="section-heading">
+              <h2>SpecBot 결과</h2>
+              <button id="clear-specbot-results" class="ghost">Clear</button>
+            </div>
+            <div id="specbot-result-list" class="result-list"></div>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-heading">
+              <h2>선택 텍스트</h2>
+            </div>
+            <div id="selection-meta" class="muted">텍스트를 드래그하면 여기에서 LLM 액션을 실행할 수 있습니다.</div>
+            <textarea id="selected-text" readonly placeholder="선택된 텍스트가 여기에 표시됩니다."></textarea>
+            <div class="inline-fields">
+              <label class="field compact">
+                <span>Action</span>
+                <select id="action-type"></select>
+              </label>
+              <label class="field compact">
+                <span>Source</span>
+                <select id="source-language"></select>
+              </label>
+              <label class="field compact">
+                <span>Target</span>
+                <select id="target-language"></select>
+              </label>
+            </div>
+            <button id="run-action-button">선택 텍스트 실행</button>
+          </section>
+
+          <section class="panel-section results-section">
+            <div class="section-heading">
+              <h2>LLM 결과</h2>
+            </div>
+            <div id="result-list" class="result-list"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div id="selection-menu" class="selection-menu hidden">
+      <button data-target-language="ko">Translate to KO</button>
+      <button data-target-language="en">Translate to EN</button>
+    </div>
+
+    <div id="node-menu" class="selection-menu hidden node-menu">
+      <button id="node-menu-add-parent" data-action="add-parent-clause">상위 절 추가</button>
+    </div>
+
+    <div id="clause-picker-modal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-action="close-picker"></div>
+      <div class="modal-card">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">Clause Finder</p>
+            <h2 id="picker-title">문서 검색</h2>
+          </div>
+          <button class="ghost" data-action="close-picker">닫기</button>
+        </header>
+
+        <div class="modal-layout">
+          <section class="picker-panel">
+            <div class="section-heading">
+              <h3>문서 선택</h3>
+              <span id="document-count" class="muted"></span>
+            </div>
+            <label class="field">
+              <span>문서 검색</span>
+              <input id="document-search" type="search" placeholder="spec no 또는 제목 검색" />
+            </label>
+            <div id="document-list" class="list-stack"></div>
+          </section>
+
+          <section class="picker-panel picker-main">
+            <div class="section-heading">
+              <h3>절 트리</h3>
+              <span id="active-document-label" class="muted">문서를 선택하세요</span>
+            </div>
+            <label class="field">
+              <span>절 검색</span>
+              <input id="clause-search" type="search" placeholder="예: 1.2, mobility" disabled />
+            </label>
+            <div id="clause-tree-list" class="clause-tree-list"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div id="specbot-settings-modal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-action="close-specbot-settings"></div>
+      <div class="modal-card settings-card">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">SpecBot</p>
+            <h2>Query Settings</h2>
+          </div>
+          <button class="ghost" data-action="close-specbot-settings">닫기</button>
+        </header>
+        <div class="settings-grid">
+          <label class="field"><span>Base URL</span><input id="setting-base-url" type="text" /></label>
+          <label class="field"><span>Config Base URL</span><input id="setting-config-base-url" type="text" /></label>
+          <label class="field"><span>Limit</span><input id="setting-limit" type="number" min="1" /></label>
+          <label class="field"><span>Iterations</span><input id="setting-iterations" type="number" min="1" /></label>
+          <label class="field"><span>Next Iteration Limit</span><input id="setting-next-iteration-limit" type="number" min="1" /></label>
+          <label class="field"><span>Summary</span><input id="setting-summary" type="text" /></label>
+          <label class="field"><span>Registry</span><input id="setting-registry" type="text" /></label>
+          <label class="field"><span>Local Model Dir</span><input id="setting-local-model-dir" type="text" /></label>
+          <label class="field"><span>Device</span><input id="setting-device" type="text" /></label>
+          <label class="field"><span>Sparse Boost</span><input id="setting-sparse-boost" type="number" step="0.1" /></label>
+          <label class="field"><span>Vector Boost</span><input id="setting-vector-boost" type="number" step="0.1" /></label>
+        </div>
+        <div class="modal-footer">
+          <button id="save-specbot-settings" class="primary">저장</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>
