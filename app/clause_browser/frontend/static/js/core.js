@@ -34,7 +34,7 @@ const state = {
 };
 
 const elements = {};
-const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v6";
+const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v7";
 const TRANSLATION_CHUNK_LIMIT = 12000;
 const SPECBOT_QUERY_BUSY_LABEL = "SpecBot query 수행 중입니다.";
 const DOCUMENT_SEARCH_BUSY_LABEL = "문서 검색 중입니다.";
@@ -645,18 +645,44 @@ function renderBlocks(node) {
 }
 
 function renderParagraphBlock(node, block, index) {
-  const paragraphClass = getParagraphClass(block.text || "");
+  const paragraphClass = getParagraphClass(block.text || "", block);
+  const paragraphStyle = getParagraphInlineStyle(block);
   const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
   const selectionNotesHtml = renderSelectionNotes(node.key, index);
   return `
     <div class="paragraph-block">
       <div class="paragraph-note-row">
-        <p class="${paragraphClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(block.text || "")}</p>
+        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(block.text || "")}</p>
         ${selectionToggleHtml}
       </div>
       ${selectionNotesHtml}
     </div>
   `;
+}
+
+function getParagraphInlineStyle(block) {
+  const format = block?.format || {};
+  const text = String(block?.text || "").trim();
+  const styles = [];
+  if (Number.isFinite(Number(format.leftIndentPx)) && Number(format.leftIndentPx) !== 0) {
+    styles.push(`margin-left:${Number(format.leftIndentPx)}px`);
+  }
+  const shouldUseHangingIndent =
+    /^NOTE\s*:/i.test(text) ||
+    /^(EXAMPLE|Examples?)\s*:/i.test(text) ||
+    /^(WARNING|CAUTION)\s*:/i.test(text) ||
+    /^(?:[-*•]|[A-Za-z]\)|\d+[A-Za-z]+\)|\d+\)|\d+[A-Za-z]+\.\s+|\d+\.\s+)/.test(text);
+  if (
+    shouldUseHangingIndent &&
+    Number.isFinite(Number(format.textIndentPx)) &&
+    Number(format.textIndentPx) !== 0
+  ) {
+    styles.push(`text-indent:${Number(format.textIndentPx)}px`);
+  }
+  if (!shouldUseHangingIndent) {
+    styles.push("padding-left:0");
+  }
+  return styles.join("; ");
 }
 
 function renderClauseNotes(clauseKey) {
@@ -1094,25 +1120,31 @@ function isCaptionParagraph(text) {
   return /^(Figure|Table)\s+[A-Za-z0-9.\-]+:/.test(String(text).trim());
 }
 
-function getParagraphClass(text) {
+function hasDocxParagraphFormat(block) {
+  const format = block?.format || {};
+  return Number.isFinite(Number(format.leftIndentPx)) || Number.isFinite(Number(format.textIndentPx));
+}
+
+function getParagraphClass(text, block = null) {
   const value = String(text).trim();
+  const fallbackClass = hasDocxParagraphFormat(block) ? "" : " docx-fallback";
   if (isCaptionParagraph(value)) {
     return "tree-text docx-paragraph docx-caption";
   }
   if (/^NOTE\s*:/i.test(value)) {
-    return "tree-text docx-paragraph docx-note";
+    return `tree-text docx-paragraph docx-note${fallbackClass}`;
   }
   if (/^(EXAMPLE|Examples?)\s*:/i.test(value)) {
-    return "tree-text docx-paragraph docx-example";
+    return `tree-text docx-paragraph docx-example${fallbackClass}`;
   }
   if (/^(WARNING|CAUTION)\s*:/i.test(value)) {
-    return "tree-text docx-paragraph docx-warning";
+    return `tree-text docx-paragraph docx-warning${fallbackClass}`;
   }
   if (/^(Annex|APPENDIX)\b/i.test(value)) {
     return "tree-text docx-paragraph docx-annex";
   }
-  if (/^(?:[-*•]|[A-Za-z]\)|\d+\)|\d+\.)\s+/.test(value)) {
-    return "tree-text docx-paragraph docx-list";
+  if (/^(?:[-*•]|[A-Za-z]\)|\d+[A-Za-z]+\)|\d+\)|\d+[A-Za-z]+\.\s+|\d+\.\s+)/.test(value)) {
+    return `tree-text docx-paragraph docx-list${fallbackClass}`;
   }
   return "tree-text docx-paragraph";
 }
@@ -1210,6 +1242,11 @@ async function runSelectionAction(targetLanguage = "ko") {
   if (!text) {
     endBusy();
     setMessage("번역할 텍스트를 먼저 선택하세요.", true);
+    return;
+  }
+  if (String(text).length > TRANSLATION_CHUNK_LIMIT) {
+    endBusy();
+    setMessage(`선택 메모는 ${TRANSLATION_CHUNK_LIMIT}자 이하만 번역할 수 있습니다. 범위를 줄여 주세요.`, true);
     return;
   }
   try {
@@ -1328,9 +1365,7 @@ function splitTranslationText(text, limit = TRANSLATION_CHUNK_LIMIT) {
         currentParts = [];
         currentLength = 0;
       }
-      for (let start = 0; start < paragraph.length; start += limit) {
-        chunks.push(paragraph.slice(start, start + limit).trim());
-      }
+      chunks.push(paragraph);
       return;
     }
 

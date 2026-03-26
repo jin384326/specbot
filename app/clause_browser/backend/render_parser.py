@@ -124,7 +124,11 @@ class RichDocxClauseParser:
 
                 paragraph_counter += 1
                 if text:
-                    active_clause.blocks.append({"type": "paragraph", "text": text})
+                    paragraph_block = {"type": "paragraph", "text": text}
+                    paragraph_format = self._extract_paragraph_format(block)
+                    if paragraph_format:
+                        paragraph_block["format"] = paragraph_format
+                    active_clause.blocks.append(paragraph_block)
                 for image_block in self._extract_paragraph_images(block, spec_no, active_clause.clause_id):
                     active_clause.blocks.append(image_block)
 
@@ -247,6 +251,47 @@ class RichDocxClauseParser:
                 }
             )
         return image_blocks
+
+    @staticmethod
+    def _extract_paragraph_format(paragraph: Paragraph) -> dict[str, int]:
+        direct_format = paragraph.paragraph_format
+        style_format = getattr(paragraph.style, "paragraph_format", None)
+
+        left_indent_pt = RichDocxClauseParser._get_length_points(
+            direct_format.left_indent,
+            getattr(style_format, "left_indent", None),
+        )
+        first_line_indent_pt = RichDocxClauseParser._get_length_points(
+            direct_format.first_line_indent,
+            getattr(style_format, "first_line_indent", None),
+        )
+
+        left_indent_px = RichDocxClauseParser._points_to_pixels(left_indent_pt)
+        text_indent_px = RichDocxClauseParser._points_to_pixels(first_line_indent_pt)
+
+        payload: dict[str, int] = {}
+        if left_indent_px:
+            payload["leftIndentPx"] = left_indent_px
+        if text_indent_px:
+            payload["textIndentPx"] = text_indent_px
+        return payload
+
+    @staticmethod
+    def _get_length_points(*values: Any) -> float:
+        for value in values:
+            if value is None:
+                continue
+            try:
+                return float(value.pt)
+            except AttributeError:
+                continue
+        return 0.0
+
+    @staticmethod
+    def _points_to_pixels(value: float) -> int:
+        if not value:
+            return 0
+        return int(round(value * 96 / 72))
 
     @staticmethod
     def _build_table_block(table: Table, matrix: list[list[str]]) -> dict[str, Any]:

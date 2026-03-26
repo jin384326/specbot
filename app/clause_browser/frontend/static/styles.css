@@ -708,24 +708,33 @@ button:disabled {
 }
 
 .docx-note {
+}
+
+.docx-fallback.docx-note {
   margin-left: 20px;
   padding-left: 2px;
   text-indent: -20px;
 }
 
 .docx-example {
-  margin-left: 20px;
-  padding-left: 2px;
-  text-indent: -20px;
   color: #314431;
 }
 
-.docx-warning {
+.docx-fallback.docx-example {
   margin-left: 20px;
   padding-left: 2px;
   text-indent: -20px;
+}
+
+.docx-warning {
   color: #6a4428;
   font-weight: 600;
+}
+
+.docx-fallback.docx-warning {
+  margin-left: 20px;
+  padding-left: 2px;
+  text-indent: -20px;
 }
 
 .docx-annex {
@@ -734,7 +743,7 @@ button:disabled {
   letter-spacing: 0.01em;
 }
 
-.docx-list {
+.docx-fallback.docx-list {
   margin-left: 24px;
   padding-left: 2px;
   text-indent: -16px;

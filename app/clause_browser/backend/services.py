@@ -220,10 +220,7 @@ class LLMActionService:
                     chunks.append("\n\n".join(current_parts))
                     current_parts = []
                     current_length = 0
-                start = 0
-                while start < len(paragraph):
-                    chunks.append(paragraph[start:start + limit].strip())
-                    start += limit
+                chunks.append(paragraph)
                 continue
 
             separator = 2 if current_parts else 0

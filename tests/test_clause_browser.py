@@ -9,13 +9,20 @@ from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from app.clause_browser.api import ExportRequest, LLMActionRequest, SpecbotQueryRequest
 from app.clause_browser.preprocess import build_clause_browser_corpus
 from app.clause_browser.server import ClauseBrowserSettings, create_app
-from app.clause_browser.services import DocxExportService, SpecbotQueryDefaults, SpecbotQueryService, sanitize_file_stem
+from app.clause_browser.services import (
+    DocxExportService,
+    LLMActionService,
+    SpecbotQueryDefaults,
+    SpecbotQueryService,
+    sanitize_file_stem,
+)
 from app.specbot_query_server import PersistentSpecbotQueryEngine
 
 
@@ -171,6 +178,19 @@ def write_docx_with_merged_table(tmp_path: Path) -> Path:
     return path
 
 
+def write_docx_with_indented_paragraph(tmp_path: Path) -> Path:
+    doc = Document()
+    doc.add_paragraph("5 Session management", style="Heading 1")
+    paragraph = doc.add_paragraph(
+        "1a. (UE initiated modification) The UE initiates the PDU Session Modification procedure."
+    )
+    paragraph.paragraph_format.left_indent = Pt(18)
+    paragraph.paragraph_format.first_line_indent = Pt(-18)
+    path = tmp_path / "23501-indented-paragraph.docx"
+    doc.save(path)
+    return path
+
+
 def build_app(tmp_path: Path):
     write_docx_files(tmp_path)
     export_dir = tmp_path / "exports"
@@ -238,6 +258,18 @@ def test_documents_endpoint_lists_specs(tmp_path: Path) -> None:
     payload = endpoint()
     assert payload["success"] is True
     assert [item["specNo"] for item in payload["data"]["items"]] == ["23501", "23502", "24501"]
+
+
+def test_translation_split_preserves_paragraph_boundaries() -> None:
+    first = "A" * 7000
+    second = "B" * 6990
+    text = f"{first}\n\n{second}"
+
+    chunks = LLMActionService._split_translation_text(text, limit=12000)
+
+    assert len(chunks) == 2
+    assert chunks[0] == first
+    assert chunks[1] == second
 
 
 def test_documents_endpoint_can_filter_by_clause_and_body_text_before_document_selection(tmp_path: Path) -> None:
@@ -422,6 +454,38 @@ def test_subtree_endpoint_preserves_table_rowspan_metadata(tmp_path: Path) -> No
     assert table_block["cells"][1][0]["text"] == "Session Will be merged away"
     assert table_block["cells"][1][0]["rowspan"] == 2
     assert table_block["cells"][1][0]["colspan"] == 1
+
+
+def test_subtree_endpoint_returns_paragraph_indent_metadata(tmp_path: Path) -> None:
+    source_path = write_docx_with_indented_paragraph(tmp_path)
+    browser_corpus_path = tmp_path / "browser-corpus.jsonl"
+
+    build_clause_browser_corpus(
+        inputs=[str(source_path)],
+        output_path=browser_corpus_path,
+        media_dir=tmp_path / "media",
+    )
+
+    app = create_app(
+        ClauseBrowserSettings(
+            project_root=tmp_path,
+            corpus_path=browser_corpus_path,
+            export_dir=tmp_path / "exports",
+            media_dir=tmp_path / "media",
+            cors_origins=(),
+            llm_provider="mock",
+            llm_model="mock-model",
+            languages=(("ko", "Korean"), ("en", "English")),
+            specbot_query_api_url="http://127.0.0.1:8010",
+        )
+    )
+    endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses/{clause_id:path}/subtree")
+
+    payload = endpoint("23501", "5")["data"]
+    paragraph_block = next(block for block in payload["blocks"] if block["type"] == "paragraph")
+
+    assert paragraph_block["format"]["leftIndentPx"] == 24
+    assert paragraph_block["format"]["textIndentPx"] == -24
 
 
 def test_docx_export_endpoint_saves_file(tmp_path: Path) -> None:
