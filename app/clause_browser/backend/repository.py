@@ -23,8 +23,9 @@ class ClauseRepository:
     def corpus_path(self) -> Path:
         return self._corpus_path
 
-    def list_documents(self, query: str = "", limit: int = 50) -> list[DocumentSummary]:
+    def list_documents(self, query: str = "", clause_query: str = "", limit: int = 50) -> list[DocumentSummary]:
         normalized = query.strip().casefold()
+        normalized_clause = clause_query.strip().casefold()
         summaries = self._document_summaries
         if normalized:
             summaries = [
@@ -33,6 +34,12 @@ class ClauseRepository:
                 if normalized in item.spec_no.casefold()
                 or normalized in item.spec_title.casefold()
                 or normalized in item.source_file.casefold()
+            ]
+        if normalized_clause:
+            summaries = [
+                item
+                for item in summaries
+                if self._document_matches_clause_query(item.spec_no, normalized_clause)
             ]
         return summaries[:limit]
 
@@ -59,9 +66,7 @@ class ClauseRepository:
             candidates = [
                 item
                 for item in candidates
-                if normalized in item.clause_id.casefold()
-                or normalized in item.clause_title.casefold()
-                or normalized in item.text.casefold()
+                if normalized in self._record_search_text(item)
             ]
         elif not include_all:
             candidates = [item for item in candidates if not item.parent_clause_id or item.parent_clause_id not in records]
@@ -77,6 +82,7 @@ class ClauseRepository:
                 child_count=len(self._children_by_spec[item.spec_no].get(item.clause_id, [])),
                 descendant_count=self._descendant_counts[(item.spec_no, item.clause_id)],
                 text_preview=self._preview(item.text),
+                search_text=self._record_search_text(item),
             )
             for item in candidates[:limit]
         ]
@@ -182,6 +188,40 @@ class ClauseRepository:
         for child_id in self._children_by_spec[spec_no].get(clause_id, []):
             total += 1 + self._count_descendants(spec_no, child_id)
         return total
+
+    def _document_matches_clause_query(self, spec_no: str, normalized_query: str) -> bool:
+        for record in self._records_by_spec.get(spec_no, {}).values():
+            haystack = self._record_search_text(record)
+            if normalized_query in haystack:
+                return True
+        return False
+
+    def _record_search_text(self, record: ClauseRecord) -> str:
+        block_parts: list[str] = []
+        for block in record.blocks or ():
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "paragraph":
+                block_parts.append(str(block.get("text") or ""))
+                continue
+            if block_type == "table":
+                for row in block.get("rows") or []:
+                    if isinstance(row, list):
+                        block_parts.extend(str(cell or "") for cell in row)
+                continue
+            if block_type == "image":
+                block_parts.append(str(block.get("caption") or ""))
+                block_parts.append(str(block.get("alt") or ""))
+        return " ".join(
+            [
+                record.clause_id,
+                record.clause_title,
+                record.text,
+                " ".join(record.clause_path),
+                " ".join(part for part in block_parts if part),
+            ]
+        ).casefold()
 
     def _build_tree(self, record: ClauseRecord) -> ClauseTreeNode:
         child_ids = self._children_by_spec[record.spec_no].get(record.clause_id, [])

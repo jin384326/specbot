@@ -31,7 +31,7 @@ const state = {
 };
 
 const elements = {};
-const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v2";
+const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v3";
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -125,7 +125,8 @@ async function loadConfig() {
 
 async function refreshDocuments() {
   const query = encodeURIComponent(elements.documentSearch.value.trim());
-  const response = await apiGet(`/api/clause-browser/documents?query=${query}`);
+  const clauseQuery = encodeURIComponent((elements.clauseSearch?.value || "").trim());
+  const response = await apiGet(`/api/clause-browser/documents?query=${query}&clauseQuery=${clauseQuery}`);
   state.documents = response.data.items;
   renderDocuments();
   if (state.ui.isSpecbotSettingsOpen) {
@@ -222,27 +223,30 @@ function renderDocuments() {
     .map((item) => {
       const activeClass = state.activeSpecNo === item.specNo ? "active" : "";
       return `
-        <article class="list-card ${activeClass}" data-spec-no="${escapeHtml(item.specNo)}">
+        <article class="list-card document-card ${activeClass}" data-spec-no="${escapeHtml(item.specNo)}" tabindex="0" role="button" aria-label="${escapeHtml(item.specNo)} 문서 선택">
           <h3>${escapeHtml(item.specNo)} <span class="muted">${escapeHtml(item.specTitle || "")}</span></h3>
           <div class="muted">${item.clauseCount} clauses · ${item.topLevelClauseCount} top-level</div>
-          <button class="ghost" data-action="select-document" data-spec-no="${escapeHtml(item.specNo)}">이 문서 선택</button>
         </article>
       `;
     })
     .join("");
 
-  elements.documentList.querySelectorAll("[data-action='select-document']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await selectDocument(button.dataset.specNo);
+  elements.documentList.querySelectorAll(".document-card").forEach((card) => {
+    card.addEventListener("click", async () => {
+      await selectDocument(card.dataset.specNo);
+    });
+    card.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      await selectDocument(card.dataset.specNo);
     });
   });
 }
 
 async function selectDocument(specNo) {
   state.activeSpecNo = specNo;
-  state.ui.clauseQuery = "";
-  elements.clauseSearch.value = "";
-  elements.clauseSearch.disabled = false;
   elements.activeDocumentLabel.textContent = specNo;
   elements.pickerTitle.textContent = `${specNo} 문서 검색`;
   persistSessionState();
@@ -292,7 +296,10 @@ async function ensureClauseCatalog(specNo) {
 
 function renderClauseTree() {
   if (!state.activeSpecNo) {
-    elements.clauseTreeList.innerHTML = '<div class="muted">먼저 왼쪽 버튼으로 문서를 검색하고 선택하세요.</div>';
+    elements.clauseTreeList.innerHTML =
+      state.ui.clauseQuery
+        ? '<div class="muted">현재 검색어와 일치하는 문서를 왼쪽에서 선택하세요. 절 번호, 절 제목, 본문으로 문서를 먼저 추릴 수 있습니다.</div>'
+        : '<div class="muted">먼저 왼쪽에서 문서를 선택하세요. 절 검색은 문서 선택 전에도 절 번호, 절 제목, 본문 기준으로 문서를 좁히는 데 사용할 수 있습니다.</div>';
     return;
   }
 
@@ -351,7 +358,9 @@ function branchMatchesQuery(clauseId, catalog, query) {
   if (!item) {
     return false;
   }
-  const haystack = [item.clauseId, item.clauseTitle, item.textPreview || "", (item.clausePath || []).join(" ")].join(" ").toLowerCase();
+  const haystack = [item.searchText || "", item.clauseId, item.clauseTitle, item.textPreview || "", (item.clausePath || []).join(" ")]
+    .join(" ")
+    .toLowerCase();
   if (haystack.includes(query)) {
     return true;
   }
@@ -360,7 +369,9 @@ function branchMatchesQuery(clauseId, catalog, query) {
 
 function updateClauseTreeSummary(visibleRootCount = null) {
   if (!state.activeSpecNo) {
-    elements.pickerSelectionSummary.textContent = "문서를 먼저 선택하세요.";
+    elements.pickerSelectionSummary.textContent = state.ui.clauseQuery
+      ? `절/본문 검색어 "${state.ui.clauseQuery}" 로 문서를 먼저 추리는 중입니다.`
+      : "문서를 먼저 선택하세요. 절 검색으로 문서를 먼저 좁힐 수도 있습니다.";
     return;
   }
   elements.pickerSelectionSummary.textContent =
@@ -403,9 +414,9 @@ async function loadClauseWithSpec(specNo, clauseId) {
     expandAll(subtree);
     state.loadedRoots = mergeLoadedRoot(state.loadedRoots, subtree);
     pruneSpecbotResultsByCurrentExclusions();
+    state.ui.focusedKey = subtree.key;
     persistSessionState();
     closePicker();
-    focusNode(subtree.key);
     renderLoadedTree();
     renderSelectedClauseList();
     renderClauseTree();

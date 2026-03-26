@@ -5,7 +5,7 @@ from retrieval.relevance_signals import RelevanceSignals
 
 DEFAULT_SIGNAL_WEIGHTS = {
     "clause_title_exact_match": 4.8,
-    "clause_title_match": 2.4,
+    "clause_title_match": 1.8,
     "ie_name_match": 2.2,
     "message_name_match": 2.2,
     "procedure_name_match": 1.8,

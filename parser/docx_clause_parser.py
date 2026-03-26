@@ -45,6 +45,7 @@ class SpecMetadata:
 class ClauseBuffer:
     clause_id: str
     clause_title: str
+    raw_clause_title: str
     clause_path: list[str]
     parent_clause_id: str
     level: int
@@ -512,10 +513,12 @@ class DocxClauseParser:
         passage_char_limit: int = 1200,
         passage_paragraph_limit: int = 4,
         min_passage_chars: int = 350,
+        prefix_direct_child_title_from_empty_parent: bool = False,
     ) -> None:
         self.passage_char_limit = passage_char_limit
         self.passage_paragraph_limit = passage_paragraph_limit
         self.min_passage_chars = min_passage_chars
+        self.prefix_direct_child_title_from_empty_parent = prefix_direct_child_title_from_empty_parent
 
     def parse(self, docx_path: str | Path, metadata: SpecMetadata | dict[str, Any] | None = None) -> list[DocRecord]:
         path = Path(docx_path)
@@ -555,17 +558,28 @@ class DocxClauseParser:
                         records.extend(self._emit_clause_records(active_clause, spec_metadata))
                     clause_counter += 1
                     paragraph_counter += 1
-                    clause_id, clause_title, level = self._resolve_heading(text, heading_level, heading, clause_counter)
+                    clause_id, raw_clause_title, level = self._resolve_heading(text, heading_level, heading, clause_counter)
+                    clause_title = raw_clause_title
                     if clause_id and clause_id[0].isdigit():
                         while clause_stack and clause_stack[-1].clause_id.startswith("Annex "):
                             clause_stack.pop()
                     while clause_stack and clause_stack[-1].level >= level:
                         clause_stack.pop()
+                    parent_clause = clause_stack[-1] if clause_stack else None
+                    if (
+                        self.prefix_direct_child_title_from_empty_parent
+                        and
+                        parent_clause is not None
+                        and level == parent_clause.level + 1
+                        and not any(normalize_whitespace(paragraph) for paragraph in parent_clause.paragraphs)
+                    ):
+                        clause_title = f"{parent_clause.raw_clause_title} : {clause_title}"
                     clause_path = [*clause_stack[-1].clause_path, clause_id] if clause_stack else [clause_id]
                     parent_clause_id = clause_stack[-1].clause_id if clause_stack else ""
                     active_clause = ClauseBuffer(
                         clause_id=clause_id,
                         clause_title=clause_title,
+                        raw_clause_title=raw_clause_title,
                         clause_path=clause_path,
                         parent_clause_id=parent_clause_id,
                         level=level,
@@ -583,6 +597,7 @@ class DocxClauseParser:
                     active_clause = ClauseBuffer(
                         clause_id=fallback_id,
                         clause_title="Front matter",
+                        raw_clause_title="Front matter",
                         clause_path=[fallback_id],
                         parent_clause_id="",
                         level=1,

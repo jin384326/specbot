@@ -98,8 +98,15 @@ def create_router(
         )
 
     @router.get("/documents")
-    def list_documents(query: str = "", limit: int = 50) -> dict[str, Any]:
-        return success({"items": [item.to_dict() for item in repository.list_documents(query=query, limit=limit)]})
+    def list_documents(query: str = "", clauseQuery: str = "", limit: int = 50) -> dict[str, Any]:
+        return success(
+            {
+                "items": [
+                    item.to_dict()
+                    for item in repository.list_documents(query=query, clause_query=clauseQuery, limit=limit)
+                ]
+            }
+        )
 
     @router.get("/documents/{spec_no}/clauses")
     def list_clauses(spec_no: str, query: str = "", limit: int = 100, includeAll: bool = False) -> dict[str, Any]:

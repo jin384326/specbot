@@ -115,6 +115,14 @@ h2 {
   overflow: hidden;
 }
 
+.right-panel {
+  position: sticky;
+  top: 16px;
+  align-self: start;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
 .left-panel > .panel-section:first-child {
   flex: 0 0 auto;
 }
@@ -239,11 +247,21 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .list-card.active {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.document-card:hover,
+.document-card:focus-visible {
+  border-color: rgba(31, 107, 88, 0.45);
+  box-shadow: 0 10px 24px rgba(31, 42, 31, 0.08);
+  transform: translateY(-1px);
+  outline: none;
 }
 
 .list-card h3 {

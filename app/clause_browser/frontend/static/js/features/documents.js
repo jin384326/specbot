@@ -7,6 +7,7 @@ export function bindDocumentsFeature() {
     "input",
     debounce(() => {
       state.ui.clauseQuery = elements.clauseSearch.value.trim();
+      refreshDocuments();
       renderClauseTree();
     }, 180)
   );

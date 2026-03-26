@@ -12,6 +12,7 @@ from huggingface_hub import snapshot_download
 from enrich.build_anchor_candidates import build_anchor_candidates
 from enrich.enrich_metadata import enrich_corpus, load_jsonl
 from parser.corpus_builder import build_corpus
+from parser.docx_clause_parser import DocxClauseParser
 from retrieval.pipeline import InMemoryBackend, RetrievalPipeline
 from retrieval.centered_multi_hop_pipeline import CenteredMultiHopRetrievalPipeline
 from retrieval.llm_selector import HeuristicSelectionLLM, OpenAISelectionLLM
@@ -100,6 +101,7 @@ def cmd_build_corpus(args: argparse.Namespace) -> None:
         args.output,
         metadata_by_source=metadata,
         append=not args.overwrite,
+        parser=DocxClauseParser(prefix_direct_child_title_from_empty_parent=True),
     )
     print(f"Wrote {count} corpus records to {args.output}")
 
@@ -568,6 +570,7 @@ def cmd_build_full_corpus_pipeline(args: argparse.Namespace) -> None:
             corpus_output,
             metadata_by_source=metadata,
             append=False,
+            parser=DocxClauseParser(prefix_direct_child_title_from_empty_parent=True),
         )
     }
     summary["enrich_corpus"] = {"count": enrich_corpus(corpus_output, enriched_output, taxonomy_path=args.taxonomy)}

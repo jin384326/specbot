@@ -83,6 +83,7 @@ class ClauseSummary:
     child_count: int
     descendant_count: int
     text_preview: str
+    search_text: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -95,4 +96,5 @@ class ClauseSummary:
             "childCount": self.child_count,
             "descendantCount": self.descendant_count,
             "textPreview": self.text_preview,
+            "searchText": self.search_text,
         }

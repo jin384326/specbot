@@ -68,6 +68,27 @@ def write_corpus(path: Path) -> None:
             "source_file": str(path.parent / "24501.docx"),
             "order_in_source": 1,
         },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2 (Release 18)",
+            "clause_id": "4.2.2.2",
+            "clause_title": "PDU session establishment",
+            "parent_clause_id": "",
+            "clause_path": ["4.2.2.2"],
+            "text": "",
+            "source_file": str(path.parent / "23502.docx"),
+            "order_in_source": 1,
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        ["Field", "Description"],
+                        ["redundantPduSessionInfo", "Contains RSN and PDU Session Pair ID"],
+                    ],
+                }
+            ],
+        },
     ]
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -158,6 +179,35 @@ def build_app(tmp_path: Path):
         output_path=browser_corpus_path,
         media_dir=tmp_path / "media",
     )
+    with browser_corpus_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "doc_type": "clause_doc",
+                    "content_kind": "clause",
+                    "doc_id": "23502:clause:4.2.2.2",
+                    "spec_no": "23502",
+                    "spec_title": "Procedures for the 5G System (5GS); Stage 2 (Release 18)",
+                    "clause_id": "4.2.2.2",
+                    "clause_title": "PDU session establishment",
+                    "parent_clause_id": "",
+                    "clause_path": ["4.2.2.2"],
+                    "text": "",
+                    "source_file": str(tmp_path / "23502.docx"),
+                    "order_in_source": 1,
+                    "blocks": [
+                        {
+                            "type": "table",
+                            "rows": [
+                                ["Field", "Description"],
+                                ["redundantPduSessionInfo", "Contains RSN and PDU Session Pair ID"],
+                            ],
+                        }
+                    ],
+                }
+            )
+            + "\n"
+        )
     return create_app(
         ClauseBrowserSettings(
             project_root=tmp_path,
@@ -186,7 +236,38 @@ def test_documents_endpoint_lists_specs(tmp_path: Path) -> None:
 
     payload = endpoint()
     assert payload["success"] is True
-    assert [item["specNo"] for item in payload["data"]["items"]] == ["23501", "24501"]
+    assert [item["specNo"] for item in payload["data"]["items"]] == ["23501", "23502", "24501"]
+
+
+def test_documents_endpoint_can_filter_by_clause_and_body_text_before_document_selection(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    endpoint = get_endpoint(app, "/api/clause-browser/documents")
+
+    by_clause_title = endpoint("", "request handling")["data"]["items"]
+    assert [item["specNo"] for item in by_clause_title] == ["23501"]
+
+    by_body_text = endpoint("", "another document")["data"]["items"]
+    assert [item["specNo"] for item in by_body_text] == ["24501"]
+
+    by_table_text = endpoint("", "RSN")["data"]["items"]
+    assert [item["specNo"] for item in by_table_text] == ["23502"]
+
+
+def test_clause_list_search_matches_clause_body_text(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses")
+
+    payload = endpoint("23501", "request handling details", 100)["data"]["items"]
+    assert [item["clauseId"] for item in payload] == ["5.1.1"]
+
+
+def test_clause_list_search_matches_table_block_text(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses")
+
+    payload = endpoint("23502", "RSN", 100)["data"]["items"]
+    assert [item["clauseId"] for item in payload] == ["4.2.2.2"]
+    assert "rsn" in payload[0]["searchText"]
 
 
 def test_synthesized_ancestor_clause_is_searchable(tmp_path: Path) -> None:

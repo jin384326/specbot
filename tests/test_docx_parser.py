@@ -233,6 +233,7 @@ def test_parser_restores_relative_heading_numbers_from_parent_prefix(tmp_path: P
     clause_docs = [record for record in records if record.doc_type == "clause_doc"]
     clause_ids = [record.clause_id for record in clause_docs]
     assert clause_ids == ["7.2.14.1", "7.2.14.2"]
+    assert clause_docs[0].clause_title == "Modify Bearer Command"
     assert clause_docs[-1].clause_title == "Modify Bearer Failure Indication"
 
 
@@ -264,6 +265,84 @@ def test_parser_restores_missing_numeric_heading_from_previous_sibling(tmp_path:
     assert "7.4.4" in clause_ids
     restored = next(record for record in clause_docs if record.clause_id == "7.4.4")
     assert restored.clause_title == "Resume Acknowledge"
+
+
+def test_parser_prefixes_immediate_child_title_when_parent_has_no_body(tmp_path: Path) -> None:
+    source = tmp_path / "heading-only.docx"
+    doc = Document()
+    doc.add_paragraph("5.37.8 UE power saving management", style="Heading 3")
+    doc.add_paragraph("5.37.8.1 General", style="Heading 4")
+    doc.add_paragraph("General body.")
+    doc.save(source)
+
+    parser = DocxClauseParser(prefix_direct_child_title_from_empty_parent=True)
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    child = next(record for record in clause_docs if record.clause_id == "5.37.8.1")
+
+    assert all(record.clause_id != "5.37.8" for record in clause_docs)
+    assert child.clause_title == "UE power saving management : General"
+    assert child.text == "General body."
+
+
+def test_parser_does_not_prefix_grandchild_title_from_heading_only_grandparent(tmp_path: Path) -> None:
+    source = tmp_path / "heading-only-grandchild.docx"
+    doc = Document()
+    doc.add_paragraph("5.37.8 UE power saving management", style="Heading 3")
+    doc.add_paragraph("5.37.8.1 General", style="Heading 4")
+    doc.add_paragraph("General body.")
+    doc.add_paragraph("5.37.8.1.1 Details", style="Heading 5")
+    doc.add_paragraph("Details body.")
+    doc.save(source)
+
+    parser = DocxClauseParser(prefix_direct_child_title_from_empty_parent=True)
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    child = next(record for record in clause_docs if record.clause_id == "5.37.8.1")
+    grandchild = next(record for record in clause_docs if record.clause_id == "5.37.8.1.1")
+
+    assert child.clause_title == "UE power saving management : General"
+    assert grandchild.clause_title == "Details"
+
+
+def test_parser_default_keeps_browser_titles_without_parent_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "browser-title.docx"
+    doc = Document()
+    doc.add_paragraph("5.37.8 UE power saving management", style="Heading 3")
+    doc.add_paragraph("5.37.8.1 General", style="Heading 4")
+    doc.add_paragraph("General body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    child = next(record for record in clause_docs if record.clause_id == "5.37.8.1")
+
+    assert all(record.clause_id != "5.37.8" for record in clause_docs)
+    assert child.clause_title == "General"
+
+
+def test_parser_prefix_uses_immediate_parent_title_without_accumulating_ancestor_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "nested-empty-parents.docx"
+    doc = Document()
+    doc.add_paragraph("5.37 High level features", style="Heading 2")
+    doc.add_paragraph("5.37.8 UE power saving management", style="Heading 3")
+    doc.add_paragraph("5.37.8.1 General", style="Heading 4")
+    doc.add_paragraph("General body.")
+    doc.save(source)
+
+    parser = DocxClauseParser(prefix_direct_child_title_from_empty_parent=True)
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    child = next(record for record in clause_docs if record.clause_id == "5.37.8.1")
+
+    assert child.clause_title == "UE power saving management : General"
+
+
 
 
 def test_spec_title_and_release_data_are_inferred_from_docx_and_path(tmp_path: Path) -> None:
