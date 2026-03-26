@@ -581,6 +581,18 @@ button:disabled {
   gap: 8px;
 }
 
+.table-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.table-note-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -8px;
+  margin-bottom: 6px;
+}
+
 .clause-note-list {
   display: flex;
   flex-direction: column;

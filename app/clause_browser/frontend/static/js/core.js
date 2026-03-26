@@ -573,52 +573,7 @@ function renderBlocks(node) {
         return renderParagraphBlock(node, block, index);
       }
       if (block.type === "table") {
-        const cellRows = block.cells || [];
-        const rows = block.rows || [];
-        const tableBody =
-          cellRows.length
-            ? cellRows
-                .map(
-                  (row) => `
-                    <tr>
-                      ${row
-                        .map((cell) => {
-                          const tag = cell.header ? "th" : "td";
-                          const rowspan = Number(cell.rowspan || 1) > 1 ? ` rowspan="${Number(cell.rowspan || 1)}"` : "";
-                          const colspan = Number(cell.colspan || 1) > 1 ? ` colspan="${Number(cell.colspan || 1)}"` : "";
-                          return `<${tag} class="tree-text" data-clause-key="${escapeHtml(node.key)}"${rowspan}${colspan}>${escapeHtml(
-                            cell.text || ""
-                          )}</${tag}>`;
-                        })
-                        .join("")}
-                    </tr>
-                  `
-                )
-                .join("")
-            : rows
-                .map(
-                  (row, rowIndex) => `
-                    <tr>
-                      ${row
-                        .map((cell) =>
-                          rowIndex === 0
-                            ? `<th class="tree-text" data-clause-key="${escapeHtml(node.key)}">${escapeHtml(cell || "")}</th>`
-                            : `<td class="tree-text" data-clause-key="${escapeHtml(node.key)}">${escapeHtml(cell || "")}</td>`
-                        )
-                        .join("")}
-                    </tr>
-                  `
-                )
-                .join("");
-        return `
-          <div class="docx-table-wrap" data-clause-key="${escapeHtml(node.key)}">
-            <table class="docx-table">
-              <tbody>
-                ${tableBody}
-              </tbody>
-            </table>
-          </div>
-        `;
+        return renderTableBlock(node, block, index);
       }
       if (block.type === "image") {
         const src = block.src || "";
@@ -642,6 +597,64 @@ function renderBlocks(node) {
       return "";
     })
     .join("");
+}
+
+function renderTableBlock(node, block, index) {
+  const cellRows = block.cells || [];
+  const rows = block.rows || [];
+  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
+  const selectionNotesHtml = renderSelectionNotes(node.key, index);
+  const tableBody =
+    cellRows.length
+      ? cellRows
+          .map(
+            (row) => `
+              <tr>
+                ${row
+                  .map((cell) => {
+                    const tag = cell.header ? "th" : "td";
+                    const rowspan = Number(cell.rowspan || 1) > 1 ? ` rowspan="${Number(cell.rowspan || 1)}"` : "";
+                    const colspan = Number(cell.colspan || 1) > 1 ? ` colspan="${Number(cell.colspan || 1)}"` : "";
+                    return `<${tag} class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}"${rowspan}${colspan}>${escapeHtml(
+                      cell.text || ""
+                    )}</${tag}>`;
+                  })
+                  .join("")}
+              </tr>
+            `
+          )
+          .join("")
+      : rows
+          .map(
+            (row, rowIndex) => `
+              <tr>
+                ${row
+                  .map((cell) =>
+                    rowIndex === 0
+                      ? `<th class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(cell || "")}</th>`
+                      : `<td class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(cell || "")}</td>`
+                  )
+                  .join("")}
+              </tr>
+            `
+          )
+          .join("");
+
+  return `
+    <div class="table-block">
+      <div class="docx-table-wrap" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
+        <table class="docx-table">
+          <tbody>
+            ${tableBody}
+          </tbody>
+        </table>
+      </div>
+      <div class="table-note-row">
+        ${selectionToggleHtml}
+      </div>
+      ${selectionNotesHtml}
+    </div>
+  `;
 }
 
 function renderParagraphBlock(node, block, index) {
