@@ -11,6 +11,7 @@ const state = {
     focusedKey: "",
     viewportKey: "",
     collapsedSpecs: new Set(),
+    collapsedLoadedSpecs: new Set(),
     message: null,
     clauseQuery: "",
     specbotQueryText: "",
@@ -489,9 +490,33 @@ function renderLoadedTree() {
     persistSessionState();
     return;
   }
-  elements.treeContainer.innerHTML = sortedRoots.map((node) => renderNode(node)).join("");
+  const grouped = groupRootsBySpec(sortedRoots);
+  elements.treeContainer.innerHTML = Object.entries(grouped)
+    .map(([specNo, nodes]) => renderLoadedSpecGroup(specNo, nodes))
+    .join("");
   bindTreeEvents();
   syncViewportSelection();
+}
+
+function renderLoadedSpecGroup(specNo, nodes) {
+  const collapsed = state.ui.collapsedLoadedSpecs.has(specNo);
+  const clauseCount = countNodes(nodes);
+  return `
+    <section class="tree-spec-group">
+      <article class="tree-node tree-spec-root">
+        <div class="tree-header tree-spec-header">
+          <div class="tree-title">
+            <button data-action="toggle-loaded-spec" data-spec-no="${escapeHtml(specNo)}">${collapsed ? "+" : "−"}</button>
+            <div class="tree-title-text">
+              <h3>${escapeHtml(specNo)}</h3>
+              <div class="tree-meta">${clauseCount} clauses loaded</div>
+            </div>
+          </div>
+        </div>
+        ${collapsed ? "" : `<div class="tree-body tree-spec-body"><div class="tree-spec-children">${nodes.map((node) => renderNode(node)).join("")}</div></div>`}
+      </article>
+    </section>
+  `;
 }
 
 function renderNode(node) {
@@ -499,14 +524,16 @@ function renderNode(node) {
   const focusedClass = state.ui.focusedKey === node.key ? "focused" : "";
   const notesHtml = renderClauseNotes(node.key);
   const clauseNoteToggleHtml = renderClauseNoteToggle(node.key);
+  const hasBlocks = Boolean((node.blocks || []).length);
+  const hasChildren = Boolean((node.children || []).length);
   const childrenHtml =
-    expanded && (node.children || []).length
+    expanded && hasChildren
       ? `<div class="tree-children">${node.children.map((child) => renderNode(child)).join("")}</div>`
       : "";
   const bodyHtml = expanded
     ? `
-      <div class="tree-body">
-        ${renderBlocks(node)}
+      <div class="tree-body ${hasBlocks ? "" : "tree-body-compact"}">
+        ${hasBlocks ? renderBlocks(node) : ""}
         ${childrenHtml}
       </div>
     `
@@ -824,6 +851,21 @@ function bindTreeEvents() {
         expandedKeys.add(key);
       }
       state.ui.expandedKeys = expandedKeys;
+      persistSessionState();
+      renderLoadedTree();
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='toggle-loaded-spec']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const specNo = button.dataset.specNo || "";
+      const collapsed = new Set(state.ui.collapsedLoadedSpecs);
+      if (collapsed.has(specNo)) {
+        collapsed.delete(specNo);
+      } else {
+        collapsed.add(specNo);
+      }
+      state.ui.collapsedLoadedSpecs = collapsed;
       persistSessionState();
       renderLoadedTree();
     });
@@ -2138,6 +2180,7 @@ function persistSessionState() {
     focusedKey: state.ui.focusedKey,
     viewportKey: state.ui.viewportKey,
     collapsedSpecs: [...state.ui.collapsedSpecs],
+    collapsedLoadedSpecs: [...state.ui.collapsedLoadedSpecs],
     clauseQuery: state.ui.clauseQuery,
     specbotQueryText: state.ui.specbotQueryText || "",
     specbotSettings: state.ui.specbotSettings,
@@ -2164,6 +2207,9 @@ function restoreSessionState() {
     state.ui.focusedKey = payload.focusedKey || "";
     state.ui.viewportKey = payload.viewportKey || "";
     state.ui.collapsedSpecs = new Set(Array.isArray(payload.collapsedSpecs) ? payload.collapsedSpecs : []);
+    state.ui.collapsedLoadedSpecs = new Set(
+      Array.isArray(payload.collapsedLoadedSpecs) ? payload.collapsedLoadedSpecs : []
+    );
     state.ui.clauseQuery = payload.clauseQuery || "";
     state.ui.specbotQueryText = payload.specbotQueryText || "";
     state.ui.notes = Array.isArray(payload.notes) ? payload.notes : [];

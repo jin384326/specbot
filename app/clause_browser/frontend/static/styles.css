@@ -123,10 +123,6 @@ h2 {
   overflow: hidden;
 }
 
-.left-panel > .panel-section:first-child {
-  flex: 0 0 auto;
-}
-
 .center-panel {
   display: flex;
   flex-direction: column;
@@ -252,6 +248,28 @@ button:disabled {
   gap: 10px;
   min-height: 0;
   overflow: auto;
+}
+
+.tree-spec-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tree-spec-root {
+  background: white;
+}
+
+.tree-spec-header {
+  padding: 2px 0;
+}
+
+.tree-spec-children {
+  margin-left: 12px;
+  padding-left: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .list-card,
@@ -564,6 +582,16 @@ button:disabled {
   padding-top: 14px;
 }
 
+.tree-body.tree-body-compact {
+  margin-top: 6px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.tree-spec-body {
+  margin-top: 8px;
+}
+
 .tree-text {
   margin: 0;
   line-height: 1.66;
@@ -813,9 +841,8 @@ button:disabled {
 
 .tree-children {
   margin-top: 16px;
-  margin-left: 18px;
-  border-left: 2px solid #e0e8dc;
-  padding-left: 14px;
+  margin-left: 12px;
+  padding-left: 8px;
   display: flex;
   flex-direction: column;
   gap: 12px;
