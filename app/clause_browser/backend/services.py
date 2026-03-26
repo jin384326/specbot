@@ -197,6 +197,7 @@ class SpecbotQueryDefaults:
     limit: int = 4
     iterations: int = 2
     next_iteration_limit: int = 2
+    followup_mode: str = "sentence-summary"
     summary: str = "short"
     registry: str = "./artifacts/spec_query_registry.json"
     local_model_dir: str = "models/Qwen3-Embedding-0.6B"
@@ -211,6 +212,7 @@ class SpecbotQueryDefaults:
             "limit": self.limit,
             "iterations": self.iterations,
             "nextIterationLimit": self.next_iteration_limit,
+            "followupMode": self.followup_mode,
             "summary": self.summary,
             "registry": self.registry,
             "localModelDir": self.local_model_dir,
@@ -229,7 +231,13 @@ class SpecbotQueryService:
     def defaults(self) -> SpecbotQueryDefaults:
         return self._defaults
 
-    def run(self, query: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        query: str,
+        settings: dict[str, Any] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clauses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         cleaned_query = query.strip()
         if not cleaned_query:
             raise ValueError("Query is required.")
@@ -264,6 +272,7 @@ class SpecbotQueryService:
         merged["limit"] = max(1, int(merged["limit"]))
         merged["iterations"] = max(1, int(merged["iterations"]))
         merged["nextIterationLimit"] = max(1, int(merged["nextIterationLimit"]))
+        merged["followupMode"] = str(merged.get("followupMode") or self._defaults.followup_mode).strip() or self._defaults.followup_mode
         merged["sparseBoost"] = float(merged["sparseBoost"])
         merged["vectorBoost"] = float(merged["vectorBoost"])
         return merged
@@ -284,6 +293,8 @@ class SpecbotQueryService:
             str(settings["iterations"]),
             "--next-iteration-limit",
             str(settings["nextIterationLimit"]),
+            "--followup-mode",
+            str(settings["followupMode"]),
             "--summary",
             str(settings["summary"]),
             "--registry",
@@ -338,6 +349,7 @@ class SpecbotQueryService:
                 f'--limit {settings["limit"]}',
                 f'--iterations {settings["iterations"]}',
                 f'--next-iteration-limit {settings["nextIterationLimit"]}',
+                f'--followup-mode {settings["followupMode"]}',
                 f'--summary {settings["summary"]}',
                 f'--registry {settings["registry"]}',
                 f'--local-model-dir {settings["localModelDir"]}',
@@ -358,11 +370,19 @@ class SpecbotQueryHttpService:
     def defaults(self) -> SpecbotQueryDefaults:
         return self._defaults
 
-    def run(self, query: str, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        query: str,
+        settings: dict[str, Any] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clauses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         payload = json.dumps(
             {
                 "query": query,
                 "settings": settings or self._defaults.to_dict(),
+                "excludeSpecs": exclude_specs or [],
+                "excludeClauses": exclude_clauses or [],
             },
             ensure_ascii=True,
         ).encode("utf-8")

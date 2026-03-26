@@ -19,11 +19,13 @@ from parser.models import ClauseDoc, DocRecord, PassageDoc, TableDoc, TableRowDo
 CLAUSE_PATTERN = re.compile(
     r"^(?P<clause>(?:\d+(?:[A-Za-z])?(?:\.\d+(?:[A-Za-z])?)*)|(?:[A-Z](?:\.\d+(?:[A-Za-z])?)+))\s+(?P<title>.+)$"
 )
+RELATIVE_CLAUSE_PATTERN = re.compile(r"^\.(?P<clause>\d+(?:[A-Za-z])?(?:\.\d+(?:[A-Za-z])?)*)\s+(?P<title>.+)$")
 ANNEX_PATTERN = re.compile(r"^(?P<clause>Annex\s+[A-Z])(?:\s*\([^)]+\))?\s+(?P<title>.+)$")
 SPEC_REF_PATTERN = re.compile(r"\b(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}|\d{5})\b")
 STAGE_PATTERN = re.compile(r"\b(Stage\s+\d+)\b", re.IGNORECASE)
 CLAUSE_HEADING_STYLE_PATTERN = re.compile(r"^(?:heading|head)\s*(\d+)?(?:\s+char)?$", re.IGNORECASE)
 SHORT_HEADING_STYLE_PATTERN = re.compile(r"^h(\d+)$", re.IGNORECASE)
+TOC_PAGE_SUFFIX_PATTERN = re.compile(r"^(?P<body>.*\S)\s+\d+$")
 
 
 @dataclass
@@ -50,6 +52,14 @@ class ClauseBuffer:
     paragraph_indices: list[int] = field(default_factory=list)
     order_in_source: int = 0
     excluded: bool = False
+
+
+@dataclass(frozen=True)
+class TocHeading:
+    clause_id: str
+    clause_title: str
+    level: int
+    parent_clause_id: str
 
 
 def iter_block_items(parent: DocxDocument | _Cell) -> Iterator[Paragraph | Table]:
@@ -281,6 +291,17 @@ def split_clause_heading(text: str) -> tuple[str, str] | None:
     return clause_id, match.group("title")
 
 
+def split_relative_clause_heading(text: str) -> tuple[str, str] | None:
+    normalized = normalize_whitespace(text)
+    match = RELATIVE_CLAUSE_PATTERN.match(normalized)
+    if not match:
+        return None
+    clause_id = match.group("clause")
+    if not is_probable_clause_id(clause_id):
+        return None
+    return clause_id, match.group("title")
+
+
 def should_treat_paragraph_as_heading(
     style_name: str,
     text: str,
@@ -422,6 +443,33 @@ def is_excluded_clause(clause_id: str, clause_title: str) -> bool:
     return clause_id.startswith("Annex ") or "change history" in normalized_title
 
 
+def collect_toc_headings(document: DocxDocument) -> list[TocHeading]:
+    toc_headings: list[TocHeading] = []
+    for paragraph in document.paragraphs:
+        style_name = paragraph.style.name if paragraph.style else ""
+        if not style_name.lower().startswith("toc"):
+            continue
+        toc_text = normalize_whitespace(paragraph.text)
+        toc_match = TOC_PAGE_SUFFIX_PATTERN.match(toc_text)
+        if toc_match:
+            toc_text = toc_match.group("body")
+        heading = split_clause_heading(toc_text)
+        if not heading:
+            continue
+        clause_id, clause_title = heading
+        level = clause_id.count(".") + 1 if not clause_id.startswith("Annex ") else 1
+        parent_clause_id = clause_id.rsplit(".", 1)[0] if "." in clause_id else ""
+        toc_headings.append(
+            TocHeading(
+                clause_id=clause_id,
+                clause_title=clause_title,
+                level=level,
+                parent_clause_id=parent_clause_id,
+            )
+        )
+    return toc_headings
+
+
 def infer_spec_title(document: DocxDocument) -> str:
     core_title = normalize_whitespace(document.core_properties.title or "")
     if document.tables:
@@ -473,6 +521,7 @@ class DocxClauseParser:
         path = Path(docx_path)
         document = Document(str(path))
         spec_metadata = self._coerce_metadata(path, metadata, document)
+        toc_headings = collect_toc_headings(document)
         records: list[DocRecord] = []
         clause_stack: list[ClauseBuffer] = []
         active_clause: ClauseBuffer | None = None
@@ -491,6 +540,14 @@ class DocxClauseParser:
 
                 heading_level = paragraph_style_level(style_name) or paragraph_outline_level(block)
                 heading = split_clause_heading(text)
+                if heading is None and heading_level is not None:
+                    relative_heading = split_relative_clause_heading(text)
+                    if relative_heading is not None:
+                        heading = self._resolve_relative_heading(relative_heading, heading_level, clause_stack)
+                if heading is None and heading_level is not None and text:
+                    heading = self._resolve_toc_heading(text, heading_level, clause_stack, toc_headings)
+                if heading is None and heading_level is not None and text:
+                    heading = self._resolve_implicit_heading(text, heading_level, clause_stack)
                 if not should_treat_paragraph_as_heading(style_name, text, heading_level, heading):
                     heading = None
                 if heading_level is not None or heading is not None:
@@ -641,6 +698,66 @@ class DocxClauseParser:
         clause_title = text
         level = heading_level or 1
         return clause_id, clause_title, level
+
+    @staticmethod
+    def _resolve_relative_heading(
+        heading: tuple[str, str],
+        heading_level: int,
+        clause_stack: list[ClauseBuffer],
+    ) -> tuple[str, str] | None:
+        if heading_level <= 1:
+            return None
+        parent = next((item for item in reversed(clause_stack) if item.level < heading_level), None)
+        if parent is None:
+            return None
+        relative_clause_id, clause_title = heading
+        return f"{parent.clause_id}.{relative_clause_id}", clause_title
+
+    @staticmethod
+    def _resolve_toc_heading(
+        text: str,
+        heading_level: int,
+        clause_stack: list[ClauseBuffer],
+        toc_headings: list[TocHeading],
+    ) -> tuple[str, str] | None:
+        normalized_text = normalize_whitespace(text)
+        if not normalized_text:
+            return None
+        parent = next((item for item in reversed(clause_stack) if item.level < heading_level), None)
+        parent_clause_id = parent.clause_id if parent else ""
+        candidates = [
+            item
+            for item in toc_headings
+            if item.level == heading_level and normalize_whitespace(item.clause_title) == normalized_text
+        ]
+        if not candidates:
+            return None
+        if parent_clause_id:
+            parent_candidates = [item for item in candidates if item.parent_clause_id == parent_clause_id]
+            if parent_candidates:
+                candidates = parent_candidates
+        if len(candidates) == 1:
+            return candidates[0].clause_id, normalized_text
+        return None
+
+    @staticmethod
+    def _resolve_implicit_heading(
+        text: str,
+        heading_level: int,
+        clause_stack: list[ClauseBuffer],
+    ) -> tuple[str, str] | None:
+        if heading_level <= 1 or not clause_stack:
+            return None
+        parent = next((item for item in reversed(clause_stack) if item.level < heading_level), None)
+        previous_same_level = next((item for item in reversed(clause_stack) if item.level == heading_level), None)
+        if parent is None or previous_same_level is None:
+            return None
+        if previous_same_level.parent_clause_id != parent.clause_id:
+            return None
+        last_segment = previous_same_level.clause_id.split(".")[-1]
+        if not last_segment.isdigit():
+            return None
+        return f"{parent.clause_id}.{int(last_segment) + 1}", text
 
     def _common_fields(
         self,

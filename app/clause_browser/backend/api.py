@@ -62,9 +62,16 @@ class SpecbotSettingsPayload(BaseModel):
     vectorBoost: float = Field(default=1.0, ge=0.0, le=10.0)
 
 
+class ClauseExclusionPayload(BaseModel):
+    specNo: str = Field(min_length=1, max_length=32)
+    clauseId: str = Field(min_length=1, max_length=128)
+
+
 class SpecbotQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     settings: SpecbotSettingsPayload | None = None
+    excludeSpecs: list[str] = Field(default_factory=list)
+    excludeClauses: list[ClauseExclusionPayload] = Field(default_factory=list)
 
 
 def create_router(
@@ -151,6 +158,8 @@ def create_router(
             result = specbot_service.run(
                 query=request.query,
                 settings=request.settings.model_dump(mode="json") if request.settings else None,
+                exclude_specs=request.excludeSpecs,
+                exclude_clauses=[item.model_dump(mode="json") for item in request.excludeClauses],
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

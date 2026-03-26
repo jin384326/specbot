@@ -23,6 +23,7 @@ class SpecbotSettingsPayload(BaseModel):
     limit: int = Field(default=4, ge=1, le=20)
     iterations: int = Field(default=2, ge=1, le=10)
     nextIterationLimit: int = Field(default=2, ge=1, le=20)
+    followupMode: str = Field(default="sentence-summary", pattern="^(keyword|sentence-summary)$")
     summary: str = Field(default="short", min_length=1, max_length=50)
     registry: str = Field(min_length=1, max_length=500)
     localModelDir: str = Field(min_length=1, max_length=500)
@@ -31,9 +32,16 @@ class SpecbotSettingsPayload(BaseModel):
     vectorBoost: float = Field(default=1.0, ge=0.0, le=10.0)
 
 
+class ClauseExclusionPayload(BaseModel):
+    specNo: str = Field(min_length=1, max_length=32)
+    clauseId: str = Field(min_length=1, max_length=128)
+
+
 class SpecbotQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
     settings: SpecbotSettingsPayload | None = None
+    excludeSpecs: list[str] = Field(default_factory=list)
+    excludeClauses: list[ClauseExclusionPayload] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -57,7 +65,7 @@ class PersistentSpecbotQueryEngine:
         self._judge = ChatOpenAIRelevanceJudge(
             model=settings.openai_model,
             timeout=int(settings.timeout_seconds),
-            extraction_mode="keyword",
+            extraction_mode="sentence-summary",
         )
         self._registry_cache: dict[str, QueryFeatureRegistry] = {}
         self._embedding_cache: dict[tuple[str, str, str], Any] = {}
@@ -66,7 +74,13 @@ class PersistentSpecbotQueryEngine:
     def defaults(self) -> SpecbotQueryDefaults:
         return self._settings.defaults
 
-    def run(self, query: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        query: str,
+        overrides: dict[str, Any] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clauses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         effective = self._merge_settings(overrides or {})
         registry = self._get_registry(str(effective["registry"]))
         embedding_provider = self._get_embedding_provider(
@@ -95,16 +109,22 @@ class PersistentSpecbotQueryEngine:
             retry_backoff_seconds=0.5,
         )
         retriever = IterativeLLMRetriever(backend=backend, evaluator=self._judge)
+        self._judge.extraction_mode = str(effective.get("followupMode") or "sentence-summary")
         result = retriever.run(
             query,
             limit=int(effective["limit"]),
             iterations=int(effective["iterations"]),
             next_iteration_limit=int(effective["nextIterationLimit"]),
         )
+        filtered_hits = self._apply_exclusions(
+            self._extract_hits(result),
+            exclude_specs=exclude_specs or [],
+            exclude_clauses=exclude_clauses or [],
+        )
         return {
             "query": query,
             "settings": effective,
-            "hits": self._extract_hits(result),
+            "hits": filtered_hits,
             "rawResult": result,
         }
 
@@ -160,6 +180,31 @@ class PersistentSpecbotQueryEngine:
             )
         return hits
 
+    @staticmethod
+    def _apply_exclusions(
+        hits: list[dict[str, Any]],
+        *,
+        exclude_specs: list[str],
+        exclude_clauses: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        excluded_specs = {str(item).strip() for item in exclude_specs if str(item).strip()}
+        excluded_clause_pairs = {
+            (str(item.get("specNo") or "").strip(), str(item.get("clauseId") or "").strip())
+            for item in exclude_clauses
+            if str(item.get("specNo") or "").strip() and str(item.get("clauseId") or "").strip()
+        }
+        return [
+            hit
+            for hit in hits
+            if str(hit.get("clauseId") or "").strip()
+            and str(hit.get("specNo") or "").strip() not in excluded_specs
+            and (
+                str(hit.get("specNo") or "").strip(),
+                str(hit.get("clauseId") or "").strip(),
+            )
+            not in excluded_clause_pairs
+        ]
+
 
 def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
     active_settings = settings or load_settings()
@@ -180,6 +225,8 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
             return engine.run(
                 query=request.query.strip(),
                 overrides=request.settings.model_dump(mode="json") if request.settings else None,
+                exclude_specs=request.excludeSpecs,
+                exclude_clauses=[item.model_dump(mode="json") for item in request.excludeClauses],
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

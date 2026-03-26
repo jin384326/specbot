@@ -74,12 +74,22 @@ function bindElements() {
   elements.settingLimit = document.getElementById("setting-limit");
   elements.settingIterations = document.getElementById("setting-iterations");
   elements.settingNextIterationLimit = document.getElementById("setting-next-iteration-limit");
+  elements.settingFollowupMode = document.getElementById("setting-followup-mode");
   elements.settingSummary = document.getElementById("setting-summary");
   elements.settingRegistry = document.getElementById("setting-registry");
   elements.settingLocalModelDir = document.getElementById("setting-local-model-dir");
   elements.settingDevice = document.getElementById("setting-device");
   elements.settingSparseBoost = document.getElementById("setting-sparse-boost");
   elements.settingVectorBoost = document.getElementById("setting-vector-boost");
+  elements.settingDocumentSelectionCount = document.getElementById("setting-document-selection-count");
+  elements.settingSelectAllDocuments = document.getElementById("setting-select-all-documents");
+  elements.settingClearAllDocuments = document.getElementById("setting-clear-all-documents");
+  elements.settingDocumentList = document.getElementById("setting-document-list");
+  elements.settingRejectedClauseList = document.getElementById("setting-rejected-clause-list");
+  elements.settingClearRejectedClauses = document.getElementById("setting-clear-rejected-clauses");
+  elements.settingAutoExcludeLoaded = document.getElementById("setting-auto-exclude-loaded");
+  elements.settingExcludeSpecs = document.getElementById("setting-exclude-specs");
+  elements.settingExcludeClauses = document.getElementById("setting-exclude-clauses");
   elements.saveSpecbotSettings = document.getElementById("save-specbot-settings");
 }
 
@@ -118,6 +128,9 @@ async function refreshDocuments() {
   const response = await apiGet(`/api/clause-browser/documents?query=${query}`);
   state.documents = response.data.items;
   renderDocuments();
+  if (state.ui.isSpecbotSettingsOpen) {
+    renderSpecbotDocumentSettings();
+  }
 }
 
 function openPicker() {
@@ -137,6 +150,8 @@ function closePicker() {
 
 function openSpecbotSettings() {
   applySpecbotSettingsToForm();
+  renderSpecbotDocumentSettings();
+  renderRejectedSpecbotClauses();
   state.ui.isSpecbotSettingsOpen = true;
   persistSessionState();
   elements.specbotSettingsModal.classList.remove("hidden");
@@ -155,29 +170,44 @@ function applySpecbotSettingsToForm() {
   elements.settingLimit.value = settings.limit ?? 4;
   elements.settingIterations.value = settings.iterations ?? 2;
   elements.settingNextIterationLimit.value = settings.nextIterationLimit ?? 2;
+  elements.settingFollowupMode.value = settings.followupMode || "sentence-summary";
   elements.settingSummary.value = settings.summary || "short";
   elements.settingRegistry.value = settings.registry || "";
   elements.settingLocalModelDir.value = settings.localModelDir || "";
   elements.settingDevice.value = settings.device || "cuda";
   elements.settingSparseBoost.value = settings.sparseBoost ?? 0;
   elements.settingVectorBoost.value = settings.vectorBoost ?? 1;
+  elements.settingAutoExcludeLoaded.checked = settings.autoExcludeLoaded !== false;
+  elements.settingExcludeSpecs.value = Array.isArray(settings.excludeSpecs) ? settings.excludeSpecs.join("\n") : "";
+  elements.settingExcludeClauses.value = Array.isArray(settings.excludeClauses)
+    ? settings.excludeClauses.map((item) => `${item.specNo}:${item.clauseId}`).join("\n")
+    : "";
 }
 
 function saveSpecbotSettings() {
+  const rejectedClauses = getRejectedSpecbotClauses();
   state.ui.specbotSettings = {
     baseUrl: elements.settingBaseUrl.value.trim(),
     configBaseUrl: elements.settingConfigBaseUrl.value.trim(),
     limit: Number(elements.settingLimit.value),
     iterations: Number(elements.settingIterations.value),
     nextIterationLimit: Number(elements.settingNextIterationLimit.value),
+    followupMode: elements.settingFollowupMode.value,
     summary: elements.settingSummary.value.trim(),
     registry: elements.settingRegistry.value.trim(),
     localModelDir: elements.settingLocalModelDir.value.trim(),
     device: elements.settingDevice.value.trim(),
     sparseBoost: Number(elements.settingSparseBoost.value),
     vectorBoost: Number(elements.settingVectorBoost.value),
+    includedSpecs: getSelectedSpecbotDocuments(),
+    autoExcludeLoaded: elements.settingAutoExcludeLoaded.checked,
+    excludeSpecs: parseSpecbotExcludeSpecs(elements.settingExcludeSpecs.value),
+    excludeClauses: parseSpecbotExcludeClauses(elements.settingExcludeClauses.value),
+    rejectedClauses,
   };
+  pruneSpecbotResultsByCurrentExclusions();
   persistSessionState();
+  renderSpecbotResults();
   closeSpecbotSettings();
 }
 
@@ -372,6 +402,7 @@ async function loadClauseWithSpec(specNo, clauseId) {
     const subtree = response.data;
     expandAll(subtree);
     state.loadedRoots = mergeLoadedRoot(state.loadedRoots, subtree);
+    pruneSpecbotResultsByCurrentExclusions();
     persistSessionState();
     closePicker();
     focusNode(subtree.key);
@@ -993,8 +1024,12 @@ function renderSpecbotResults() {
   });
   elements.specbotResultList.querySelectorAll("[data-action='reject-specbot-hit']").forEach((button) => {
     button.addEventListener("click", () => {
+      addRejectedSpecbotClause(button.dataset.specNo, button.dataset.clauseId);
       removeSpecbotResult(button.dataset.specNo, button.dataset.clauseId);
-      setMessage(`SpecBot 결과에서 ${button.dataset.specNo} / ${button.dataset.clauseId} 절을 제외했습니다.`, false);
+      setMessage(
+        `SpecBot 결과에서 ${button.dataset.specNo} / ${button.dataset.clauseId} 절을 거절하고 이후 검색에서도 제외합니다.`,
+        false
+      );
     });
   });
 }
@@ -1021,11 +1056,14 @@ async function runSpecbotQuery() {
   }
   setSpecbotQueryLoading(true);
   try {
+    const exclusions = buildSpecbotExclusions();
     const response = await apiPost("/api/clause-browser/specbot/query", {
       query,
       settings: state.ui.specbotSettings,
+      excludeSpecs: exclusions.excludeSpecs,
+      excludeClauses: exclusions.excludeClauses,
     });
-    state.ui.specbotResults = [...(response.data.hits || [])].sort(compareSpecbotHits);
+    state.ui.specbotResults = filterSpecbotHitsByExclusions(response.data.hits || [], exclusions).sort(compareSpecbotHits);
     persistSessionState();
     renderSpecbotResults();
     setMessage(`SpecBot query 완료: ${query}`, false);
@@ -1036,11 +1074,251 @@ async function runSpecbotQuery() {
   }
 }
 
+function buildSpecbotExclusions() {
+  const settings = state.ui.specbotSettings || {};
+  const includedSpecs = new Set(
+    Array.isArray(settings.includedSpecs) && settings.includedSpecs.length
+      ? settings.includedSpecs.map((item) => String(item).trim()).filter(Boolean)
+      : (state.documents || []).map((item) => String(item.specNo || "").trim()).filter(Boolean)
+  );
+  const excludeSpecs = new Set(Array.isArray(settings.excludeSpecs) ? settings.excludeSpecs.map((item) => String(item).trim()).filter(Boolean) : []);
+  (state.documents || []).forEach((item) => {
+    const specNo = String(item.specNo || "").trim();
+    if (specNo && !includedSpecs.has(specNo)) {
+      excludeSpecs.add(specNo);
+    }
+  });
+  const excludeClauseMap = new Map();
+
+  const manualClauses = Array.isArray(settings.excludeClauses) ? settings.excludeClauses : [];
+  manualClauses.forEach((item) => {
+    const specNo = String(item.specNo || "").trim();
+    const clauseId = String(item.clauseId || "").trim();
+    if (specNo && clauseId) {
+      excludeClauseMap.set(`${specNo}:${clauseId}`, { specNo, clauseId });
+    }
+  });
+
+  getRejectedSpecbotClauses().forEach((item) => {
+    excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
+  });
+
+  if (settings.autoExcludeLoaded !== false) {
+    collectLoadedClausePairs(state.loadedRoots).forEach((item) => {
+      excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
+    });
+  }
+
+  return {
+    excludeSpecs: [...excludeSpecs].sort(compareMixedToken),
+    excludeClauses: [...excludeClauseMap.values()].sort((left, right) => compareSpecbotHits(left, right)),
+  };
+}
+
+function filterSpecbotHitsByExclusions(hits, exclusions = buildSpecbotExclusions()) {
+  const excludeSpecs = new Set((exclusions.excludeSpecs || []).map((item) => String(item || "").trim()).filter(Boolean));
+  const excludeClausePairs = new Set(
+    (exclusions.excludeClauses || [])
+      .map((item) => {
+        const specNo = String(item.specNo || "").trim();
+        const clauseId = String(item.clauseId || "").trim();
+        return specNo && clauseId ? `${specNo}:${clauseId}` : "";
+      })
+      .filter(Boolean)
+  );
+  return (hits || []).filter((item) => {
+    const specNo = String(item.specNo || "").trim();
+    const clauseId = String(item.clauseId || "").trim();
+    if (!specNo || !clauseId) {
+      return false;
+    }
+    if (excludeSpecs.has(specNo)) {
+      return false;
+    }
+    if (excludeClausePairs.has(`${specNo}:${clauseId}`)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function pruneSpecbotResultsByCurrentExclusions() {
+  state.ui.specbotResults = filterSpecbotHitsByExclusions(state.ui.specbotResults, buildSpecbotExclusions()).sort(compareSpecbotHits);
+}
+
+function collectLoadedClausePairs(nodes) {
+  return (nodes || []).flatMap((node) => [
+    { specNo: String(node.specNo || "").trim(), clauseId: String(node.clauseId || "").trim() },
+    ...collectLoadedClausePairs(node.children || []),
+  ]).filter((item) => item.specNo && item.clauseId);
+}
+
+function parseSpecbotExcludeSpecs(text) {
+  return String(text || "")
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseSpecbotExcludeClauses(text) {
+  return String(text || "")
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [specNo, clauseId] = item.split(":");
+      return { specNo: String(specNo || "").trim(), clauseId: String(clauseId || "").trim() };
+    })
+    .filter((item) => item.specNo && item.clauseId);
+}
+
+function dedupeClausePairs(items) {
+  const pairs = new Map();
+  (items || []).forEach((item) => {
+    const specNo = String(item.specNo || "").trim();
+    const clauseId = String(item.clauseId || "").trim();
+    if (specNo && clauseId) {
+      pairs.set(`${specNo}:${clauseId}`, { specNo, clauseId });
+    }
+  });
+  return [...pairs.values()];
+}
+
+function getNormalizedRejectedClauses(items) {
+  return dedupeClausePairs(Array.isArray(items) ? items : []);
+}
+
+function getRejectedSpecbotClauses() {
+  return getNormalizedRejectedClauses(state.ui.specbotSettings?.rejectedClauses);
+}
+
+function renderSpecbotDocumentSettings() {
+  const docs = state.documents || [];
+  if (!docs.length) {
+    elements.settingDocumentList.innerHTML = '<div class="muted">문서 목록을 불러오는 중입니다.</div>';
+    elements.settingDocumentSelectionCount.textContent = "0 / 0 selected";
+    return;
+  }
+  const selectedSpecs = new Set(
+    Array.isArray(state.ui.specbotSettings?.includedSpecs) && state.ui.specbotSettings.includedSpecs.length
+      ? state.ui.specbotSettings.includedSpecs.map((item) => String(item).trim()).filter(Boolean)
+      : docs.map((item) => String(item.specNo || "").trim()).filter(Boolean)
+  );
+  elements.settingDocumentList.innerHTML = docs
+    .map(
+      (item) => `
+        <label class="settings-document-row">
+          <input type="checkbox" data-action="toggle-specbot-doc" value="${escapeHtml(item.specNo)}" ${selectedSpecs.has(item.specNo) ? "checked" : ""} />
+          <span class="settings-document-text">
+            <strong>${escapeHtml(item.specNo)}</strong>
+            <span class="muted">${escapeHtml(item.specTitle || "")}</span>
+          </span>
+        </label>
+      `
+    )
+    .join("");
+  elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']").forEach((input) => {
+    input.addEventListener("change", updateSpecbotDocumentSelectionCount);
+  });
+  updateSpecbotDocumentSelectionCount();
+}
+
+function renderRejectedSpecbotClauses() {
+  const rejectedClauses = getRejectedSpecbotClauses();
+  if (!rejectedClauses.length) {
+    elements.settingRejectedClauseList.innerHTML = '<div class="muted">거절로 제외된 절이 없습니다.</div>';
+    elements.settingClearRejectedClauses.disabled = true;
+    return;
+  }
+
+  elements.settingClearRejectedClauses.disabled = false;
+  elements.settingRejectedClauseList.innerHTML = rejectedClauses
+    .sort(compareSpecbotHits)
+    .map(
+      (item) => `
+        <div class="settings-rejected-row">
+          <div class="settings-rejected-text">
+            <strong>${escapeHtml(item.specNo)}</strong>
+            <span>${escapeHtml(item.clauseId)}</span>
+          </div>
+          <button
+            class="ghost"
+            type="button"
+            data-action="remove-rejected-clause"
+            data-spec-no="${escapeHtml(item.specNo)}"
+            data-clause-id="${escapeHtml(item.clauseId)}"
+          >
+            해제
+          </button>
+        </div>
+      `
+    )
+    .join("");
+
+  elements.settingRejectedClauseList.querySelectorAll("[data-action='remove-rejected-clause']").forEach((button) => {
+    button.addEventListener("click", () => {
+      removeRejectedSpecbotClause(button.dataset.specNo, button.dataset.clauseId);
+    });
+  });
+}
+
+function getSelectedSpecbotDocuments() {
+  return [...elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']:checked")]
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+}
+
+function updateSpecbotDocumentSelectionCount() {
+  const selectedCount = getSelectedSpecbotDocuments().length;
+  const totalCount = (state.documents || []).length;
+  elements.settingDocumentSelectionCount.textContent = `${selectedCount} / ${totalCount} selected`;
+}
+
+function setAllSpecbotDocuments(checked) {
+  elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']").forEach((input) => {
+    input.checked = checked;
+  });
+  updateSpecbotDocumentSelectionCount();
+}
+
 function setSpecbotQueryLoading(isLoading) {
   elements.runSpecbotQuery.disabled = isLoading;
   elements.specbotQuery.disabled = isLoading;
   elements.specbotSpinner.classList.toggle("hidden", !isLoading);
   elements.runSpecbotLabel.textContent = isLoading ? "수행 중" : "수행";
+}
+
+function addRejectedSpecbotClause(specNo, clauseId) {
+  state.ui.specbotSettings = {
+    ...state.ui.specbotSettings,
+    rejectedClauses: dedupeClausePairs([...getRejectedSpecbotClauses(), { specNo, clauseId }]),
+  };
+  persistSessionState();
+  if (state.ui.isSpecbotSettingsOpen) {
+    renderRejectedSpecbotClauses();
+  }
+}
+
+function removeRejectedSpecbotClause(specNo, clauseId) {
+  state.ui.specbotSettings = {
+    ...state.ui.specbotSettings,
+    rejectedClauses: getRejectedSpecbotClauses().filter(
+      (item) => !(item.specNo === specNo && item.clauseId === clauseId)
+    ),
+  };
+  persistSessionState();
+  renderRejectedSpecbotClauses();
+  setMessage(`거절 제외를 해제했습니다: ${specNo} / ${clauseId}`, false);
+}
+
+function clearRejectedSpecbotClauses() {
+  state.ui.specbotSettings = {
+    ...state.ui.specbotSettings,
+    rejectedClauses: [],
+  };
+  persistSessionState();
+  renderRejectedSpecbotClauses();
+  setMessage("거절하여 제외한 절을 모두 해제했습니다.", false);
 }
 
 function removeSpecbotResult(specNo, clauseId) {
@@ -1224,7 +1502,10 @@ function restoreSessionState() {
     state.ui.clauseQuery = payload.clauseQuery || "";
     state.ui.specbotQueryText = payload.specbotQueryText || "";
     if (payload.specbotSettings && typeof payload.specbotSettings === "object") {
-      state.ui.specbotSettings = payload.specbotSettings;
+      state.ui.specbotSettings = {
+        ...payload.specbotSettings,
+        rejectedClauses: getNormalizedRejectedClauses(payload.specbotSettings.rejectedClauses),
+      };
     }
     state.ui.specbotResults = Array.isArray(payload.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
   } catch (_error) {
@@ -1251,11 +1532,13 @@ export {
   clearSpecbotResults,
   openSpecbotSettings,
   saveSpecbotSettings,
+  clearRejectedSpecbotClauses,
   exportDocx,
   runAction,
   handleSelectionChange,
   hideSelectionMenu,
   hideNodeMenu,
   addParentClause,
+  setAllSpecbotDocuments,
   debounce,
 };

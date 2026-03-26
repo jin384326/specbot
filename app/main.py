@@ -40,6 +40,59 @@ def load_metadata_map(path: str | None) -> dict[str, dict]:
         return json.load(handle)
 
 
+def build_exclusion_sets(args: argparse.Namespace) -> tuple[set[str], set[tuple[str, str]]]:
+    excluded_specs = {str(item).strip() for item in getattr(args, "exclude_specs", []) or [] if str(item).strip()}
+    excluded_clause_pairs: set[tuple[str, str]] = set()
+    for item in getattr(args, "exclude_clauses", []) or []:
+        raw = str(item).strip()
+        if not raw or ":" not in raw:
+            continue
+        spec_no, clause_id = raw.split(":", maxsplit=1)
+        spec_no = spec_no.strip()
+        clause_id = clause_id.strip()
+        if spec_no and clause_id:
+            excluded_clause_pairs.add((spec_no, clause_id))
+    return excluded_specs, excluded_clause_pairs
+
+
+def is_excluded_hit(spec_no: str, clause_id: str, excluded_specs: set[str], excluded_clause_pairs: set[tuple[str, str]]) -> bool:
+    normalized_spec = str(spec_no).strip()
+    normalized_clause = str(clause_id).strip()
+    if not normalized_clause:
+        return True
+    return normalized_spec in excluded_specs or (normalized_spec, normalized_clause) in excluded_clause_pairs
+
+
+def filter_vespa_response_children(
+    response: dict[str, object],
+    excluded_specs: set[str],
+    excluded_clause_pairs: set[tuple[str, str]],
+) -> dict[str, object]:
+    root = dict(response.get("root", {}))
+    children = list(root.get("children", []) or [])
+    filtered_children = []
+    for child in children:
+        fields = child.get("fields", {}) if isinstance(child, dict) else {}
+        if is_excluded_hit(fields.get("spec_no", ""), fields.get("clause_id", ""), excluded_specs, excluded_clause_pairs):
+            continue
+        filtered_children.append(child)
+    root["children"] = filtered_children
+    return {**response, "root": root}
+
+
+def filter_iterative_result(
+    result: dict[str, object],
+    excluded_specs: set[str],
+    excluded_clause_pairs: set[tuple[str, str]],
+) -> dict[str, object]:
+    relevant_documents = [
+        item
+        for item in list(result.get("relevant_documents", []) or [])
+        if not is_excluded_hit(item.get("spec_no", ""), item.get("clause_id", ""), excluded_specs, excluded_clause_pairs)
+    ]
+    return {**result, "relevant_documents": relevant_documents}
+
+
 def cmd_build_corpus(args: argparse.Namespace) -> None:
     metadata = load_metadata_map(args.metadata)
     count = build_corpus(
@@ -206,6 +259,7 @@ def cmd_feed_vespa_http(args: argparse.Namespace) -> None:
 
 
 def cmd_query_vespa_http(args: argparse.Namespace) -> None:
+    excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
     registry = QueryFeatureRegistry.from_json(args.registry)
     query_vector = None
     if args.embed_model:
@@ -239,10 +293,12 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
         max_retries=args.max_retries,
         retry_backoff_seconds=args.retry_backoff_seconds,
     )
+    response = filter_vespa_response_children(response, excluded_specs, excluded_clause_pairs)
     print(json.dumps(response, ensure_ascii=True, indent=2))
 
 
 def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
+    excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     registry = QueryFeatureRegistry.from_json(args.registry)
@@ -289,6 +345,7 @@ def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
         iterations=args.iterations,
         next_iteration_limit=args.next_iteration_limit,
     )
+    result = filter_iterative_result(result, excluded_specs, excluded_clause_pairs)
     print(json.dumps(result, ensure_ascii=True, indent=2))
 
 
@@ -679,6 +736,14 @@ def build_parser() -> argparse.ArgumentParser:
     query_http_cmd.add_argument("--max-length", type=int, default=2048, help="Max token length for supported models")
     query_http_cmd.add_argument("--no-4bit", action="store_true", help="Disable 4-bit loading for supported models")
     query_http_cmd.add_argument("--stage-filter", action="append", choices=["stage2", "stage3", "else"], help="Restrict search to a stage bucket")
+    query_http_cmd.add_argument("--exclude-spec", dest="exclude_specs", action="append", default=[], help="Exclude an entire spec, e.g. 23502")
+    query_http_cmd.add_argument(
+        "--exclude-clause",
+        dest="exclude_clauses",
+        action="append",
+        default=[],
+        help="Exclude one exact spec/clause pair, e.g. 23502:4.2.2.2",
+    )
     query_http_cmd.add_argument("--max-retries", type=int, default=1, help="Retries for transient query errors")
     query_http_cmd.add_argument("--retry-backoff-seconds", type=float, default=0.5, help="Linear backoff base in seconds")
     query_http_cmd.set_defaults(func=cmd_query_vespa_http)
@@ -714,10 +779,18 @@ def build_parser() -> argparse.ArgumentParser:
     iterative_query_cmd.add_argument(
         "--followup-mode",
         choices=["keyword", "sentence-summary"],
-        default="keyword",
+        default="sentence-summary",
         help="How the LLM generates next-hop retrieval queries",
     )
     iterative_query_cmd.add_argument("--debug", action="store_true", help="Enable debug logging for each retrieval step")
+    iterative_query_cmd.add_argument("--exclude-spec", dest="exclude_specs", action="append", default=[], help="Exclude an entire spec, e.g. 23502")
+    iterative_query_cmd.add_argument(
+        "--exclude-clause",
+        dest="exclude_clauses",
+        action="append",
+        default=[],
+        help="Exclude one exact spec/clause pair, e.g. 23502:4.2.2.2",
+    )
     iterative_query_cmd.add_argument("--max-retries", type=int, default=1, help="Retries for transient query errors")
     iterative_query_cmd.add_argument("--retry-backoff-seconds", type=float, default=0.5, help="Linear backoff base in seconds")
     iterative_query_cmd.set_defaults(func=cmd_iterative_query_vespa_http)

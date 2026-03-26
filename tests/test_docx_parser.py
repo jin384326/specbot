@@ -15,6 +15,7 @@ from parser.docx_clause_parser import (
     linearized_row_pairs,
     normalize_table_cell_text,
     remove_redundant_brackets_matching_outside,
+    split_relative_clause_heading,
     split_clause_heading,
     table_to_linearized_text,
 )
@@ -214,6 +215,55 @@ def test_parser_treats_h6_style_as_heading_but_not_b1(tmp_path: Path) -> None:
     clause_ids = [record.clause_id for record in records if record.doc_type == "clause_doc"]
     assert "4.11.0a.2.1" in clause_ids
     assert "8a" not in clause_ids
+
+
+def test_parser_restores_relative_heading_numbers_from_parent_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "relative-heading.docx"
+    doc = Document()
+    doc.add_paragraph("7.2.14 Modify Bearer Command and Failure Indication", style="Heading 3")
+    doc.add_paragraph(".1 Modify Bearer Command", style="Heading 4")
+    doc.add_paragraph("Body for .1")
+    doc.add_paragraph(".2 Modify Bearer Failure Indication", style="Heading 4")
+    doc.add_paragraph("Body for .2")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="29274"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    clause_ids = [record.clause_id for record in clause_docs]
+    assert clause_ids == ["7.2.14.1", "7.2.14.2"]
+    assert clause_docs[-1].clause_title == "Modify Bearer Failure Indication"
+
+
+def test_split_relative_clause_heading() -> None:
+    assert split_relative_clause_heading(".2 Modify Bearer Failure Indication") == ("2", "Modify Bearer Failure Indication")
+    assert split_relative_clause_heading(".0a.5 Impacts to EPS Procedures") == ("0a.5", "Impacts to EPS Procedures")
+    assert split_relative_clause_heading("7.2.14.2 Modify Bearer Failure Indication") is None
+
+
+def test_parser_restores_missing_numeric_heading_from_previous_sibling(tmp_path: Path) -> None:
+    source = tmp_path / "implicit-heading.docx"
+    doc = Document()
+    doc.add_paragraph("7.4 CS Fallback and SRVCC related messages", style="Heading 2")
+    doc.add_paragraph("7.4.1 Suspend Notification", style="Heading 3")
+    doc.add_paragraph("Body 1")
+    doc.add_paragraph("7.4.2 Suspend Acknowledge", style="Heading 3")
+    doc.add_paragraph("Body 2")
+    doc.add_paragraph("7.4.3 Resume Notification", style="Heading 3")
+    doc.add_paragraph("Body 3")
+    doc.add_paragraph("Resume Acknowledge", style="Heading 3")
+    doc.add_paragraph("Body 4")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="29274"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    clause_ids = [record.clause_id for record in clause_docs]
+    assert "7.4.4" in clause_ids
+    restored = next(record for record in clause_docs if record.clause_id == "7.4.4")
+    assert restored.clause_title == "Resume Acknowledge"
 
 
 def test_spec_title_and_release_data_are_inferred_from_docx_and_path(tmp_path: Path) -> None:

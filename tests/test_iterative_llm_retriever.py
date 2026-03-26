@@ -161,30 +161,48 @@ def test_iterative_retriever_runs_stage_fanout_and_keyword_expansion() -> None:
         ("ue context", "stage2", 2),
         ("ue context", "stage3", 2),
         ("ue context", "else", 2),
+        ("registration stage2", "stage2", 2),
+        ("registration stage2", "stage3", 2),
+        ("registration stage2", "else", 2),
+        ("registration stage3", "stage2", 2),
+        ("registration stage3", "stage3", 2),
+        ("registration stage3", "else", 2),
+        ("registration else", "stage2", 2),
+        ("registration else", "stage3", 2),
+        ("registration else", "else", 2),
     ]
     expanded_terms = [call[0] for call in backend.calls[3:]]
-    assert expanded_terms == ["amf registration", "amf registration", "amf registration", "ue context", "ue context", "ue context"]
+    assert expanded_terms == [
+        "amf registration", "amf registration", "amf registration",
+        "ue context", "ue context", "ue context",
+        "registration stage2", "registration stage2", "registration stage2",
+        "registration stage3", "registration stage3", "registration stage3",
+        "registration else", "registration else", "registration else",
+    ]
     assert all(item["judgement"]["is_relevant"] for item in result["all_results"][:3])
     assert result["all_results"][0]["search_term"] == "registration"
     assert result["all_results"][0]["parent_clause_id"] == "0"
     assert result["all_results"][0]["clause_path"] == ["0", "1"]
-    assert result["relevant_documents"] == [
-        {
-            "doc_id": "registration:stage2",
-            "spec_no": "23501",
-            "clause_id": "1",
-            "parent_clause_id": "0",
-            "clause_path": ["0", "1"],
-            "texts": [
-                "registration procedure in stage2",
-                "registration procedure in stage3",
-                "registration procedure in else",
-            ],
-        },
-    ]
+    assert len(result["relevant_documents"]) == 1
+    relevant_doc = result["relevant_documents"][0]
+    assert relevant_doc["doc_id"] == "registration:stage2"
+    assert relevant_doc["spec_no"] == "23501"
+    assert relevant_doc["clause_id"] == "1"
+    assert relevant_doc["parent_clause_id"] == "0"
+    assert relevant_doc["clause_path"] == ["0", "1"]
+    assert "registration procedure in stage2" in relevant_doc["texts"]
+    assert "registration procedure in stage3" in relevant_doc["texts"]
+    assert "registration procedure in else" in relevant_doc["texts"]
     assert result["collected_keywords"] == ["amf registration", "ue context"]
     assert judge.relevance_calls[0][1] == ["registration:stage2", "registration:stage3", "registration:else"]
     assert judge.keyword_calls == [("registration", ["registration:stage2", "registration:stage3", "registration:else"])]
+    assert result["iterations"][0]["next_search_terms"] == [
+        "amf registration",
+        "ue context",
+        "registration stage2",
+        "registration stage3",
+        "registration else",
+    ]
 
 
 def test_iterative_retriever_stops_early_when_no_keywords_returned() -> None:
@@ -389,7 +407,7 @@ def test_iterative_retriever_skips_duplicate_docs_and_reused_keywords() -> None:
     assert result["collected_keywords"] == ["amf registration", "ue context"]
     assert judge.relevance_calls == [("registration", ["registration-shared-doc"])]
     assert judge.keyword_calls == [("registration", ["registration-shared-doc"])]
-    assert result["iterations"][0]["next_search_terms"] == ["amf registration", "ue context"]
+    assert result["iterations"][0]["next_search_terms"] == ["amf registration", "ue context", "registration stage2"]
     assert len(result["iterations"]) == 1
 
 
@@ -441,21 +459,19 @@ def test_iterative_retriever_resolves_clause_keywords_as_direct_candidates() -> 
     assert backend.lookup_calls == [("23501", "5.2.2.2", 2), ("23501", "5.2.2.3", 2)]
     assert any(item["doc_id"] == "23501:5.2.2.2" for item in result["all_results"])
     assert any(item["doc_id"] == "23501:5.2.2.3" for item in result["all_results"])
-    assert result["relevant_documents"] == [
-        {
-            "doc_id": "registration:stage2",
-            "spec_no": "23501",
-            "clause_id": "1",
-            "parent_clause_id": "0",
-            "clause_path": ["0", "1"],
-            "texts": [
-                "registration procedure in stage2",
-                "registration procedure in stage3",
-                "registration procedure in else",
-            ],
-        },
+    assert len(result["relevant_documents"]) == 1
+    relevant_doc = result["relevant_documents"][0]
+    assert relevant_doc["doc_id"] == "registration:stage2"
+    assert relevant_doc["spec_no"] == "23501"
+    assert relevant_doc["clause_id"] == "1"
+    assert "registration procedure in stage2" in relevant_doc["texts"]
+    assert "registration procedure in stage3" in relevant_doc["texts"]
+    assert "registration procedure in else" in relevant_doc["texts"]
+    assert result["iterations"][0]["next_search_terms"] == [
+        "registration stage2",
+        "registration stage3",
+        "registration else",
     ]
-    assert result["iterations"][0]["next_search_terms"] == []
     assert result["iterations"][0]["next_clause_targets"] == [
         {"spec_no": "23501", "clause_id": "5.2.2.2"},
         {"spec_no": "23501", "clause_id": "5.2.2.3"},
@@ -482,7 +498,69 @@ def test_iterative_retriever_uses_custom_next_iteration_limit() -> None:
         ("ue context", "stage2", 1),
         ("ue context", "stage3", 1),
         ("ue context", "else", 1),
+        ("registration stage2", "stage2", 1),
+        ("registration stage2", "stage3", 1),
+        ("registration stage2", "else", 1),
+        ("registration stage3", "stage2", 1),
+        ("registration stage3", "stage3", 1),
+        ("registration stage3", "else", 1),
+        ("registration else", "stage2", 1),
+        ("registration else", "stage3", 1),
+        ("registration else", "else", 1),
     ]
+
+
+def test_collect_next_actions_dedupes_duplicate_clause_titles() -> None:
+    retriever = IterativeLLMRetriever(backend=StubBackend(), evaluator=StubJudge())
+
+    next_terms, clause_targets = retriever._collect_next_actions(
+        [
+            {
+                "spec_no": "23501",
+                "clause_title": "Shared Clause Title",
+                "judgement": {"is_relevant": True, "keywords": ["anchor a"]},
+            },
+            {
+                "spec_no": "29502",
+                "clause_title": "Shared Clause Title",
+                "judgement": {"is_relevant": True, "keywords": ["anchor b"]},
+            },
+        ],
+        seen_search_terms=set(),
+        seen_clause_targets=set(),
+    )
+
+    assert next_terms == ["anchor a", "anchor b", "Shared Clause Title"]
+    assert clause_targets == []
+
+
+def test_collect_next_actions_skips_generic_clause_titles() -> None:
+    retriever = IterativeLLMRetriever(backend=StubBackend(), evaluator=StubJudge())
+
+    next_terms, clause_targets = retriever._collect_next_actions(
+        [
+            {
+                "spec_no": "23501",
+                "clause_title": "General",
+                "judgement": {"is_relevant": True, "keywords": ["anchor a"]},
+            },
+            {
+                "spec_no": "23501",
+                "clause_title": "Overview",
+                "judgement": {"is_relevant": True, "keywords": ["anchor b"]},
+            },
+            {
+                "spec_no": "23501",
+                "clause_title": "Specific Session Handling",
+                "judgement": {"is_relevant": True, "keywords": []},
+            },
+        ],
+        seen_search_terms=set(),
+        seen_clause_targets=set(),
+    )
+
+    assert next_terms == ["anchor a", "anchor b", "Specific Session Handling"]
+    assert clause_targets == []
 
 
 def test_extract_relevant_documents_merges_texts_for_same_spec_and_clause() -> None:
@@ -571,7 +649,12 @@ def test_iterative_retriever_filters_keywords_from_exclusion_file(tmp_path) -> N
 
     result = retriever.run("registration", limit=1, iterations=2)
 
-    assert result["iterations"][0]["next_search_terms"] == ["registration accept"]
+    assert result["iterations"][0]["next_search_terms"] == [
+        "registration accept",
+        "registration stage2",
+        "registration stage3",
+        "registration else",
+    ]
     assert result["collected_keywords"] == ["registration accept"]
     assert result["all_results"][0]["judgement"]["keywords"] == ["registration accept"]
     assert len(retriever.evaluator.keyword_calls) == 1
@@ -598,6 +681,11 @@ def test_iterative_retriever_supports_sentence_style_followups() -> None:
 
     result = retriever.run("registration", limit=1, iterations=2)
 
-    assert result["iterations"][0]["next_search_terms"] == ["Summarize the AMF registration acceptance path"]
+    assert result["iterations"][0]["next_search_terms"] == [
+        "Summarize the AMF registration acceptance path",
+        "registration stage2",
+        "registration stage3",
+        "registration else",
+    ]
     assert result["collected_keywords"] == ["Summarize the AMF registration acceptance path"]
     assert judge.keyword_calls == [("sentence", ["registration:stage2", "registration:stage3", "registration:else"])]

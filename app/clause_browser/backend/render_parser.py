@@ -17,11 +17,14 @@ from parser.corpus_builder import convert_word_to_docx, is_legacy_word_document,
 from parser.docx_clause_parser import (
     _flatten_table_cells_row_major,
     clean_table_matrix,
+    collect_toc_headings,
     iter_block_items,
     normalize_whitespace,
     normalize_table_cell_text,
     paragraph_outline_level,
     paragraph_style_level,
+    TocHeading,
+    split_relative_clause_heading,
     should_treat_paragraph_as_heading,
     split_clause_heading,
 )
@@ -62,6 +65,7 @@ class RichDocxClauseParser:
     def parse_document(self, spec_no: str, spec_title: str, source_file: str) -> dict[str, RenderClauseNode]:
         path = Path(source_file)
         document = Document(str(path))
+        toc_headings = collect_toc_headings(document)
 
         nodes: dict[str, RenderClauseNode] = {}
         clause_stack: list[RenderClauseNode] = []
@@ -78,6 +82,14 @@ class RichDocxClauseParser:
 
                 heading_level = paragraph_style_level(style_name) or paragraph_outline_level(block)
                 heading = split_clause_heading(text) if text else None
+                if heading is None and heading_level is not None and text:
+                    relative_heading = split_relative_clause_heading(text)
+                    if relative_heading is not None:
+                        heading = self._resolve_relative_heading(relative_heading, heading_level, clause_stack)
+                if heading is None and heading_level is not None and text:
+                    heading = self._resolve_toc_heading(text, heading_level, clause_stack, toc_headings)
+                if heading is None and heading_level is not None and text:
+                    heading = self._resolve_implicit_heading(text, heading_level, clause_stack)
                 if not should_treat_paragraph_as_heading(style_name, text, heading_level, heading):
                     heading = None
 
@@ -134,6 +146,66 @@ class RichDocxClauseParser:
             clause_id, clause_title = heading
             return clause_id, clause_title, clause_id.count(".") + 1 if not clause_id.startswith("Annex ") else 1
         return f"heading_{clause_counter}", text, heading_level or 1
+
+    @staticmethod
+    def _resolve_relative_heading(
+        heading: tuple[str, str],
+        heading_level: int,
+        clause_stack: list[RenderClauseNode],
+    ) -> tuple[str, str] | None:
+        if heading_level <= 1:
+            return None
+        parent = next((item for item in reversed(clause_stack) if len(item.clause_path) < heading_level), None)
+        if parent is None:
+            return None
+        relative_clause_id, clause_title = heading
+        return f"{parent.clause_id}.{relative_clause_id}", clause_title
+
+    @staticmethod
+    def _resolve_toc_heading(
+        text: str,
+        heading_level: int,
+        clause_stack: list[RenderClauseNode],
+        toc_headings: list[TocHeading],
+    ) -> tuple[str, str] | None:
+        normalized_text = normalize_whitespace(text)
+        if not normalized_text:
+            return None
+        parent = next((item for item in reversed(clause_stack) if len(item.clause_path) < heading_level), None)
+        parent_clause_id = parent.clause_id if parent else ""
+        candidates = [
+            item
+            for item in toc_headings
+            if item.level == heading_level and normalize_whitespace(item.clause_title) == normalized_text
+        ]
+        if not candidates:
+            return None
+        if parent_clause_id:
+            parent_candidates = [item for item in candidates if item.parent_clause_id == parent_clause_id]
+            if parent_candidates:
+                candidates = parent_candidates
+        if len(candidates) == 1:
+            return candidates[0].clause_id, normalized_text
+        return None
+
+    @staticmethod
+    def _resolve_implicit_heading(
+        text: str,
+        heading_level: int,
+        clause_stack: list[RenderClauseNode],
+    ) -> tuple[str, str] | None:
+        if heading_level <= 1 or not clause_stack:
+            return None
+        parent = next((item for item in reversed(clause_stack) if len(item.clause_path) < heading_level), None)
+        previous_same_level = next((item for item in reversed(clause_stack) if len(item.clause_path) == heading_level), None)
+        if parent is None or previous_same_level is None:
+            return None
+        if previous_same_level.parent_clause_id != parent.clause_id:
+            return None
+        last_segment = previous_same_level.clause_id.split(".")[-1]
+        if not last_segment.isdigit():
+            return None
+        return f"{parent.clause_id}.{int(last_segment) + 1}", text
 
     @staticmethod
     def _level_for_node(node: RenderClauseNode) -> int:

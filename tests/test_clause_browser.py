@@ -15,6 +15,7 @@ from app.clause_browser.api import ExportRequest, LLMActionRequest, SpecbotQuery
 from app.clause_browser.preprocess import build_clause_browser_corpus
 from app.clause_browser.server import ClauseBrowserSettings, create_app
 from app.clause_browser.services import DocxExportService, SpecbotQueryDefaults, SpecbotQueryService, sanitize_file_stem
+from app.specbot_query_server import PersistentSpecbotQueryEngine
 
 
 def write_corpus(path: Path) -> None:
@@ -397,8 +398,18 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
     class FakeSpecbotQueryService(SpecbotQueryService):
         def __init__(self, project_root: Path) -> None:
             super().__init__(project_root=project_root, defaults=SpecbotQueryDefaults())
+            self.last_exclude_specs = None
+            self.last_exclude_clauses = None
 
-        def run(self, query: str, settings: dict[str, object] | None = None) -> dict[str, object]:
+        def run(
+            self,
+            query: str,
+            settings: dict[str, object] | None = None,
+            exclude_specs: list[str] | None = None,
+            exclude_clauses: list[dict[str, object]] | None = None,
+        ) -> dict[str, object]:
+            self.last_exclude_specs = exclude_specs
+            self.last_exclude_clauses = exclude_clauses
             return {
                 "query": query,
                 "settings": settings or self.defaults.to_dict(),
@@ -415,6 +426,7 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
                 "command": "python3 -m app.main iterative-query-vespa-http ...",
             }
 
+    fake_service = FakeSpecbotQueryService(tmp_path)
     app = build_app(tmp_path)
     app = create_app(
         ClauseBrowserSettings(
@@ -428,13 +440,38 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
         ),
-        specbot_service=FakeSpecbotQueryService(tmp_path),
+        specbot_service=fake_service,
     )
     endpoint = get_endpoint(app, "/api/clause-browser/specbot/query")
 
-    payload = endpoint(SpecbotQueryRequest(query="End to End Redundant Paths"))["data"]
+    payload = endpoint(
+        SpecbotQueryRequest(
+            query="End to End Redundant Paths",
+            excludeSpecs=["23502"],
+            excludeClauses=[{"specNo": "23501", "clauseId": "5.2"}],
+        )
+    )["data"]
     assert payload["query"] == "End to End Redundant Paths"
     assert payload["hits"][0]["specNo"] == "23501"
+    assert fake_service.last_exclude_specs == ["23502"]
+    assert fake_service.last_exclude_clauses == [{"specNo": "23501", "clauseId": "5.2"}]
+
+
+def test_specbot_query_exclusion_is_exact_spec_clause_pair() -> None:
+    hits = [
+        {"specNo": "23502", "clauseId": "4.2.2.2"},
+        {"specNo": "29512", "clauseId": "4.2.2.2"},
+        {"specNo": "23502", "clauseId": "4.2.2.3"},
+    ]
+    filtered = PersistentSpecbotQueryEngine._apply_exclusions(
+        hits,
+        exclude_specs=[],
+        exclude_clauses=[{"specNo": "23502", "clauseId": "4.2.2.2"}],
+    )
+    assert filtered == [
+        {"specNo": "29512", "clauseId": "4.2.2.2"},
+        {"specNo": "23502", "clauseId": "4.2.2.3"},
+    ]
 
 
 def test_docx_export_service_adds_numeric_suffix(tmp_path: Path) -> None:

@@ -161,18 +161,63 @@
           </div>
           <button class="ghost" data-action="close-specbot-settings">닫기</button>
         </header>
-        <div class="settings-grid">
-          <label class="field"><span>Base URL</span><input id="setting-base-url" type="text" /></label>
-          <label class="field"><span>Config Base URL</span><input id="setting-config-base-url" type="text" /></label>
-          <label class="field"><span>Limit</span><input id="setting-limit" type="number" min="1" /></label>
-          <label class="field"><span>Iterations</span><input id="setting-iterations" type="number" min="1" /></label>
-          <label class="field"><span>Next Iteration Limit</span><input id="setting-next-iteration-limit" type="number" min="1" /></label>
-          <label class="field"><span>Summary</span><input id="setting-summary" type="text" /></label>
-          <label class="field"><span>Registry</span><input id="setting-registry" type="text" /></label>
-          <label class="field"><span>Local Model Dir</span><input id="setting-local-model-dir" type="text" /></label>
-          <label class="field"><span>Device</span><input id="setting-device" type="text" /></label>
-          <label class="field"><span>Sparse Boost</span><input id="setting-sparse-boost" type="number" step="0.1" /></label>
-          <label class="field"><span>Vector Boost</span><input id="setting-vector-boost" type="number" step="0.1" /></label>
+        <div class="settings-body">
+          <section class="settings-section">
+            <div class="section-heading">
+              <h3>검색 대상 문서</h3>
+              <span id="setting-document-selection-count" class="muted">0 selected</span>
+            </div>
+            <p class="muted settings-help">체크된 문서만 SpecBot 검색 대상으로 사용합니다. 기본값은 전체 선택입니다.</p>
+            <div class="settings-toolbar">
+              <button id="setting-select-all-documents" class="ghost" type="button">전체 선택</button>
+              <button id="setting-clear-all-documents" class="ghost" type="button">전체 해제</button>
+            </div>
+            <div id="setting-document-list" class="settings-document-list"></div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-heading">
+              <h3>거절하여 제외한 절</h3>
+              <button id="setting-clear-rejected-clauses" class="ghost" type="button">전체 해제</button>
+            </div>
+            <p class="muted settings-help">웹에서 거절한 결과는 이후 검색에서 제외됩니다. 여기서 다시 해제할 수 있습니다.</p>
+            <div id="setting-rejected-clause-list" class="settings-rejected-list"></div>
+          </section>
+
+          <details class="settings-advanced">
+            <summary>Advanced Settings</summary>
+            <div class="settings-grid">
+              <label class="field"><span>Base URL</span><input id="setting-base-url" type="text" /></label>
+              <label class="field"><span>Config Base URL</span><input id="setting-config-base-url" type="text" /></label>
+              <label class="field"><span>Limit</span><input id="setting-limit" type="number" min="1" /></label>
+              <label class="field"><span>Iterations</span><input id="setting-iterations" type="number" min="1" /></label>
+              <label class="field"><span>Next Iteration Limit</span><input id="setting-next-iteration-limit" type="number" min="1" /></label>
+              <label class="field">
+                <span>Follow-up Mode</span>
+                <select id="setting-followup-mode">
+                  <option value="sentence-summary">sentence-summary</option>
+                  <option value="keyword">keyword</option>
+                </select>
+              </label>
+              <label class="field"><span>Summary</span><input id="setting-summary" type="text" /></label>
+              <label class="field"><span>Registry</span><input id="setting-registry" type="text" /></label>
+              <label class="field"><span>Local Model Dir</span><input id="setting-local-model-dir" type="text" /></label>
+              <label class="field"><span>Device</span><input id="setting-device" type="text" /></label>
+              <label class="field"><span>Sparse Boost</span><input id="setting-sparse-boost" type="number" step="0.1" /></label>
+              <label class="field"><span>Vector Boost</span><input id="setting-vector-boost" type="number" step="0.1" /></label>
+              <label class="field field-wide">
+                <span><input id="setting-auto-exclude-loaded" type="checkbox" checked /> 현재 로드된 절 자동 제외</span>
+              </label>
+              <label class="field field-wide">
+                <span>추가 제외 규격</span>
+                <textarea id="setting-exclude-specs" rows="3" placeholder="예: 23502&#10;29512"></textarea>
+              </label>
+              <label class="field field-wide">
+                <span>추가 제외 규격:절</span>
+                <textarea id="setting-exclude-clauses" rows="4" placeholder="예: 23502:4.2.2.2&#10;29512:5.5.2"></textarea>
+              </label>
+            </div>
+          </details>
         </div>
         <div class="modal-footer">
           <button id="save-specbot-settings" class="primary">저장</button>

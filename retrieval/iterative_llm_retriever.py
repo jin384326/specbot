@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from parser.models import DocRecord
+from retrieval.anchor_normalizer import is_noisy_anchor, normalize_anchor
 from retrieval.multi_hop_pipeline import MultiHopSearchHit
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,16 @@ CLAUSE_SPEC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 logger = logging.getLogger(__name__)
+
+GENERIC_NEXT_HOP_CLAUSE_TITLES = {
+    "general",
+    "overview",
+    "introduction",
+    "references",
+    "successful operation",
+    "feature negotiation",
+    "resource definition",
+}
 
 class RelevanceDecision(BaseModel):
     doc_id: str
@@ -143,6 +154,15 @@ def _parse_clause_reference(keyword: str, current_spec_no: str) -> tuple[str, st
     if clause_match and current_spec_no:
         return _normalize_spec_no(current_spec_no), clause_match.group("clause")
     return None
+
+
+def _should_include_clause_title_as_next_hop(clause_title: str) -> bool:
+    normalized_title = normalize_anchor(clause_title).lower()
+    if not normalized_title:
+        return False
+    if is_noisy_anchor(normalized_title):
+        return False
+    return normalized_title not in GENERIC_NEXT_HOP_CLAUSE_TITLES
 
 
 @dataclass
@@ -593,10 +613,22 @@ class IterativeLLMRetriever:
         clause_targets: list[dict[str, str]] = []
         seen_local_clause_targets: set[tuple[str, str]] = set()
         keyword_buffer: list[str] = []
+        clause_title_buffer: list[str] = []
+        seen_clause_titles: set[str] = set()
         for item in judged_hits:
             judgement = item["judgement"]
             if not judgement.get("is_relevant"):
                 continue
+            clause_title = " ".join(str(item.get("clause_title", "")).strip().split())
+            normalized_clause_title = _normalize_search_term(clause_title)
+            if (
+                clause_title
+                and normalized_clause_title
+                and normalized_clause_title not in seen_clause_titles
+                and _should_include_clause_title_as_next_hop(clause_title)
+            ):
+                seen_clause_titles.add(normalized_clause_title)
+                clause_title_buffer.append(clause_title)
             for keyword in judgement.get("keywords", []):
                 clause_reference = _parse_clause_reference(keyword, item.get("spec_no", ""))
                 if clause_reference is not None:
@@ -609,7 +641,7 @@ class IterativeLLMRetriever:
                 keyword_buffer.append(keyword)
         next_terms = [
             keyword
-            for keyword in _normalize_keywords(keyword_buffer, limit=self.keyword_limit * 4)
+            for keyword in _normalize_keywords([*keyword_buffer, *clause_title_buffer], limit=self.keyword_limit * 6)
             if _normalize_search_term(keyword) not in seen_search_terms
         ][: self.keyword_limit * 2]
         logger.debug("Collected next search terms=%s clause_targets=%s", next_terms, clause_targets)
