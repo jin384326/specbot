@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from parser.models import DocRecord
 from retrieval.anchor_normalizer import is_noisy_anchor, normalize_anchor
@@ -29,6 +30,10 @@ CLAUSE_SPEC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 logger = logging.getLogger(__name__)
+
+
+class RetrievalCancelledError(RuntimeError):
+    """Raised when an iterative retrieval request is cancelled by the client."""
 
 GENERIC_NEXT_HOP_CLAUSE_TITLES = {
     "general",
@@ -201,6 +206,14 @@ class ChatOpenAIRelevanceJudge:
         self._summary_llm = self._llm.with_structured_output(SummaryDecision, method="json_schema")
 
     def judge_relevance(self, query_text: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._judge_relevance(query_text, candidates, should_cancel=None)
+
+    def _judge_relevance(
+        self,
+        query_text: str,
+        candidates: list[dict[str, Any]],
+        should_cancel: Callable[[], bool] | None,
+    ) -> list[dict[str, Any]]:
         if not candidates:
             logger.debug("LLM relevance check skipped because there are no candidates for query=%r", query_text)
             return []
@@ -212,6 +225,8 @@ class ChatOpenAIRelevanceJudge:
         )
         ordered: list[dict[str, Any]] = []
         for candidate in candidates:
+            if should_cancel and should_cancel():
+                raise RetrievalCancelledError("Retrieval cancelled by client.")
             prompt_messages = [
                 ("system", _read_prompt(self.relevance_system_prompt_path)),
                 (
@@ -258,6 +273,15 @@ class ChatOpenAIRelevanceJudge:
         relevant_candidates: list[dict[str, Any]],
         keyword_limit: int = DEFAULT_KEYWORD_LIMIT,
     ) -> list[dict[str, Any]]:
+        return self._extract_keywords(query_text, relevant_candidates, keyword_limit=keyword_limit, should_cancel=None)
+
+    def _extract_keywords(
+        self,
+        query_text: str,
+        relevant_candidates: list[dict[str, Any]],
+        keyword_limit: int = DEFAULT_KEYWORD_LIMIT,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         if not relevant_candidates:
             logger.debug("LLM keyword extraction skipped because there are no relevant candidates for query=%r", query_text)
             return []
@@ -269,6 +293,8 @@ class ChatOpenAIRelevanceJudge:
         )
         extracted: list[dict[str, Any]] = []
         for candidate in relevant_candidates:
+            if should_cancel and should_cancel():
+                raise RetrievalCancelledError("Retrieval cancelled by client.")
             system_prompt_path, user_prompt_path = self._followup_prompt_paths()
             followup_label = "Keyword limit" if self.extraction_mode == "keyword" else "Follow-up sentence limit"
             prompt_messages = [
@@ -349,6 +375,7 @@ class IterativeLLMRetriever:
         limit: int = 4,
         iterations: int = 1,
         next_iteration_limit: int = 2,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         self._excluded_keywords = self._load_excluded_keywords()
         active_stages = self.stage_buckets or list(DEFAULT_STAGE_BUCKETS)
@@ -373,6 +400,7 @@ class IterativeLLMRetriever:
         )
 
         for iteration_index in range(max_iterations):
+            self._check_cancelled(should_cancel)
             iteration_limit = limit if iteration_index == 0 else next_iteration_limit
             logger.debug(
                 "Iteration %d start query=%r search_terms=%s limit=%d",
@@ -382,8 +410,8 @@ class IterativeLLMRetriever:
                 iteration_limit,
             )
             hits = [
-                *self._search_iteration(search_terms, active_stages, iteration_limit),
-                *self._resolve_clause_targets(pending_clause_targets, iteration_limit),
+                *self._search_iteration(search_terms, active_stages, iteration_limit, should_cancel=should_cancel),
+                *self._resolve_clause_targets(pending_clause_targets, iteration_limit, should_cancel=should_cancel),
             ]
             pending_clause_targets = []
             if not hits:
@@ -423,7 +451,13 @@ class IterativeLLMRetriever:
                 logger.debug("Iteration %d only produced already-seen docs; stopping", iteration_index + 1)
                 break
             candidates = [self._candidate_payload(item) for item in unseen_hits]
-            relevances = self.evaluator.judge_relevance(query_text, candidates)
+            self._check_cancelled(should_cancel)
+            relevances = self._call_evaluator(
+                "judge_relevance",
+                query_text,
+                candidates,
+                should_cancel=should_cancel,
+            )
             seen_doc_ids.update(candidate["doc_id"] for candidate in candidates)
             seen_content_fingerprints.update(str(candidate["content_fingerprint"]) for candidate in candidates)
             relevant_doc_ids = {
@@ -441,10 +475,13 @@ class IterativeLLMRetriever:
                     if candidate["doc_id"] in relevant_doc_ids and candidate["doc_id"] not in keyword_extracted_doc_ids
                     and str(candidate["content_fingerprint"]) not in keyword_extracted_content_fingerprints
                 ]
-                extracted_keywords = self.evaluator.extract_keywords(
+                self._check_cancelled(should_cancel)
+                extracted_keywords = self._call_evaluator(
+                    "extract_keywords",
                     query_text,
                     keyword_candidates,
                     keyword_limit=self.keyword_limit,
+                    should_cancel=should_cancel,
                 )
                 keyword_extracted_doc_ids.update(candidate["doc_id"] for candidate in keyword_candidates)
                 keyword_extracted_content_fingerprints.update(
@@ -498,10 +535,17 @@ class IterativeLLMRetriever:
             "collected_keywords": collected_keywords,
         }
 
-    def _search_iteration(self, search_terms: list[str], stage_buckets: list[str], limit: int) -> list[dict[str, Any]]:
+    def _search_iteration(
+        self,
+        search_terms: list[str],
+        stage_buckets: list[str],
+        limit: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         aggregated: dict[tuple[str, str, str], dict[str, Any]] = {}
         for search_term in search_terms:
             for stage_bucket in stage_buckets:
+                self._check_cancelled(should_cancel)
                 logger.debug(
                     "Searching Vespa search_term=%r stage_bucket=%s limit=%d",
                     search_term,
@@ -647,7 +691,12 @@ class IterativeLLMRetriever:
         logger.debug("Collected next search terms=%s clause_targets=%s", next_terms, clause_targets)
         return next_terms, clause_targets
 
-    def _resolve_clause_targets(self, clause_targets: list[dict[str, str]], limit: int) -> list[dict[str, Any]]:
+    def _resolve_clause_targets(
+        self,
+        clause_targets: list[dict[str, str]],
+        limit: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         if not clause_targets:
             return []
         lookup_clause = getattr(self.backend, "lookup_clause", None)
@@ -656,6 +705,7 @@ class IterativeLLMRetriever:
             return []
         resolved: list[dict[str, Any]] = []
         for target in clause_targets:
+            self._check_cancelled(should_cancel)
             hits = lookup_clause(target["spec_no"], target["clause_id"], limit=limit)
             logger.debug("Resolved clause target spec_no=%s clause_id=%s hit_count=%d", target["spec_no"], target["clause_id"], len(hits))
             for hit in hits:
@@ -732,3 +782,18 @@ class IterativeLLMRetriever:
             for keyword in keywords
             if _normalize_search_term(keyword) not in self._excluded_keywords
         ]
+
+    @staticmethod
+    def _check_cancelled(should_cancel: Callable[[], bool] | None) -> None:
+        if should_cancel and should_cancel():
+            raise RetrievalCancelledError("Retrieval cancelled by client.")
+
+    def _call_evaluator(self, method_name: str, *args: Any, should_cancel: Callable[[], bool] | None = None, **kwargs: Any):
+        method = getattr(self.evaluator, method_name)
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            signature = None
+        if signature and "should_cancel" in signature.parameters:
+            return method(*args, should_cancel=should_cancel, **kwargs)
+        return method(*args, **kwargs)

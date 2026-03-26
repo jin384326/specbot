@@ -7,7 +7,6 @@ import {
   refreshDocuments,
   renderClauseTree,
   renderLoadedTree,
-  renderResults,
   renderSelectedClauseList,
   renderSpecbotResults,
   restoreSessionState,
@@ -30,17 +29,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await loadConfig();
   restoreSessionState();
-  await refreshDocuments();
+  await refreshDocuments({ guard: false });
   if (state.activeSpecNo) {
     elements.activeDocumentLabel.textContent = state.activeSpecNo;
     elements.clauseSearch.value = state.ui.clauseQuery || "";
-    elements.clauseSearch.disabled = false;
     await ensureClauseCatalog(state.activeSpecNo);
   }
   elements.specbotQuery.value = state.ui.specbotQueryText || "";
   renderLoadedTree();
   renderSelectedClauseList();
-  renderResults();
   renderSpecbotResults();
   renderClauseTree();
 });

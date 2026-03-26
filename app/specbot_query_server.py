@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.clause_browser.services import SpecbotQueryDefaults
 from embedding.config import DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL
 from embedding.registry import create_embedding_provider
-from retrieval.iterative_llm_retriever import ChatOpenAIRelevanceJudge, IterativeLLMRetriever
+from retrieval.iterative_llm_retriever import ChatOpenAIRelevanceJudge, IterativeLLMRetriever, RetrievalCancelledError
 from retrieval.query_normalizer import QueryFeatureRegistry
 from retrieval.vespa_multi_hop_backend import VespaMultiHopBackend
 from vespa.http_adapter import VespaEndpoint
@@ -80,6 +82,7 @@ class PersistentSpecbotQueryEngine:
         overrides: dict[str, Any] | None = None,
         exclude_specs: list[str] | None = None,
         exclude_clauses: list[dict[str, Any]] | None = None,
+        should_cancel=None,
     ) -> dict[str, Any]:
         effective = self._merge_settings(overrides or {})
         registry = self._get_registry(str(effective["registry"]))
@@ -115,6 +118,7 @@ class PersistentSpecbotQueryEngine:
             limit=int(effective["limit"]),
             iterations=int(effective["iterations"]),
             next_iteration_limit=int(effective["nextIterationLimit"]),
+            should_cancel=should_cancel,
         )
         filtered_hits = self._apply_exclusions(
             self._extract_hits(result),
@@ -220,18 +224,35 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
         return {"defaults": engine.defaults.to_dict()}
 
     @app.post("/query")
-    def query(request: SpecbotQueryRequest) -> dict[str, object]:
+    async def query(request: Request, payload: SpecbotQueryRequest) -> dict[str, object]:
+        cancel_event = threading.Event()
+
+        async def watch_disconnect() -> None:
+            while not cancel_event.is_set():
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    return
+                await asyncio.sleep(0.2)
+
+        watcher = asyncio.create_task(watch_disconnect())
         try:
-            return engine.run(
-                query=request.query.strip(),
-                overrides=request.settings.model_dump(mode="json") if request.settings else None,
-                exclude_specs=request.excludeSpecs,
-                exclude_clauses=[item.model_dump(mode="json") for item in request.excludeClauses],
+            return await asyncio.to_thread(
+                engine.run,
+                payload.query.strip(),
+                payload.settings.model_dump(mode="json") if payload.settings else None,
+                payload.excludeSpecs,
+                [item.model_dump(mode="json") for item in payload.excludeClauses],
+                cancel_event.is_set,
             )
+        except RetrievalCancelledError as exc:
+            raise HTTPException(status_code=499, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            cancel_event.set()
+            watcher.cancel()
 
     return app
 

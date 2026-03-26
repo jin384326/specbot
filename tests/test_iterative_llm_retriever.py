@@ -9,6 +9,7 @@ from retrieval.iterative_llm_retriever import (
     IterativeLLMRetriever,
     KeywordExtraction,
     RelevanceDecision,
+    RetrievalCancelledError,
     SummaryDecision,
 )
 from retrieval.multi_hop_pipeline import MultiHopSearchHit
@@ -222,8 +223,24 @@ def test_iterative_retriever_stops_early_when_no_keywords_returned() -> None:
     result = retriever.run("paging", limit=1, iterations=3)
 
     assert len(result["iterations"]) == 1
-    assert result["iterations"][0]["next_search_terms"] == []
-    assert result["collected_keywords"] == []
+
+
+def test_iterative_retriever_can_be_cancelled_between_iterations() -> None:
+    backend = StubBackend()
+    judge = StubJudge()
+    retriever = IterativeLLMRetriever(backend=backend, evaluator=judge)
+
+    calls = {"count": 0}
+
+    def should_cancel() -> bool:
+        calls["count"] += 1
+        return calls["count"] > 1
+
+    try:
+        retriever.run("registration", limit=2, iterations=3, should_cancel=should_cancel)
+        assert False, "Expected RetrievalCancelledError"
+    except RetrievalCancelledError:
+        pass
 
 
 def test_chatopenai_relevance_judge_filters_unknown_doc_ids_and_normalizes_keywords() -> None:

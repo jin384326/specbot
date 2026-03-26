@@ -1,0 +1,4 @@
+Translate the following 3GPP context into Korean.
+
+[CONTEXT]
+{context_text}

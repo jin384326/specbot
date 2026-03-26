@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import base64
 from pathlib import Path
@@ -525,11 +526,14 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
     )
     endpoint = get_endpoint(app, "/api/clause-browser/specbot/query")
 
-    payload = endpoint(
-        SpecbotQueryRequest(
-            query="End to End Redundant Paths",
-            excludeSpecs=["23502"],
-            excludeClauses=[{"specNo": "23501", "clauseId": "5.2"}],
+    payload = asyncio.run(
+        endpoint(
+            None,
+            SpecbotQueryRequest(
+                query="End to End Redundant Paths",
+                excludeSpecs=["23502"],
+                excludeClauses=[{"specNo": "23501", "clauseId": "5.2"}],
+            ),
         )
     )["data"]
     assert payload["query"] == "End to End Redundant Paths"

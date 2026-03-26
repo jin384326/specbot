@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import json
+import asyncio
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from docx import Document
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE_RUN = re.compile(r"\s+")
+TRANSLATION_CHUNK_LIMIT = 12000
 
 
 @dataclass(frozen=True)
@@ -100,9 +102,27 @@ class DocxExportService:
 
 
 class LLMActionService:
-    def __init__(self, provider: str = "mock", model: str = "gpt-4.1-mini") -> None:
+    def __init__(
+        self,
+        provider: str = "openai",
+        model: str = "gpt-4o-mini",
+        system_prompt_path: str | Path | None = None,
+        user_prompt_path: str | Path | None = None,
+    ) -> None:
         self._provider = provider
         self._model = model
+        self._system_prompt = self._load_prompt(
+            system_prompt_path,
+            default=(
+                "You are a professional 3GPP technical translator.\n"
+                "Translate the provided context faithfully into Korean.\n"
+                "Return only the translated text."
+            ),
+        )
+        self._user_prompt_template = self._load_prompt(
+            user_prompt_path,
+            default="Translate the following 3GPP context into Korean.\n\n[CONTEXT]\n{context_text}",
+        )
 
     def available_actions(self) -> list[dict[str, str]]:
         return [{"type": "translate", "label": "Translate"}]
@@ -122,18 +142,22 @@ class LLMActionService:
         if action_type != "translate":
             raise ValueError(f"Unsupported action type: {action_type}")
 
-        if self._provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+        if self._provider == "openai":
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise RuntimeError("OPENAI_API_KEY is not configured on the server.")
             return self._run_openai_translation(
                 text=cleaned_text,
                 source_language=source_language,
                 target_language=target_language,
                 context=context or "",
             )
-        return self._run_mock_translation(
-            text=cleaned_text,
-            source_language=source_language,
-            target_language=target_language,
-        )
+        if self._provider == "mock":
+            return self._run_mock_translation(
+                text=cleaned_text,
+                source_language=source_language,
+                target_language=target_language,
+            )
+        raise RuntimeError(f"Unsupported LLM provider: {self._provider}")
 
     def _run_openai_translation(
         self,
@@ -149,27 +173,73 @@ class LLMActionService:
             raise RuntimeError(f"OpenAI provider is unavailable: {exc}") from exc
 
         client = ChatOpenAI(model=self._model, temperature=0)
-        system_prompt = (
-            "You are a document assistant. Return only the translated text. "
-            "Preserve technical terminology where appropriate."
-        )
-        human_prompt = (
-            f"Action: translate\n"
-            f"Source language: {source_language}\n"
-            f"Target language: {target_language}\n"
-            f"Document context: {context}\n"
-            f"Text:\n{text}"
-        )
-        response = client.invoke([("system", system_prompt), ("human", human_prompt)])
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        translated_parts: list[str] = []
+        for chunk in self._split_translation_text(text):
+            system_prompt = self._system_prompt
+            context_text = chunk if not context else f"{context}\n\n{chunk}"
+            human_prompt = self._user_prompt_template.replace("{context_text}", context_text)
+            response = client.invoke([("system", system_prompt), ("human", human_prompt)])
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            translated_parts.append(content.strip())
         return {
             "actionType": "translate",
             "provider": "openai",
             "model": self._model,
-            "outputText": content.strip(),
+            "outputText": "\n\n".join(part for part in translated_parts if part),
             "sourceLanguage": source_language,
             "targetLanguage": target_language,
         }
+
+    @staticmethod
+    def _load_prompt(path: str | Path | None, *, default: str) -> str:
+        if not path:
+            return default
+        prompt_path = Path(path)
+        try:
+            return prompt_path.read_text(encoding="utf-8").strip() or default
+        except OSError:
+            return default
+
+    @staticmethod
+    def _split_translation_text(text: str, limit: int = TRANSLATION_CHUNK_LIMIT) -> list[str]:
+        cleaned = text.strip()
+        if len(cleaned) <= limit:
+            return [cleaned]
+
+        paragraphs = [part.strip() for part in re.split(r"\n{2,}", cleaned) if part.strip()]
+        if not paragraphs:
+            paragraphs = [cleaned]
+
+        chunks: list[str] = []
+        current_parts: list[str] = []
+        current_length = 0
+
+        for paragraph in paragraphs:
+            if len(paragraph) > limit:
+                if current_parts:
+                    chunks.append("\n\n".join(current_parts))
+                    current_parts = []
+                    current_length = 0
+                start = 0
+                while start < len(paragraph):
+                    chunks.append(paragraph[start:start + limit].strip())
+                    start += limit
+                continue
+
+            separator = 2 if current_parts else 0
+            next_length = current_length + separator + len(paragraph)
+            if current_parts and next_length > limit:
+                chunks.append("\n\n".join(current_parts))
+                current_parts = [paragraph]
+                current_length = len(paragraph)
+            else:
+                current_parts.append(paragraph)
+                current_length = next_length
+
+        if current_parts:
+            chunks.append("\n\n".join(current_parts))
+
+        return [chunk for chunk in chunks if chunk]
 
     @staticmethod
     def _run_mock_translation(*, text: str, source_language: str, target_language: str) -> dict[str, Any]:
@@ -403,6 +473,48 @@ class SpecbotQueryHttpService:
 
         try:
             return dict(json.loads(body))
+        except Exception as exc:
+            raise RuntimeError(f"SpecBot query API returned invalid JSON: {exc}") from exc
+
+    async def run_async(
+        self,
+        query: str,
+        settings: dict[str, Any] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clauses: list[dict[str, Any]] | None = None,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        import httpx
+
+        payload = {
+            "query": query,
+            "settings": settings or self._defaults.to_dict(),
+            "excludeSpecs": exclude_specs or [],
+            "excludeClauses": exclude_clauses or [],
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            request_task = asyncio.create_task(client.post(f"{self._base_url}/query", json=payload))
+            try:
+                while True:
+                    if should_cancel and should_cancel():
+                        request_task.cancel()
+                        raise RuntimeError("SpecBot query cancelled by client.")
+                    if request_task.done():
+                        break
+                    await asyncio.sleep(0.2)
+                response = await request_task
+            except asyncio.CancelledError as exc:
+                request_task.cancel()
+                raise RuntimeError("SpecBot query cancelled by client.") from exc
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Unable to reach SpecBot query API at {self._base_url}: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise RuntimeError(_extract_error_detail(response.text) or f"Query API HTTP {response.status_code}")
+
+        try:
+            return dict(response.json())
         except Exception as exc:
             raise RuntimeError(f"SpecBot query API returned invalid JSON: {exc}") from exc
 

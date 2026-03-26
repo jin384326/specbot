@@ -16,12 +16,15 @@ const state = {
     specbotQueryText: "",
     specbotSettings: {},
     specbotResults: [],
+    notes: [],
+    busy: null,
+    translationJob: null,
     selection: {
       text: "",
       clauseKey: "",
       clauseLabel: "",
+      blockIndex: -1,
     },
-    results: [],
     nodeMenu: {
       key: "",
       x: 0,
@@ -31,7 +34,12 @@ const state = {
 };
 
 const elements = {};
-const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v3";
+const SESSION_STORAGE_KEY = "specbot-clause-browser-state-v6";
+const TRANSLATION_CHUNK_LIMIT = 12000;
+const SPECBOT_QUERY_BUSY_LABEL = "SpecBot query 수행 중입니다.";
+const DOCUMENT_SEARCH_BUSY_LABEL = "문서 검색 중입니다.";
+const DOCUMENT_SELECT_BUSY_LABEL = "문서를 불러오는 중입니다.";
+const activeRequestControllers = new Set();
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -56,19 +64,15 @@ function bindElements() {
   elements.treeContainer = document.getElementById("tree-container");
   elements.loadedSummary = document.getElementById("loaded-summary");
   elements.messageBar = document.getElementById("message-bar");
+  elements.translationStatus = document.getElementById("translation-status");
   elements.exportTitle = document.getElementById("export-title");
   elements.exportButton = document.getElementById("export-button");
-  elements.selectedText = document.getElementById("selected-text");
-  elements.selectionMeta = document.getElementById("selection-meta");
-  elements.actionType = document.getElementById("action-type");
-  elements.sourceLanguage = document.getElementById("source-language");
-  elements.targetLanguage = document.getElementById("target-language");
-  elements.runActionButton = document.getElementById("run-action-button");
-  elements.resultList = document.getElementById("result-list");
   elements.selectionMenu = document.getElementById("selection-menu");
   elements.nodeMenu = document.getElementById("node-menu");
   elements.nodeMenuAddParent = document.getElementById("node-menu-add-parent");
   elements.specbotSettingsModal = document.getElementById("specbot-settings-modal");
+  elements.noticeModal = document.getElementById("notice-modal");
+  elements.noticeModalText = document.getElementById("notice-modal-text");
   elements.settingBaseUrl = document.getElementById("setting-base-url");
   elements.settingConfigBaseUrl = document.getElementById("setting-config-base-url");
   elements.settingLimit = document.getElementById("setting-limit");
@@ -108,29 +112,36 @@ function bindGlobalEvents() {
     if (event.target.closest("[data-action='close-specbot-settings']")) {
       closeSpecbotSettings();
     }
+    if (event.target.closest("[data-action='close-notice-modal']")) {
+      closeNoticeModal();
+    }
   });
+  window.addEventListener("pagehide", abortActiveRequests);
+  window.addEventListener("beforeunload", abortActiveRequests);
 }
 
 async function loadConfig() {
   const response = await apiGet("/api/clause-browser/config");
   state.config = response.data;
-  populateSelect(elements.actionType, state.config.actions.map((item) => ({ value: item.type, label: item.label })));
-  populateSelect(elements.sourceLanguage, state.config.languages.map((item) => ({ value: item.code, label: item.label })));
-  populateSelect(elements.targetLanguage, state.config.languages.map((item) => ({ value: item.code, label: item.label })));
-  elements.sourceLanguage.value = "en";
-  elements.targetLanguage.value = "ko";
   state.ui.specbotSettings = { ...response.data.specbotDefaults };
   applySpecbotSettingsToForm();
 }
 
-async function refreshDocuments() {
+async function refreshDocuments(options = {}) {
+  if (!beginBusy("문서 검색 중입니다.", { ...options, allowDuringSpecbotQuery: true })) {
+    return;
+  }
   const query = encodeURIComponent(elements.documentSearch.value.trim());
   const clauseQuery = encodeURIComponent((elements.clauseSearch?.value || "").trim());
-  const response = await apiGet(`/api/clause-browser/documents?query=${query}&clauseQuery=${clauseQuery}`);
-  state.documents = response.data.items;
-  renderDocuments();
-  if (state.ui.isSpecbotSettingsOpen) {
-    renderSpecbotDocumentSettings();
+  try {
+    const response = await apiGet(`/api/clause-browser/documents?query=${query}&clauseQuery=${clauseQuery}`);
+    state.documents = response.data.items;
+    renderDocuments();
+    if (state.ui.isSpecbotSettingsOpen) {
+      renderSpecbotDocumentSettings();
+    }
+  } finally {
+    endBusy(options);
   }
 }
 
@@ -162,6 +173,17 @@ function closeSpecbotSettings() {
   state.ui.isSpecbotSettingsOpen = false;
   persistSessionState();
   elements.specbotSettingsModal.classList.add("hidden");
+}
+
+function openNoticeModal(text) {
+  elements.noticeModalText.textContent = text;
+  elements.noticeModal.classList.remove("hidden");
+  elements.noticeModal.setAttribute("aria-hidden", "false");
+}
+
+function closeNoticeModal() {
+  elements.noticeModal.classList.add("hidden");
+  elements.noticeModal.setAttribute("aria-hidden", "true");
 }
 
 function applySpecbotSettingsToForm() {
@@ -246,6 +268,9 @@ function renderDocuments() {
 }
 
 async function selectDocument(specNo) {
+  if (!beginBusy("문서를 불러오는 중입니다.", { allowDuringSpecbotQuery: true })) {
+    return;
+  }
   state.activeSpecNo = specNo;
   elements.activeDocumentLabel.textContent = specNo;
   elements.pickerTitle.textContent = `${specNo} 문서 검색`;
@@ -256,7 +281,11 @@ async function selectDocument(specNo) {
     renderDocuments();
     renderClauseTree();
   } catch (error) {
-    setMessage(error.message, true);
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
+  } finally {
+    endBusy({ allowDuringSpecbotQuery: true });
   }
 }
 
@@ -389,9 +418,13 @@ async function loadClauseWithSpec(specNo, clauseId) {
     setMessage("먼저 문서를 선택하세요.", true);
     return null;
   }
+  if (!beginBusy("절을 불러오는 중입니다.")) {
+    return null;
+  }
   const key = `${specNo}:${clauseId}`;
   const existing = findNodeByKey(key);
   if (existing) {
+    endBusy();
     closePicker();
     focusNode(key);
     setMessage(`이미 로드된 절입니다. ${clauseId} 위치로 이동했습니다.`, false);
@@ -400,6 +433,7 @@ async function loadClauseWithSpec(specNo, clauseId) {
 
   const loadedAncestor = findLoadedAncestor(specNo, clauseId);
   if (loadedAncestor) {
+    endBusy();
     closePicker();
     focusNode(loadedAncestor.key);
     setMessage(`이미 로드된 상위 절에 포함되어 있습니다. ${loadedAncestor.clauseId} 위치로 이동했습니다.`, false);
@@ -423,8 +457,12 @@ async function loadClauseWithSpec(specNo, clauseId) {
     setMessage(`${clauseId} 절과 하위 절을 불러왔습니다.`, false);
     return subtree;
   } catch (error) {
-    setMessage(error.message, true);
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
     return null;
+  } finally {
+    endBusy();
   }
 }
 
@@ -444,6 +482,7 @@ function renderLoadedTree() {
   const sortedRoots = [...state.loadedRoots].sort(compareLoadedNodes);
   const count = countNodes(sortedRoots);
   elements.loadedSummary.textContent = `${count} clauses loaded`;
+  renderTranslationStatus();
   if (!sortedRoots.length) {
     elements.treeContainer.innerHTML = '<div class="muted">왼쪽의 문서 검색 버튼으로 문서를 고른 뒤, 절 제목을 클릭해 추가하세요.</div>';
     state.ui.viewportKey = "";
@@ -458,6 +497,8 @@ function renderLoadedTree() {
 function renderNode(node) {
   const expanded = state.ui.expandedKeys.has(node.key);
   const focusedClass = state.ui.focusedKey === node.key ? "focused" : "";
+  const notesHtml = renderClauseNotes(node.key);
+  const clauseNoteToggleHtml = renderClauseNoteToggle(node.key);
   const childrenHtml =
     expanded && (node.children || []).length
       ? `<div class="tree-children">${node.children.map((child) => renderNode(child)).join("")}</div>`
@@ -482,12 +523,42 @@ function renderNode(node) {
           </div>
         </div>
         <div class="tree-actions">
-          <button class="icon-button ghost" title="포커스" aria-label="포커스" data-action="focus-node" data-node-key="${escapeHtml(node.key)}">◎</button>
+          <button class="icon-button ghost" title="번역 후 메모" aria-label="번역 후 메모" data-action="translate-clause" data-node-key="${escapeHtml(node.key)}">T</button>
+          ${clauseNoteToggleHtml}
           <button class="icon-button danger" title="이 절 제거" aria-label="이 절 제거" data-action="remove-node" data-node-key="${escapeHtml(node.key)}">✕</button>
         </div>
       </div>
       ${bodyHtml}
+      ${notesHtml}
     </article>
+  `;
+}
+
+function renderTranslationStatus() {
+  const job = state.ui.translationJob;
+  if (!job || !job.totalRequests) {
+    elements.translationStatus.classList.add("hidden");
+    elements.translationStatus.innerHTML = "";
+    return;
+  }
+  const done = Number(job.completedRequests || 0);
+  const total = Number(job.totalRequests || 0);
+  const active = done < total;
+  const currentLabel = job.currentLabel ? escapeHtml(job.currentLabel) : "";
+  elements.translationStatus.classList.remove("hidden");
+  elements.translationStatus.innerHTML = `
+    <div class="translation-status-card ${active ? "active" : ""}">
+      <div class="translation-status-main">
+        ${active ? '<span class="spinner" aria-hidden="true"></span>' : ""}
+        <strong>${active ? "절 번역 진행 중" : "절 번역 완료"}</strong>
+        <span class="muted">${done} / ${total}</span>
+      </div>
+      <div class="translation-status-detail">
+        요청 기준 진행 상황
+        ${currentLabel ? " · " : ""}
+        ${currentLabel}
+      </div>
+    </div>
   `;
 }
 
@@ -499,10 +570,7 @@ function renderBlocks(node) {
   return blocks
     .map((block, index) => {
       if (block.type === "paragraph") {
-        const paragraphClass = getParagraphClass(block.text || "");
-        return `<p class="${paragraphClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(
-          block.text || ""
-        )}</p>`;
+        return renderParagraphBlock(node, block, index);
       }
       if (block.type === "table") {
         const cellRows = block.cells || [];
@@ -576,6 +644,136 @@ function renderBlocks(node) {
     .join("");
 }
 
+function renderParagraphBlock(node, block, index) {
+  const paragraphClass = getParagraphClass(block.text || "");
+  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
+  const selectionNotesHtml = renderSelectionNotes(node.key, index);
+  return `
+    <div class="paragraph-block">
+      <div class="paragraph-note-row">
+        <p class="${paragraphClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(block.text || "")}</p>
+        ${selectionToggleHtml}
+      </div>
+      ${selectionNotesHtml}
+    </div>
+  `;
+}
+
+function renderClauseNotes(clauseKey) {
+  const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
+  if (!notes.length) {
+    return "";
+  }
+  const visibleNotes = notes.filter((note) => !note.collapsed);
+  if (!visibleNotes.length) {
+    return "";
+  }
+  return `
+    <div class="clause-note-list">
+      ${visibleNotes
+        .map(
+          (note) => `
+            <article class="clause-note-card ${note.collapsed ? "collapsed" : ""}" data-note-id="${escapeHtml(note.id)}">
+              <div class="clause-note-meta">
+                <div class="clause-note-meta-main">
+                  <strong class="note-kind">${note.type === "clause" ? "절 메모" : "선택 메모"}</strong>
+                </div>
+                <div class="clause-note-meta-actions">
+                  <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
+                </div>
+              </div>
+              <div class="clause-note-body ${note.collapsed ? "hidden" : ""}">
+                <label class="field">
+                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="5" placeholder="번역 결과를 수정하세요.">${escapeHtml(
+                    note.translation || ""
+                  )}</textarea>
+                </label>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderClauseNoteToggle(clauseKey) {
+  const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
+  if (!notes.length) {
+    return "";
+  }
+  const expanded = notes.some((note) => !note.collapsed);
+  return `
+    <button
+      class="icon-button ghost note-toggle-button"
+      title="절 메모 ${expanded ? "접기" : "펼치기"}"
+      aria-label="절 메모 ${expanded ? "접기" : "펼치기"}"
+      data-action="toggle-clause-notes"
+      data-clause-key="${escapeHtml(clauseKey)}"
+    >
+      📝
+    </button>
+  `;
+}
+
+function renderSelectionNoteToggle(clauseKey, blockIndex) {
+  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+  if (!notes.length) {
+    return "";
+  }
+  const expanded = notes.some((note) => !note.collapsed);
+  return `
+    <button
+      class="selection-note-toggle ghost"
+      title="선택 메모 ${notes.length}개"
+      aria-label="선택 메모 ${notes.length}개"
+      data-action="toggle-selection-notes"
+      data-clause-key="${escapeHtml(clauseKey)}"
+      data-block-index="${blockIndex}"
+    >
+      📝 ${notes.length}
+    </button>
+  `;
+}
+
+function renderSelectionNotes(clauseKey, blockIndex) {
+  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+  if (!notes.length) {
+    return "";
+  }
+  const visibleNotes = notes.filter((note) => !note.collapsed);
+  if (!visibleNotes.length) {
+    return "";
+  }
+  return `
+    <div class="selection-note-list">
+      ${visibleNotes
+        .map(
+          (note) => `
+            <article class="clause-note-card ${note.collapsed ? "collapsed" : ""}" data-note-id="${escapeHtml(note.id)}">
+              <div class="clause-note-meta">
+                <div class="clause-note-meta-main">
+                  <strong class="note-kind">선택 메모</strong>
+                </div>
+                <div class="clause-note-meta-actions">
+                  <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
+                </div>
+              </div>
+              <div class="clause-note-body ${note.collapsed ? "hidden" : ""}">
+                <label class="field">
+                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="4" placeholder="번역 결과를 수정하세요.">${escapeHtml(
+                    note.translation || ""
+                  )}</textarea>
+                </label>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function bindTreeEvents() {
   elements.treeContainer.querySelectorAll("[data-action='toggle-node']").forEach((button) => {
     button.addEventListener("click", () => {
@@ -599,6 +797,7 @@ function bindTreeEvents() {
       if (!target) {
         return;
       }
+      pruneNotesForNodeKey(key);
       state.loadedRoots = removeNodeFromForest(state.loadedRoots, key);
       if (state.ui.focusedKey === key) {
         state.ui.focusedKey = "";
@@ -639,8 +838,43 @@ function bindTreeEvents() {
       }
       event.preventDefault();
       hideNodeMenu();
-      updateSelectionState(selectedText, paragraph.dataset.clauseKey || "", getLabelForKey(paragraph.dataset.clauseKey || ""));
+      updateSelectionState(
+        selectedText,
+        paragraph.dataset.clauseKey || "",
+        getLabelForKey(paragraph.dataset.clauseKey || ""),
+        Number(paragraph.dataset.blockIndex || -1)
+      );
       showSelectionMenu(event.clientX, event.clientY);
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='translate-clause']").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await runClauseTranslation(button.dataset.nodeKey || "");
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='toggle-clause-notes']").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleClauseNotes(button.dataset.clauseKey || "");
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
+    textarea.addEventListener("input", (event) => {
+      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSelectionNotes(button.dataset.clauseKey || "", Number(button.dataset.blockIndex || -1));
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='delete-note']").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteNote(button.dataset.noteId || "");
     });
   });
 
@@ -710,6 +944,10 @@ function focusNode(key) {
 }
 
 async function addParentClause(nodeKey) {
+  if (state.ui.busy) {
+    setMessage(`다른 작업이 진행 중입니다: ${state.ui.busy}`, true);
+    return;
+  }
   const node = findNodeByKey(nodeKey);
   if (!node) {
     setMessage("절 정보를 찾을 수 없습니다.", true);
@@ -938,13 +1176,15 @@ function handleSelectionChange() {
   if (!anchorElement) {
     return;
   }
-  updateSelectionState(text, anchorElement.dataset.clauseKey || "", getLabelForKey(anchorElement.dataset.clauseKey || ""));
+  updateSelectionState(
+    text,
+    anchorElement.dataset.clauseKey || "",
+    getLabelForKey(anchorElement.dataset.clauseKey || "")
+  );
 }
 
-function updateSelectionState(text, clauseKey, clauseLabel) {
-  state.ui.selection = { text, clauseKey, clauseLabel };
-  elements.selectedText.value = text;
-  elements.selectionMeta.textContent = clauseLabel ? `선택 위치: ${clauseLabel}` : "선택된 텍스트";
+function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1) {
+  state.ui.selection = { text, clauseKey, clauseLabel, blockIndex };
 }
 
 function getLabelForKey(key) {
@@ -962,49 +1202,295 @@ function hideSelectionMenu() {
   elements.selectionMenu.classList.add("hidden");
 }
 
-async function runAction() {
-  const text = state.ui.selection.text || elements.selectedText.value.trim();
+async function runSelectionAction(targetLanguage = "ko") {
+  if (!beginBusy("선택 메모 번역 중입니다.")) {
+    return;
+  }
+  const text = state.ui.selection.text;
   if (!text) {
+    endBusy();
     setMessage("번역할 텍스트를 먼저 선택하세요.", true);
     return;
   }
-
   try {
-    const response = await apiPost("/api/clause-browser/llm-actions", {
-      actionType: elements.actionType.value,
-      text,
-      sourceLanguage: elements.sourceLanguage.value,
-      targetLanguage: elements.targetLanguage.value,
-      context: state.ui.selection.clauseLabel,
+    await createTranslatedNote({
+      type: "selection",
+      clauseKey: state.ui.selection.clauseKey,
+      blockIndex: state.ui.selection.blockIndex,
+      sourceText: text,
+      clauseLabel: state.ui.selection.clauseLabel,
+      targetLanguage,
     });
-    state.ui.results = [response.data, ...state.ui.results];
-    renderResults();
-    setMessage(`LLM 액션 완료: ${response.data.actionType}`, false);
-  } catch (error) {
-    setMessage(error.message, true);
+  } finally {
+    endBusy();
   }
 }
 
-function renderResults() {
-  if (!state.ui.results.length) {
-    elements.resultList.innerHTML = '<div class="muted">결과가 여기에 쌓입니다.</div>';
+async function runClauseTranslation(clauseKey) {
+  if (!beginBusy("절 번역 중입니다.")) {
+    return;
+  }
+  const node = findNodeByKey(clauseKey);
+  const translationNodes = collectTranslationNodes(node);
+  if (!translationNodes.length) {
+    endBusy();
+    setMessage("번역할 절 본문을 찾을 수 없습니다.", true);
+    return;
+  }
+  const estimatedRequests = translationNodes.reduce((total, item) => total + Number(item.requestCount || 0), 0);
+  if (estimatedRequests >= 10) {
+    endBusy();
+    openNoticeModal(
+      `예상 번역 요청이 ${estimatedRequests}개라 한 번에 진행할 수 없습니다. 긴 절은 여러 요청으로 분할됩니다. 예상 요청 수가 10개 미만이 되도록 범위를 줄여 주세요.`
+    );
     return;
   }
 
-  elements.resultList.innerHTML = state.ui.results
-    .map(
-      (item) => `
-      <article class="result-card">
-        <div class="section-heading">
-          <strong>${escapeHtml(item.actionType)}</strong>
-          <span class="muted">${escapeHtml(item.provider)} / ${escapeHtml(item.model)}</span>
-        </div>
-        <div class="muted">${escapeHtml(item.sourceLanguage)} → ${escapeHtml(item.targetLanguage)}</div>
-        <pre>${escapeHtml(item.outputText)}</pre>
-      </article>
-    `
-    )
-    .join("");
+  state.ui.translationJob = {
+    rootKey: clauseKey,
+    totalRequests: estimatedRequests,
+    completedRequests: 0,
+    currentLabel: getLabelForKey(clauseKey),
+  };
+  renderTranslationStatus();
+
+  try {
+    let completedRequests = 0;
+    for (let index = 0; index < translationNodes.length; index += 1) {
+      const currentNode = translationNodes[index];
+      state.ui.translationJob = {
+        ...state.ui.translationJob,
+        completedRequests,
+        currentLabel: getLabelForKey(currentNode.key),
+      };
+      renderTranslationStatus();
+      await createTranslatedNote({
+        type: "clause",
+        clauseKey: currentNode.key,
+        sourceText: currentNode.sourceText,
+        clauseLabel: getLabelForKey(currentNode.key),
+        targetLanguage: "ko",
+      });
+      completedRequests += Number(currentNode.requestCount || 0);
+      state.ui.translationJob = {
+        ...state.ui.translationJob,
+        completedRequests,
+        currentLabel: getLabelForKey(currentNode.key),
+      };
+      renderTranslationStatus();
+    }
+    setMessage(`절 번역 완료: ${translationNodes.length}개 절`, false);
+  } finally {
+    window.setTimeout(() => {
+      state.ui.translationJob = null;
+      renderTranslationStatus();
+    }, 1200);
+    endBusy();
+  }
+}
+
+function collectTranslationNodes(node) {
+  if (!node) {
+    return [];
+  }
+  const hasExistingClauseNote = getNotesForClause(node.key).some((note) => note.type === "clause");
+  const sourceText = getClauseSourceText(node);
+  const current = sourceText && !hasExistingClauseNote ? [{ key: node.key, sourceText, requestCount: estimateTranslationRequestCount(sourceText) }] : [];
+  return [...current, ...(node.children || []).flatMap((child) => collectTranslationNodes(child))];
+}
+
+function estimateTranslationRequestCount(text) {
+  return splitTranslationText(text).length;
+}
+
+function splitTranslationText(text, limit = TRANSLATION_CHUNK_LIMIT) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned) {
+    return [];
+  }
+  if (cleaned.length <= limit) {
+    return [cleaned];
+  }
+
+  const paragraphs = cleaned
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const units = paragraphs.length ? paragraphs : [cleaned];
+  const chunks = [];
+  let currentParts = [];
+  let currentLength = 0;
+
+  units.forEach((paragraph) => {
+    if (paragraph.length > limit) {
+      if (currentParts.length) {
+        chunks.push(currentParts.join("\n\n"));
+        currentParts = [];
+        currentLength = 0;
+      }
+      for (let start = 0; start < paragraph.length; start += limit) {
+        chunks.push(paragraph.slice(start, start + limit).trim());
+      }
+      return;
+    }
+
+    const separator = currentParts.length ? 2 : 0;
+    const nextLength = currentLength + separator + paragraph.length;
+    if (currentParts.length && nextLength > limit) {
+      chunks.push(currentParts.join("\n\n"));
+      currentParts = [paragraph];
+      currentLength = paragraph.length;
+      return;
+    }
+
+    currentParts.push(paragraph);
+    currentLength = nextLength;
+  });
+
+  if (currentParts.length) {
+    chunks.push(currentParts.join("\n\n"));
+  }
+
+  return chunks.filter(Boolean);
+}
+
+function getClauseSourceText(node) {
+  if (!node) {
+    return "";
+  }
+  const text = String(node.text || "").trim();
+  if (text) {
+    return text;
+  }
+  const blockText = (node.blocks || [])
+    .flatMap((block) => {
+      if (block.type === "paragraph") {
+        return [String(block.text || "").trim()];
+      }
+      if (block.type === "table") {
+        return (block.cells || []).flat().map((cell) => String(cell.text || "").trim());
+      }
+      if (block.type === "image") {
+        return [String(block.alt || "").trim()];
+      }
+      return [];
+    })
+    .filter(Boolean)
+    .join("\n");
+  return blockText || String(node.clauseTitle || "").trim();
+}
+
+async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceText, clauseLabel, targetLanguage }) {
+  try {
+    const sourceLanguage = inferSourceLanguage(sourceText);
+    const response = await apiPost("/api/clause-browser/llm-actions", {
+      actionType: "translate",
+      text: sourceText,
+      sourceLanguage,
+      targetLanguage,
+      context: clauseLabel,
+    });
+    upsertNote({
+      id: type === "clause" ? `${clauseKey}:clause` : `selection:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      type,
+      clauseKey,
+      blockIndex,
+      clauseLabel,
+      sourceText,
+      translation: response.data.outputText,
+      sourceLanguage,
+      targetLanguage,
+      collapsed: false,
+    });
+    if (!state.ui.translationJob || Number(state.ui.translationJob.totalRequests || 0) <= 1) {
+      setMessage(`번역 완료: ${type === "clause" ? "절 메모" : "선택 메모"}`, false);
+    }
+  } catch (error) {
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
+  }
+}
+
+function getNotesForClause(clauseKey) {
+  return (state.ui.notes || []).filter((note) => note.clauseKey === clauseKey);
+}
+
+function getSelectionNotesForBlock(clauseKey, blockIndex) {
+  return (state.ui.notes || []).filter(
+    (note) => note.type === "selection" && note.clauseKey === clauseKey && Number(note.blockIndex) === Number(blockIndex)
+  );
+}
+
+function upsertNote(note) {
+  const existingIndex = (state.ui.notes || []).findIndex((item) => item.id === note.id);
+  if (existingIndex >= 0) {
+    state.ui.notes = state.ui.notes.map((item, index) => (index === existingIndex ? { ...item, ...note } : item));
+  } else {
+    state.ui.notes = [note, ...(state.ui.notes || [])];
+  }
+  persistSessionState();
+  renderLoadedTree();
+}
+
+function updateNoteField(noteId, field, value) {
+  state.ui.notes = (state.ui.notes || []).map((note) => (note.id === noteId ? { ...note, [field]: value } : note));
+  persistSessionState();
+}
+
+function toggleClauseNotes(clauseKey) {
+  const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
+  if (!notes.length) {
+    return;
+  }
+  const shouldCollapse = notes.some((note) => !note.collapsed);
+  const ids = new Set(notes.map((note) => note.id));
+  state.ui.notes = (state.ui.notes || []).map((note) =>
+    ids.has(note.id) ? { ...note, collapsed: shouldCollapse } : note
+  );
+  persistSessionState();
+  renderLoadedTree();
+}
+
+function toggleSelectionNotes(clauseKey, blockIndex) {
+  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+  if (!notes.length) {
+    return;
+  }
+  const shouldCollapse = notes.some((note) => !note.collapsed);
+  const ids = new Set(notes.map((note) => note.id));
+  state.ui.notes = (state.ui.notes || []).map((note) =>
+    ids.has(note.id) ? { ...note, collapsed: shouldCollapse } : note
+  );
+  persistSessionState();
+  renderLoadedTree();
+}
+
+function deleteNote(noteId) {
+  state.ui.notes = (state.ui.notes || []).filter((note) => note.id !== noteId);
+  persistSessionState();
+  renderLoadedTree();
+}
+
+function pruneNotesForNodeKey(nodeKey) {
+  const node = findNodeByKey(nodeKey);
+  if (!node) {
+    return;
+  }
+  const subtreeKeys = new Set(collectNodeKeys(node));
+  state.ui.notes = (state.ui.notes || []).filter((note) => !subtreeKeys.has(note.clauseKey));
+}
+
+function collectNodeKeys(node) {
+  return [node.key, ...(node.children || []).flatMap((child) => collectNodeKeys(child))];
+}
+
+function inferSourceLanguage(text) {
+  return /[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(String(text || "")) ? "ko" : "en";
+}
+
+function inferTargetLanguage(text) {
+  return inferSourceLanguage(text) === "ko" ? "en" : "ko";
 }
 
 function renderSpecbotResults() {
@@ -1020,8 +1506,24 @@ function renderSpecbotResults() {
           <div class="muted">${escapeHtml((item.clausePath || []).join(" > "))}</div>
           <div class="muted">${escapeHtml(item.textPreview || "")}</div>
           <div class="tree-actions">
-            <button class="ghost" data-action="load-specbot-hit" data-spec-no="${escapeHtml(item.specNo)}" data-clause-id="${escapeHtml(item.clauseId)}">이 절 추가</button>
-            <button class="danger" data-action="reject-specbot-hit" data-spec-no="${escapeHtml(item.specNo)}" data-clause-id="${escapeHtml(item.clauseId)}">거절</button>
+            <button
+              class="success icon-button"
+              type="button"
+              title="이 절 추가"
+              aria-label="이 절 추가"
+              data-action="load-specbot-hit"
+              data-spec-no="${escapeHtml(item.specNo)}"
+              data-clause-id="${escapeHtml(item.clauseId)}"
+            >O</button>
+            <button
+              class="danger icon-button"
+              type="button"
+              title="거절"
+              aria-label="거절"
+              data-action="reject-specbot-hit"
+              data-spec-no="${escapeHtml(item.specNo)}"
+              data-clause-id="${escapeHtml(item.clauseId)}"
+            >✕</button>
           </div>
         </article>
       `
@@ -1058,10 +1560,14 @@ function hideNodeMenu() {
 }
 
 async function runSpecbotQuery() {
+  if (!beginBusy(SPECBOT_QUERY_BUSY_LABEL)) {
+    return;
+  }
   const query = elements.specbotQuery.value.trim();
   state.ui.specbotQueryText = query;
   persistSessionState();
   if (!query) {
+    endBusy();
     setMessage("SpecBot query를 입력하세요.", true);
     return;
   }
@@ -1079,9 +1585,12 @@ async function runSpecbotQuery() {
     renderSpecbotResults();
     setMessage(`SpecBot query 완료: ${query}`, false);
   } catch (error) {
-    setMessage(error.message, true);
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
   } finally {
     setSpecbotQueryLoading(false);
+    endBusy();
   }
 }
 
@@ -1348,12 +1857,17 @@ function clearSpecbotResults() {
 }
 
 async function exportDocx() {
+  if (!beginBusy("DOCX 저장 중입니다.")) {
+    return;
+  }
   if (!state.loadedRoots.length) {
+    endBusy();
     setMessage("저장할 절이 없습니다.", true);
     return;
   }
   const title = elements.exportTitle.value.trim();
   if (!title) {
+    endBusy();
     setMessage("DOCX 제목을 입력하세요.", true);
     return;
   }
@@ -1366,8 +1880,57 @@ async function exportDocx() {
     setMessage(`DOCX 저장 완료: ${response.data.relativePath}`, false);
     elements.exportTitle.value = "";
   } catch (error) {
-    setMessage(error.message, true);
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
+  } finally {
+    endBusy();
   }
+}
+
+function beginBusy(label, options = {}) {
+  if (options.guard === false) {
+    return true;
+  }
+  if (options.allowDuringSpecbotQuery && state.ui.busy === SPECBOT_QUERY_BUSY_LABEL) {
+    return true;
+  }
+  if (state.ui.busy) {
+    if (!options.silent) {
+      setMessage(`다른 작업이 진행 중입니다: ${state.ui.busy}`, true);
+    }
+    return false;
+  }
+  state.ui.busy = label;
+  updateBusyUi();
+  return true;
+}
+
+function endBusy(options = {}) {
+  if (options.guard === false) {
+    return;
+  }
+  if (options.allowDuringSpecbotQuery && state.ui.busy === SPECBOT_QUERY_BUSY_LABEL) {
+    return;
+  }
+  state.ui.busy = null;
+  updateBusyUi();
+}
+
+function updateBusyUi() {
+  const isBusy = Boolean(state.ui.busy);
+  const allowsDocumentBrowsing = [
+    SPECBOT_QUERY_BUSY_LABEL,
+    DOCUMENT_SEARCH_BUSY_LABEL,
+    DOCUMENT_SELECT_BUSY_LABEL,
+  ].includes(state.ui.busy);
+  elements.openPickerButton.disabled = isBusy && !allowsDocumentBrowsing;
+  elements.documentSearch.disabled = isBusy && !allowsDocumentBrowsing;
+  elements.clauseSearch.disabled = isBusy && !allowsDocumentBrowsing;
+  elements.exportButton.disabled = isBusy;
+  elements.openSpecbotSettings.disabled = isBusy;
+  elements.runSpecbotQuery.disabled = isBusy;
+  elements.specbotQuery.disabled = isBusy;
 }
 
 function setMessage(text, isError) {
@@ -1377,8 +1940,16 @@ function setMessage(text, isError) {
 }
 
 async function apiGet(url) {
-  const response = await fetch(url);
+  const { signal, release } = registerRequestController();
+  let response;
+  try {
+    response = await fetch(url, { signal });
+  } catch (error) {
+    release();
+    throw normalizeRequestError(error);
+  }
   const payload = await parseResponse(response);
+  release();
   if (!response.ok) {
     throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
   }
@@ -1386,12 +1957,21 @@ async function apiGet(url) {
 }
 
 async function apiPost(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const { signal, release } = registerRequestController();
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    release();
+    throw normalizeRequestError(error);
+  }
   const payload = await parseResponse(response);
+  release();
   if (!response.ok) {
     throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
   }
@@ -1477,6 +2057,31 @@ function debounce(fn, wait) {
   };
 }
 
+function registerRequestController() {
+  const controller = new AbortController();
+  activeRequestControllers.add(controller);
+  return {
+    signal: controller.signal,
+    release: () => activeRequestControllers.delete(controller),
+  };
+}
+
+function abortActiveRequests() {
+  activeRequestControllers.forEach((controller) => controller.abort());
+  activeRequestControllers.clear();
+}
+
+function normalizeRequestError(error) {
+  if (error?.name === "AbortError") {
+    return new Error("__REQUEST_ABORTED__");
+  }
+  return error;
+}
+
+function isAbortedRequestError(error) {
+  return error instanceof Error && error.message === "__REQUEST_ABORTED__";
+}
+
 function persistSessionState() {
   const payload = {
     activeSpecNo: state.activeSpecNo,
@@ -1489,6 +2094,7 @@ function persistSessionState() {
     specbotQueryText: state.ui.specbotQueryText || "",
     specbotSettings: state.ui.specbotSettings,
     specbotResults: state.ui.specbotResults,
+    notes: state.ui.notes || [],
   };
   try {
     window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
@@ -1512,6 +2118,7 @@ function restoreSessionState() {
     state.ui.collapsedSpecs = new Set(Array.isArray(payload.collapsedSpecs) ? payload.collapsedSpecs : []);
     state.ui.clauseQuery = payload.clauseQuery || "";
     state.ui.specbotQueryText = payload.specbotQueryText || "";
+    state.ui.notes = Array.isArray(payload.notes) ? payload.notes : [];
     if (payload.specbotSettings && typeof payload.specbotSettings === "object") {
       state.ui.specbotSettings = {
         ...payload.specbotSettings,
@@ -1535,7 +2142,6 @@ export {
   ensureClauseCatalog,
   renderLoadedTree,
   renderSelectedClauseList,
-  renderResults,
   renderSpecbotResults,
   renderClauseTree,
   openPicker,
@@ -1545,7 +2151,7 @@ export {
   saveSpecbotSettings,
   clearRejectedSpecbotClauses,
   exportDocx,
-  runAction,
+  runSelectionAction,
   handleSelectionChange,
   hideSelectionMenu,
   hideNodeMenu,

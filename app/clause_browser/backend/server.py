@@ -50,6 +50,8 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
     llm_service = LLMActionService(
         provider=active_settings.llm_provider,
         model=active_settings.llm_model,
+        system_prompt_path=active_settings.project_root / "system_prompt_translate.txt",
+        user_prompt_path=active_settings.project_root / "user_prompt_translate.txt",
     )
     active_specbot_service = specbot_service or SpecbotQueryHttpService(base_url=active_settings.specbot_query_api_url)
 
@@ -107,8 +109,8 @@ def load_settings() -> ClauseBrowserSettings:
 
     cors_env = os.environ.get("SPECBOT_CLAUSE_BROWSER_CORS_ORIGINS", "").strip()
     cors_origins = tuple(part.strip() for part in cors_env.split(",") if part.strip())
-    llm_provider = os.environ.get("SPECBOT_LLM_ACTION_PROVIDER", "mock").strip() or "mock"
-    llm_model = os.environ.get("SPECBOT_LLM_ACTION_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    llm_provider = os.environ.get("SPECBOT_LLM_ACTION_PROVIDER", "openai").strip() or "openai"
+    llm_model = os.environ.get("SPECBOT_LLM_ACTION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
     specbot_query_api_url = os.environ.get("SPECBOT_QUERY_API_URL", "http://127.0.0.1:8010").strip() or "http://127.0.0.1:8010"
 
     languages_env = os.environ.get("SPECBOT_CLAUSE_BROWSER_LANGUAGES", "ko:Korean,en:English")

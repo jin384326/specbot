@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+import asyncio
+
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.clause_browser.backend.repository import ClauseRepository
@@ -34,10 +36,10 @@ class ExportRequest(BaseModel):
 
 class LLMActionRequest(BaseModel):
     actionType: str = Field(min_length=1, max_length=50)
-    text: str = Field(min_length=1, max_length=20000)
+    text: str = Field(min_length=1, max_length=200000)
     sourceLanguage: str = Field(min_length=2, max_length=16)
     targetLanguage: str = Field(min_length=2, max_length=16)
-    context: str | None = Field(default=None, max_length=500)
+    context: str | None = Field(default=None, max_length=2000)
 
 
 @dataclass(frozen=True)
@@ -158,20 +160,44 @@ def create_router(
         return success(result)
 
     @router.post("/specbot/query")
-    def run_specbot_query(request: SpecbotQueryRequest) -> dict[str, Any]:
+    async def run_specbot_query(request: Request, payload: SpecbotQueryRequest) -> dict[str, Any]:
         if specbot_service is None:
             raise HTTPException(status_code=503, detail="SpecBot query service is unavailable.")
+        disconnect_event = asyncio.Event()
+
+        async def watch_disconnect() -> None:
+            if request is None:
+                return
+            while not disconnect_event.is_set():
+                if await request.is_disconnected():
+                    disconnect_event.set()
+                    return
+                await asyncio.sleep(0.2)
+
+        watcher = asyncio.create_task(watch_disconnect())
         try:
-            result = specbot_service.run(
-                query=request.query,
-                settings=request.settings.model_dump(mode="json") if request.settings else None,
-                exclude_specs=request.excludeSpecs,
-                exclude_clauses=[item.model_dump(mode="json") for item in request.excludeClauses],
-            )
+            if hasattr(specbot_service, "run_async"):
+                result = await specbot_service.run_async(
+                    query=payload.query,
+                    settings=payload.settings.model_dump(mode="json") if payload.settings else None,
+                    exclude_specs=payload.excludeSpecs,
+                    exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
+                    should_cancel=disconnect_event.is_set,
+                )
+            else:
+                result = specbot_service.run(
+                    query=payload.query,
+                    settings=payload.settings.model_dump(mode="json") if payload.settings else None,
+                    exclude_specs=payload.excludeSpecs,
+                    exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=f"SpecBot query failed: {exc}") from exc
+        finally:
+            disconnect_event.set()
+            watcher.cancel()
         hits = result.get("hits") or []
         valid_hits = [
             hit
