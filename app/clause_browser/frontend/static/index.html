@@ -161,25 +161,22 @@
             <div class="settings-grid">
               <label class="field"><span>Base URL</span><input id="setting-base-url" type="text" /></label>
               <label class="field"><span>Config Base URL</span><input id="setting-config-base-url" type="text" /></label>
-              <label class="field"><span>Limit</span><input id="setting-limit" type="number" min="1" /></label>
-              <label class="field"><span>Iterations</span><input id="setting-iterations" type="number" min="1" /></label>
-              <label class="field"><span>Next Iteration Limit</span><input id="setting-next-iteration-limit" type="number" min="1" /></label>
+              <label class="field"><span>Limit</span><input id="setting-limit" type="number" min="1" disabled /></label>
+              <label class="field"><span>Iterations</span><input id="setting-iterations" type="number" min="1" disabled /></label>
+              <label class="field"><span>Next Iteration Limit</span><input id="setting-next-iteration-limit" type="number" min="1" disabled /></label>
               <label class="field">
                 <span>Follow-up Mode</span>
-                <select id="setting-followup-mode">
+                <select id="setting-followup-mode" disabled>
                   <option value="sentence-summary">sentence-summary</option>
                   <option value="keyword">keyword</option>
                 </select>
               </label>
-              <label class="field"><span>Summary</span><input id="setting-summary" type="text" /></label>
-              <label class="field"><span>Registry</span><input id="setting-registry" type="text" /></label>
-              <label class="field"><span>Local Model Dir</span><input id="setting-local-model-dir" type="text" /></label>
-              <label class="field"><span>Device</span><input id="setting-device" type="text" /></label>
-              <label class="field"><span>Sparse Boost</span><input id="setting-sparse-boost" type="number" step="0.1" /></label>
-              <label class="field"><span>Vector Boost</span><input id="setting-vector-boost" type="number" step="0.1" /></label>
-              <label class="field field-wide">
-                <span><input id="setting-auto-exclude-loaded" type="checkbox" checked /> 현재 로드된 절 자동 제외</span>
-              </label>
+              <label class="field"><span>Summary</span><input id="setting-summary" type="text" disabled /></label>
+              <label class="field"><span>Registry</span><input id="setting-registry" type="text" disabled /></label>
+              <label class="field"><span>Local Model Dir</span><input id="setting-local-model-dir" type="text" disabled /></label>
+              <label class="field"><span>Device</span><input id="setting-device" type="text" disabled /></label>
+              <label class="field"><span>Sparse Boost</span><input id="setting-sparse-boost" type="number" step="0.1" disabled /></label>
+              <label class="field"><span>Vector Boost</span><input id="setting-vector-boost" type="number" step="0.1" disabled /></label>
               <label class="field field-wide">
                 <span>추가 제외 규격</span>
                 <textarea id="setting-exclude-specs" rows="3" placeholder="예: 23502&#10;29512"></textarea>

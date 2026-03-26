@@ -92,7 +92,6 @@ function bindElements() {
   elements.settingDocumentList = document.getElementById("setting-document-list");
   elements.settingRejectedClauseList = document.getElementById("setting-rejected-clause-list");
   elements.settingClearRejectedClauses = document.getElementById("setting-clear-rejected-clauses");
-  elements.settingAutoExcludeLoaded = document.getElementById("setting-auto-exclude-loaded");
   elements.settingExcludeSpecs = document.getElementById("setting-exclude-specs");
   elements.settingExcludeClauses = document.getElementById("setting-exclude-clauses");
   elements.saveSpecbotSettings = document.getElementById("save-specbot-settings");
@@ -201,7 +200,6 @@ function applySpecbotSettingsToForm() {
   elements.settingDevice.value = settings.device || "cuda";
   elements.settingSparseBoost.value = settings.sparseBoost ?? 0;
   elements.settingVectorBoost.value = settings.vectorBoost ?? 1;
-  elements.settingAutoExcludeLoaded.checked = settings.autoExcludeLoaded !== false;
   elements.settingExcludeSpecs.value = Array.isArray(settings.excludeSpecs) ? settings.excludeSpecs.join("\n") : "";
   elements.settingExcludeClauses.value = Array.isArray(settings.excludeClauses)
     ? settings.excludeClauses.map((item) => `${item.specNo}:${item.clauseId}`).join("\n")
@@ -224,7 +222,6 @@ function saveSpecbotSettings() {
     sparseBoost: Number(elements.settingSparseBoost.value),
     vectorBoost: Number(elements.settingVectorBoost.value),
     includedSpecs: getSelectedSpecbotDocuments(),
-    autoExcludeLoaded: elements.settingAutoExcludeLoaded.checked,
     excludeSpecs: parseSpecbotExcludeSpecs(elements.settingExcludeSpecs.value),
     excludeClauses: parseSpecbotExcludeClauses(elements.settingExcludeClauses.value),
     rejectedClauses,
@@ -1713,11 +1710,9 @@ function buildSpecbotExclusions() {
     excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
   });
 
-  if (settings.autoExcludeLoaded !== false) {
-    collectLoadedClausePairs(state.loadedRoots).forEach((item) => {
-      excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
-    });
-  }
+  collectLoadedClausePairs(state.loadedRoots).forEach((item) => {
+    excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
+  });
 
   return {
     excludeSpecs: [...excludeSpecs].sort(compareMixedToken),
