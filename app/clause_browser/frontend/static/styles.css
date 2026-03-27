@@ -867,7 +867,19 @@ button:disabled {
 }
 
 .notice-card {
-  max-width: min(460px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - 32px));
+  max-width: min(420px, calc(100vw - 32px));
+  height: auto;
+  min-height: 0;
+  max-height: min(240px, calc(100vh - 32px));
+}
+
+.board-delete-card {
+  width: min(380px, calc(100vw - 32px));
+  max-width: min(380px, calc(100vw - 32px));
+  height: auto;
+  min-height: 0;
+  max-height: min(240px, calc(100vh - 32px));
 }
 
 .clause-note-modal-card {

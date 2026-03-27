@@ -100,4 +100,19 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
             raise HTTPException(status_code=409, detail={"message": str(exc), "lock": exc.lock.to_dict()}) from exc
         return {"success": True, "data": {**post.to_dict(), "lock": lock.to_dict()}}
 
+    @router.post("/posts/{post_id}/delete")
+    def delete_post(post_id: str, payload: BoardLockPayload) -> dict[str, Any]:
+        current_lock = locks.get_lock(post_id)
+        if current_lock:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": f"Post is already being edited by {current_lock.editor_label}.", "lock": current_lock.to_dict()},
+            )
+        try:
+            repository.delete_post(post_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        locks.clear(post_id=post_id)
+        return {"success": True, "data": {"deleted": True, "postId": post_id}}
+
     return router

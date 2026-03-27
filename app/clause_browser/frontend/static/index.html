@@ -243,6 +243,26 @@
       </div>
     </div>
 
+    <div id="board-delete-modal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-action="close-board-delete-modal"></div>
+      <div class="modal-card board-delete-card">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">Delete Post</p>
+            <h2>게시글을 삭제할까요?</h2>
+          </div>
+          <button class="ghost" data-action="close-board-delete-modal">닫기</button>
+        </header>
+        <div class="notice-modal-text">
+          <p id="board-delete-modal-text">삭제 후에는 되돌릴 수 없습니다.</p>
+        </div>
+        <div class="modal-footer">
+          <button id="board-delete-cancel" class="ghost" type="button">취소</button>
+          <button id="board-delete-confirm" class="danger" type="button">삭제</button>
+        </div>
+      </div>
+    </div>
+
     <div id="clause-note-modal" class="modal-shell hidden" aria-hidden="true">
       <div class="modal-backdrop" data-action="close-clause-note-modal"></div>
       <div class="modal-card clause-note-modal-card">

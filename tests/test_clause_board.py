@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from app.clause_browser.backend.board_repository import BoardLockManager, BoardPostRepository, LockConflictError
 
 
@@ -24,6 +23,16 @@ def test_board_repository_create_and_update(tmp_path: Path) -> None:
     assert repository.get_post(created.post_id).title == "Updated post"
 
 
+def test_board_repository_delete_removes_post(tmp_path: Path) -> None:
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    created = repository.create_post(title="Delete me")
+
+    repository.delete_post(created.post_id)
+
+    with pytest.raises(KeyError):
+        repository.get_post(created.post_id)
+
+
 def test_board_lock_conflict_blocks_second_editor(tmp_path: Path) -> None:
     locks = BoardLockManager(ttl_seconds=120)
     first = locks.acquire(post_id="post-1", editor_id="editor-a", editor_label="Alice")
@@ -33,3 +42,12 @@ def test_board_lock_conflict_blocks_second_editor(tmp_path: Path) -> None:
 
     assert first.editor_label == "Alice"
     assert exc_info.value.lock.editor_label == "Alice"
+
+
+def test_board_lock_clear_releases_post_lock() -> None:
+    locks = BoardLockManager(ttl_seconds=120)
+    locks.acquire(post_id="post-1", editor_id="editor-a", editor_label="Alice")
+
+    locks.clear(post_id="post-1")
+
+    assert locks.get_lock("post-1") is None

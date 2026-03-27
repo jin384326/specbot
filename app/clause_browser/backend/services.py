@@ -18,6 +18,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 from docx.shared import Pt
+from docx.text.paragraph import Paragraph
 
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -131,7 +132,7 @@ class DocxExportService:
         clause_title = str(clause.get("clauseTitle") or "").strip()
         clause_key = str(clause.get("key") or "").strip()
         heading_text = " ".join(part for part in [clause_id, clause_title] if part).strip() or clause_id or clause_title
-        document.add_heading(heading_text, level=min(depth + 1, 9))
+        heading_paragraph = document.add_heading(heading_text, level=min(depth + 1, 9))
 
         blocks = list(clause.get("blocks") or [])
         if blocks:
@@ -148,7 +149,7 @@ class DocxExportService:
                             exported_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         for note in note_index.get("clause", {}).get(clause_key, []):
-            self._write_note(document, note, prefix="Clause memo")
+            self._attach_comment_to_paragraph(heading_paragraph, note)
 
         total = 1
         for child in clause.get("children") or []:
@@ -165,22 +166,20 @@ class DocxExportService:
         note_index: dict[str, Any],
     ) -> None:
         block_type = str(block.get("type") or "")
+        selection_notes = note_index.get("selection", {}).get((clause_key, block_index), [])
         if block_type == "paragraph":
             text = str(block.get("text") or "").strip()
             if text:
-                paragraph = document.add_paragraph(text)
+                paragraph = self._add_paragraph_with_notes(document, text, selection_notes)
                 self._apply_paragraph_format(paragraph, block.get("format") or {})
                 if self._is_caption_paragraph(text, block.get("format") or {}):
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         elif block_type == "table":
-            self._write_table(document, block)
+            self._write_table(document, block, selection_notes)
         elif block_type == "image":
             self._write_image(document, block)
 
-        for note in note_index.get("selection", {}).get((clause_key, block_index), []):
-            self._write_note(document, note, prefix="Selection memo")
-
-    def _write_table(self, document: Document, block: dict[str, Any]) -> None:
+    def _write_table(self, document: Document, block: dict[str, Any], selection_notes: list[dict[str, Any]]) -> None:
         cells = list(block.get("cells") or [])
         if not cells:
             rows = list(block.get("rows") or [])
@@ -188,9 +187,14 @@ class DocxExportService:
                 return
             table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
             table.style = "Table Grid"
+            anchor_paragraphs: list[Paragraph] = []
             for row_idx, row in enumerate(rows):
                 for col_idx, value in enumerate(row):
-                    table.cell(row_idx, col_idx).text = str(value or "")
+                    paragraph = table.cell(row_idx, col_idx).paragraphs[0]
+                    paragraph.text = str(value or "")
+                    anchor_paragraphs.append(paragraph)
+            for note in selection_notes:
+                self._attach_comment_to_paragraphs(anchor_paragraphs, note)
             return
 
         row_count = len(cells)
@@ -198,6 +202,7 @@ class DocxExportService:
         table = document.add_table(rows=row_count, cols=col_count)
         table.style = "Table Grid"
         occupied: set[tuple[int, int]] = set()
+        anchor_paragraphs: list[Paragraph] = []
         for row_idx, row in enumerate(cells):
             col_idx = 0
             for cell_data in row:
@@ -206,7 +211,9 @@ class DocxExportService:
                 rowspan = max(1, int(cell_data.get("rowspan") or 1))
                 colspan = max(1, int(cell_data.get("colspan") or 1))
                 base_cell = table.cell(row_idx, col_idx)
-                base_cell.text = str(cell_data.get("text") or "")
+                paragraph = base_cell.paragraphs[0]
+                paragraph.text = str(cell_data.get("text") or "")
+                anchor_paragraphs.append(paragraph)
                 if colspan > 1:
                     base_cell = base_cell.merge(table.cell(row_idx, col_idx + colspan - 1))
                 if rowspan > 1:
@@ -215,6 +222,8 @@ class DocxExportService:
                     for col_offset in range(colspan):
                         occupied.add((row_idx + row_offset, col_idx + col_offset))
                 col_idx += colspan
+        for note in selection_notes:
+            self._attach_comment_to_paragraphs(anchor_paragraphs, note)
 
     def _write_image(self, document: Document, block: dict[str, Any]) -> None:
         image_path = self._resolve_image_path(str(block.get("src") or ""))
@@ -297,18 +306,89 @@ class DocxExportService:
                 selection_notes.setdefault((clause_key, block_index), []).append(note)
         return {"clause": clause_notes, "selection": selection_notes}
 
+    def _add_paragraph_with_notes(self, document: Document, text: str, notes: list[dict[str, Any]]) -> Paragraph:
+        paragraph = document.add_paragraph()
+        comment_targets = self._build_comment_targets(text, notes)
+        if not comment_targets:
+            paragraph.add_run(text)
+            return paragraph
+
+        cursor = 0
+        run_groups: list[tuple[list[Any], dict[str, Any]]] = []
+        for start, end, note in comment_targets:
+            if start > cursor:
+                paragraph.add_run(text[cursor:start])
+            commented_run = paragraph.add_run(text[start:end])
+            run_groups.append(([commented_run], note))
+            cursor = end
+        if cursor < len(text):
+            paragraph.add_run(text[cursor:])
+
+        for runs, note in run_groups:
+            self._add_comment(runs, note)
+        return paragraph
+
     @staticmethod
-    def _write_note(document: Document, note: dict[str, Any], *, prefix: str) -> None:
+    def _build_comment_targets(text: str, notes: list[dict[str, Any]]) -> list[tuple[int, int, dict[str, Any]]]:
+        ranges: list[tuple[int, int, dict[str, Any]]] = []
+        occupied: list[tuple[int, int]] = []
+        for note in notes:
+            source_text = str(note.get("sourceText") or "").strip()
+            if not source_text:
+                continue
+            start = text.find(source_text)
+            if start < 0:
+                continue
+            end = start + len(source_text)
+            if any(not (end <= left or start >= right) for left, right in occupied):
+                continue
+            ranges.append((start, end, note))
+            occupied.append((start, end))
+        return sorted(ranges, key=lambda item: item[0])
+
+    def _attach_comment_to_paragraphs(self, paragraphs: list[Paragraph], note: dict[str, Any]) -> None:
         source_text = str(note.get("sourceText") or "").strip()
-        translation = str(note.get("translation") or "").strip()
         if source_text:
-            paragraph = document.add_paragraph()
-            paragraph.add_run(f"{prefix} source: ").bold = True
-            paragraph.add_run(source_text)
-        if translation:
-            paragraph = document.add_paragraph()
-            paragraph.add_run(f"{prefix}: ").bold = True
-            paragraph.add_run(translation)
+            for paragraph in paragraphs:
+                if source_text and source_text in paragraph.text:
+                    rebuilt = self._rebuild_paragraph_with_single_comment(paragraph, source_text, note)
+                    if rebuilt:
+                        return
+        if paragraphs:
+            self._attach_comment_to_paragraph(paragraphs[0], note)
+
+    def _rebuild_paragraph_with_single_comment(self, paragraph: Paragraph, source_text: str, note: dict[str, Any]) -> bool:
+        text = paragraph.text
+        start = text.find(source_text)
+        if start < 0:
+            return False
+        end = start + len(source_text)
+        paragraph.clear()
+        runs = []
+        if start > 0:
+            paragraph.add_run(text[:start])
+        comment_run = paragraph.add_run(text[start:end])
+        runs.append(comment_run)
+        if end < len(text):
+            paragraph.add_run(text[end:])
+        self._add_comment(runs, note)
+        return True
+
+    def _attach_comment_to_paragraph(self, paragraph: Paragraph, note: dict[str, Any]) -> None:
+        if not paragraph.runs:
+            paragraph.add_run(paragraph.text or " ")
+        self._add_comment([paragraph.runs[0]], note)
+
+    @staticmethod
+    def _add_comment(runs: list[Any], note: dict[str, Any]) -> None:
+        translation = str(note.get("translation") or "").strip()
+        if not translation or not runs:
+            return
+        try:
+            document = runs[0]._parent.part.document
+            document.add_comment(runs, text=translation, author="SpecBot", initials="SB")
+        except Exception:
+            return
 
 
 class LLMActionService:

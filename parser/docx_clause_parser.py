@@ -341,30 +341,53 @@ def is_probable_clause_id(clause_id: str) -> bool:
 
 
 def _flatten_table_cells_row_major(table: Table) -> list[_Cell]:
-    """Expand the table to one ``_Cell`` per layout-grid slot (same as ``Table._cells``).
-
-    Some 3GPP (and other) documents contain invalid vertical-merge markup where
-    ``w:vMerge w:val=\"continue\"`` appears before a full first row exists in the
-    grid; ``Table._cells`` then does ``cells[-col_count]`` and raises ``IndexError``.
-    In that case we fall back to a real ``w:tc`` cell so parsing can continue.
-    """
+    """Expand the table to one ``_Cell`` per layout-grid slot, preserving row boundaries."""
     col_count = table._column_count
     cells: list[_Cell] = []
-    for tc in table._tbl.iter_tcs():
-        for grid_span_idx in range(tc.grid_span):
-            if tc.vMerge == ST_Merge.CONTINUE:
-                if len(cells) >= col_count:
-                    cells.append(cells[-col_count])
+    for row in table.rows:
+        row_cells: list[_Cell] = []
+        for tc in row._tr.tc_lst:
+            cell = _Cell(tc, table)
+            grid_span = max(1, int(tc.grid_span))
+            for grid_span_idx in range(grid_span):
+                if tc.vMerge == ST_Merge.CONTINUE:
+                    if len(cells) >= col_count:
+                        row_cells.append(cells[-col_count + len(row_cells)])
+                    else:
+                        row_cells.append(cell)
+                elif grid_span_idx > 0 and row_cells:
+                    row_cells.append(row_cells[-1])
                 else:
-                    cells.append(_Cell(tc, table))
-            elif grid_span_idx > 0:
-                if cells:
-                    cells.append(cells[-1])
-                else:
-                    cells.append(_Cell(tc, table))
-            else:
-                cells.append(_Cell(tc, table))
+                    row_cells.append(cell)
+        cells.extend(row_cells[:col_count])
     return cells
+
+
+def _normalize_table_rows(table: Table) -> list[list[str]]:
+    row_lengths = [len(row.cells) for row in table.rows if len(row.cells) > 0]
+    if not row_lengths:
+        return []
+    logical_col_count = max(set(row_lengths), key=row_lengths.count)
+    if len(set(row_lengths)) == 1 and logical_col_count == table._column_count:
+        return []
+    matrix: list[list[str]] = []
+    for row in table.rows:
+        values: list[str] = []
+        prev_fp: str | None = None
+        for cell in row.cells:
+            value = normalize_table_cell_text(cell.text)
+            fingerprint = text_fingerprint(value)
+            if prev_fp is not None and fingerprint == prev_fp:
+                continue
+            values.append(value)
+            prev_fp = fingerprint
+        while len(values) > logical_col_count and not normalize_whitespace(values[-1]):
+            values.pop()
+        if len(values) < logical_col_count:
+            values.extend([""] * (logical_col_count - len(values)))
+        if any(normalize_whitespace(value) for value in values):
+            matrix.append(values[:logical_col_count])
+    return matrix
 
 
 def clean_table_matrix(table: Table) -> list[list[str]]:
@@ -376,6 +399,10 @@ def clean_table_matrix(table: Table) -> list[list[str]]:
     ``id(cell)`` identifies merged regions. We use :func:`_flatten_table_cells_row_major`
     instead of ``Table._cells`` to survive malformed ``vMerge`` in the wild.
     """
+    normalized_rows = _normalize_table_rows(table)
+    if normalized_rows:
+        return normalized_rows
+
     col_count = table._column_count
     flat = _flatten_table_cells_row_major(table)
     if col_count == 0 or not flat:

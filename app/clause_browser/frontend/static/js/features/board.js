@@ -1,6 +1,7 @@
 import {
   applyWorkspaceSnapshot,
   getWorkspaceSnapshot,
+  openNoticeModal,
   resetWorkspace,
 } from "../core.js";
 
@@ -13,25 +14,26 @@ const boardState = {
   currentLock: null,
   heartbeatId: 0,
   mode: "list",
+  deleteTarget: null,
 };
 
 function editorId() {
-  const existing = window.localStorage.getItem(EDITOR_ID_KEY);
+  const existing = window.sessionStorage.getItem(EDITOR_ID_KEY);
   if (existing) {
     return existing;
   }
   const next = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `editor-${Date.now()}`;
-  window.localStorage.setItem(EDITOR_ID_KEY, next);
+  window.sessionStorage.setItem(EDITOR_ID_KEY, next);
   return next;
 }
 
 function editorLabel() {
-  const existing = window.localStorage.getItem(EDITOR_LABEL_KEY);
+  const existing = window.sessionStorage.getItem(EDITOR_LABEL_KEY);
   if (existing) {
     return existing;
   }
   const label = `Editor ${editorId().slice(0, 8)}`;
-  window.localStorage.setItem(EDITOR_LABEL_KEY, label);
+  window.sessionStorage.setItem(EDITOR_LABEL_KEY, label);
   return label;
 }
 
@@ -49,6 +51,10 @@ function boardElements() {
     boardPostTitle: document.getElementById("board-post-title"),
     openPickerButton: document.getElementById("open-picker-button"),
     exportButton: document.getElementById("export-button"),
+    boardDeleteModal: document.getElementById("board-delete-modal"),
+    boardDeleteModalText: document.getElementById("board-delete-modal-text"),
+    boardDeleteCancel: document.getElementById("board-delete-cancel"),
+    boardDeleteConfirm: document.getElementById("board-delete-confirm"),
   };
 }
 
@@ -57,11 +63,13 @@ function setBoardMessage(text, isError = false) {
   el.innerHTML = text ? `<div class="message ${isError ? "error" : ""}">${escapeHtml(text)}</div>` : "";
 }
 
-function setLockStatus(text) {
-  const el = document.getElementById("board-lock-status");
-  if (el) {
-    el.textContent = text;
+function showBoardError(error) {
+  const message = String(error?.message || error || "Request failed");
+  if (/already being edited/i.test(message)) {
+    openNoticeModal(message);
+    return;
   }
+  setBoardMessage(message, true);
 }
 
 function showBoardScreen() {
@@ -77,6 +85,7 @@ function showEditorScreen() {
 
 function applyEditorMode(mode) {
   boardState.mode = mode;
+  document.body.dataset.boardMode = mode;
   const els = boardElements();
   const isEdit = mode === "edit";
   const isView = mode === "view";
@@ -113,7 +122,7 @@ function renderBoardPosts(items) {
       const lock = item.lock;
       const lockText = lock ? `편집 중: ${lock.editorLabel}` : "편집 가능";
       return `
-        <article class="board-post-card">
+        <article class="board-post-card" data-action="view-post" data-post-id="${escapeHtml(item.postId)}" tabindex="0" role="button">
           <div class="board-post-main">
             <div class="board-post-title">${escapeHtml(item.title || "Untitled post")}</div>
             <div class="board-post-meta">
@@ -122,21 +131,51 @@ function renderBoardPosts(items) {
             </div>
           </div>
           <div class="board-post-actions">
-            <button class="ghost" data-action="view-post" data-post-id="${escapeHtml(item.postId)}">조회</button>
             <button class="primary" data-action="edit-post" data-post-id="${escapeHtml(item.postId)}">편집</button>
+            <button class="danger" data-action="delete-post" data-post-id="${escapeHtml(item.postId)}" data-post-title="${escapeHtml(item.title || "Untitled post")}">삭제</button>
           </div>
         </article>
       `;
     })
     .join("");
-  boardPostList.querySelectorAll("[data-action='edit-post']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await openExistingPost(button.dataset.postId || "");
+  boardPostList.querySelectorAll("[data-action='view-post']").forEach((card) => {
+    const open = async () => {
+      try {
+        await openExistingPostReadOnly(card.dataset.postId || "");
+      } catch (error) {
+        showBoardError(error);
+      }
+    };
+    card.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("button")) {
+        return;
+      }
+      await open();
+    });
+    card.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      await open();
     });
   });
-  boardPostList.querySelectorAll("[data-action='view-post']").forEach((button) => {
+  boardPostList.querySelectorAll("[data-action='edit-post']").forEach((button) => {
     button.addEventListener("click", async () => {
-      await openExistingPostReadOnly(button.dataset.postId || "");
+      try {
+        await openExistingPost(button.dataset.postId || "");
+      } catch (error) {
+        showBoardError(error);
+      }
+    });
+  });
+  boardPostList.querySelectorAll("[data-action='delete-post']").forEach((button) => {
+    button.addEventListener("click", () => {
+      openDeleteModal({
+        postId: button.dataset.postId || "",
+        title: button.dataset.postTitle || "Untitled post",
+      });
     });
   });
 }
@@ -174,6 +213,32 @@ function stopHeartbeat() {
   }
 }
 
+function releaseCurrentLockOnUnload() {
+  if (boardState.mode !== "edit" || !boardState.currentPostId || !boardState.currentLock) {
+    return;
+  }
+  const payload = JSON.stringify({
+    editorId: editorId(),
+    editorLabel: editorLabel(),
+  });
+  const url = `/api/clause-browser/board/posts/${boardState.currentPostId}/lock/release`;
+  try {
+    if (navigator.sendBeacon) {
+      const blob = new Blob([payload], { type: "application/json" });
+      navigator.sendBeacon(url, blob);
+    } else {
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  } catch (_error) {
+    // ignore unload release errors
+  }
+}
+
 async function createPost() {
   const data = await request("/api/clause-browser/board/posts", {
     method: "POST",
@@ -187,11 +252,6 @@ async function createPost() {
   await openPostInEditor(data);
 }
 
-async function openExistingPostReadOnly(postId) {
-  const data = await request(`/api/clause-browser/board/posts/${postId}`);
-  await openPostInViewer(data);
-}
-
 async function openExistingPost(postId) {
   await request(`/api/clause-browser/board/posts/${postId}/lock/acquire`, {
     method: "POST",
@@ -200,6 +260,11 @@ async function openExistingPost(postId) {
   });
   const data = await request(`/api/clause-browser/board/posts/${postId}`);
   await openPostInEditor(data);
+}
+
+async function openExistingPostReadOnly(postId) {
+  const data = await request(`/api/clause-browser/board/posts/${postId}`);
+  await openPostInViewer(data);
 }
 
 async function openPostInEditor(post) {
@@ -245,6 +310,38 @@ async function saveCurrentPost() {
   await closeEditor();
 }
 
+function openDeleteModal(target) {
+  boardState.deleteTarget = target;
+  const els = boardElements();
+  els.boardDeleteModalText.textContent = `"${target.title}" 게시글을 정말 삭제할까요?`;
+  els.boardDeleteModal.classList.remove("hidden");
+  els.boardDeleteModal.setAttribute("aria-hidden", "false");
+}
+
+function closeDeleteModal() {
+  const els = boardElements();
+  boardState.deleteTarget = null;
+  els.boardDeleteModal.classList.add("hidden");
+  els.boardDeleteModal.setAttribute("aria-hidden", "true");
+}
+
+async function deletePost(postId) {
+  await request(`/api/clause-browser/board/posts/${postId}/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ editorId: editorId(), editorLabel: editorLabel() }),
+  });
+  if (boardState.currentPostId === postId) {
+    stopHeartbeat();
+    boardState.currentPostId = "";
+    boardState.currentLock = null;
+    await resetWorkspace();
+    showBoardScreen();
+  }
+  setBoardMessage("게시글을 삭제했습니다.", false);
+  await refreshBoardPosts();
+}
+
 async function closeEditor() {
   stopHeartbeat();
   if (boardState.currentPostId) {
@@ -283,22 +380,44 @@ function debounce(fn, wait) {
 
 export function bindBoardFeature() {
   const els = boardElements();
+  window.addEventListener("pagehide", releaseCurrentLockOnUnload);
+  window.addEventListener("beforeunload", releaseCurrentLockOnUnload);
+  document.querySelectorAll("[data-action='close-board-delete-modal']").forEach((element) => {
+    element.addEventListener("click", () => closeDeleteModal());
+  });
   els.boardCreatePost.addEventListener("click", async () => {
     try {
       await createPost();
     } catch (error) {
-      setBoardMessage(error.message, true);
+      showBoardError(error);
     }
   });
   els.boardSavePost.addEventListener("click", async () => {
     try {
       await saveCurrentPost();
     } catch (error) {
-      setBoardMessage(error.message, true);
+      showBoardError(error);
     }
   });
   els.boardBackToList.addEventListener("click", async () => {
     await closeEditor();
+  });
+  els.boardDeleteCancel.addEventListener("click", () => {
+    closeDeleteModal();
+  });
+  els.boardDeleteConfirm.addEventListener("click", async () => {
+    const target = boardState.deleteTarget;
+    if (!target?.postId) {
+      closeDeleteModal();
+      return;
+    }
+    try {
+      await deletePost(target.postId);
+      closeDeleteModal();
+    } catch (error) {
+      closeDeleteModal();
+      showBoardError(error);
+    }
   });
   els.boardSearch.addEventListener(
     "input",
@@ -306,7 +425,7 @@ export function bindBoardFeature() {
       try {
         await refreshBoardPosts();
       } catch (error) {
-        setBoardMessage(error.message, true);
+        showBoardError(error);
       }
     }, 180)
   );

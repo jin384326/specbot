@@ -308,7 +308,10 @@ class RichDocxClauseParser:
 
     @staticmethod
     def _build_table_block(table: Table, matrix: list[list[str]]) -> dict[str, Any]:
+        logical_col_count = max((len(row) for row in matrix), default=0)
         col_count = table._column_count
+        if logical_col_count and logical_col_count != col_count:
+            return {"type": "table", "rows": matrix}
         flat = _flatten_table_cells_row_major(table)
         if col_count <= 0 or not flat:
             return {"type": "table", "rows": matrix}

@@ -152,6 +152,33 @@ def test_clean_table_matrix_collapses_horizontal_and_vertical_merges(tmp_path: P
     assert linearized.count("Span") == 1
 
 
+def test_clean_table_matrix_prefers_majority_row_width_over_inflated_column_count() -> None:
+    class FakeCell:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class FakeRow:
+        def __init__(self, values: list[str]) -> None:
+            self.cells = [FakeCell(value) for value in values]
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self._column_count = 4
+            self.rows = [
+                FakeRow(["Data type", "Reference", "Comments"]),
+                FakeRow(["DurationSec", "3GPP TS 29.571 [7]", "Time value in seconds"]),
+                FakeRow(["BitRate", "3GPP TS 29.571 [7]", "", ""]),
+            ]
+
+    matrix = clean_table_matrix(FakeTable())
+
+    assert matrix == [
+        ["Data type", "Reference", "Comments"],
+        ["DurationSec", "3GPP TS 29.571 [7]", "Time value in seconds"],
+        ["BitRate", "3GPP TS 29.571 [7]", ""],
+    ]
+
+
 def test_dedupe_duplicate_cell_texts_collapses_merged_and_interleaved_cells() -> None:
     label = "Odd/even indication (octet 4) Bit"
     assert dedupe_duplicate_cell_texts_preserve_order([label] * 10) == [label]

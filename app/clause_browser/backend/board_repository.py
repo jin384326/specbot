@@ -79,6 +79,14 @@ class BoardPostRepository:
             self._save_posts_unlocked(updated)
             return target
 
+    def delete_post(self, post_id: str) -> None:
+        with self._lock:
+            posts = self._load_posts_unlocked()
+            remaining = [post for post in posts if post.post_id != post_id]
+            if len(remaining) == len(posts):
+                raise KeyError(f"Unknown post: {post_id}")
+            self._save_posts_unlocked(remaining)
+
     def _load_posts(self) -> list[BoardPost]:
         with self._lock:
             return self._load_posts_unlocked()
@@ -141,6 +149,10 @@ class BoardLockManager:
             existing = self._locks.get(post_id)
             if existing and existing.editor_id == editor_id:
                 self._locks.pop(post_id, None)
+
+    def clear(self, *, post_id: str) -> None:
+        with self._lock:
+            self._locks.pop(post_id, None)
 
     def _build_lock(self, *, post_id: str, editor_id: str, editor_label: str) -> BoardLock:
         now = datetime.now(timezone.utc).replace(microsecond=0)
