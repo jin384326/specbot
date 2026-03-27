@@ -22,6 +22,7 @@ const state = {
     busy: null,
     translationJob: null,
     translationTask: null,
+    clauseNoteModalKey: "",
     selection: {
       text: "",
       clauseKey: "",
@@ -83,6 +84,9 @@ function bindElements() {
   elements.specbotSettingsModal = document.getElementById("specbot-settings-modal");
   elements.noticeModal = document.getElementById("notice-modal");
   elements.noticeModalText = document.getElementById("notice-modal-text");
+  elements.clauseNoteModal = document.getElementById("clause-note-modal");
+  elements.clauseNoteModalTitle = document.getElementById("clause-note-modal-title");
+  elements.clauseNoteModalBody = document.getElementById("clause-note-modal-body");
   elements.settingBaseUrl = document.getElementById("setting-base-url");
   elements.settingConfigBaseUrl = document.getElementById("setting-config-base-url");
   elements.settingLimit = document.getElementById("setting-limit");
@@ -123,6 +127,9 @@ function bindGlobalEvents() {
     }
     if (event.target.closest("[data-action='close-notice-modal']")) {
       closeNoticeModal();
+    }
+    if (event.target.closest("[data-action='close-clause-note-modal']")) {
+      closeClauseNoteModal();
     }
   });
   window.addEventListener("pagehide", abortActiveRequests);
@@ -193,6 +200,81 @@ function openNoticeModal(text) {
 function closeNoticeModal() {
   elements.noticeModal.classList.add("hidden");
   elements.noticeModal.setAttribute("aria-hidden", "true");
+}
+
+function openClauseNoteModal(clauseKey) {
+  state.ui.clauseNoteModalKey = clauseKey;
+  renderClauseNoteModal();
+  persistSessionState();
+  elements.clauseNoteModal.classList.remove("hidden");
+  elements.clauseNoteModal.setAttribute("aria-hidden", "false");
+}
+
+function closeClauseNoteModal() {
+  state.ui.clauseNoteModalKey = "";
+  persistSessionState();
+  elements.clauseNoteModal.classList.add("hidden");
+  elements.clauseNoteModal.setAttribute("aria-hidden", "true");
+}
+
+function renderClauseNoteModal() {
+  const clauseKey = state.ui.clauseNoteModalKey;
+  if (!clauseKey) {
+    elements.clauseNoteModalBody.innerHTML = "";
+    return;
+  }
+  const node = findNodeByKey(clauseKey);
+  elements.clauseNoteModalTitle.textContent = node
+    ? `${node.specNo} / ${node.clauseId} ${node.clauseTitle}`
+    : "절 메모";
+  const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
+  const sourceText = node ? getClauseSourceText(node) : "";
+  const note = notes[0] || null;
+  elements.clauseNoteModalBody.innerHTML = `
+    <section class="clause-note-modal-section">
+      <div class="section-heading">
+        <h3>원문</h3>
+      </div>
+      <label class="field">
+        <textarea class="clause-note-source-textarea" rows="10" readonly>${escapeHtml(sourceText || "")}</textarea>
+      </label>
+    </section>
+    <section class="clause-note-modal-section">
+      <div class="section-heading">
+        <h3>절 메모</h3>
+        ${
+          note
+            ? `<button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>`
+            : ""
+        }
+      </div>
+      ${
+        note
+          ? `
+            <label class="field">
+              <textarea class="clause-note-modal-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="12" placeholder="번역 결과를 수정하세요.">${escapeHtml(
+                note.translation || ""
+              )}</textarea>
+            </label>
+          `
+          : '<div class="muted">절 메모가 없습니다.</div>'
+      }
+    </section>
+  `;
+  bindClauseNoteModalEvents();
+}
+
+function bindClauseNoteModalEvents() {
+  elements.clauseNoteModalBody.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
+    textarea.addEventListener("input", (event) => {
+      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
+    });
+  });
+  elements.clauseNoteModalBody.querySelectorAll("[data-action='delete-note']").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteNote(button.dataset.noteId || "");
+    });
+  });
 }
 
 function applySpecbotSettingsToForm() {
@@ -501,6 +583,7 @@ function renderLoadedTree() {
     .map(([specNo, nodes]) => renderLoadedSpecGroup(specNo, nodes))
     .join("");
   bindTreeEvents();
+  renderClauseNoteModal();
   syncViewportSelection();
 }
 
@@ -528,7 +611,6 @@ function renderLoadedSpecGroup(specNo, nodes) {
 function renderNode(node) {
   const expanded = state.ui.expandedKeys.has(node.key);
   const focusedClass = state.ui.focusedKey === node.key ? "focused" : "";
-  const notesHtml = renderClauseNotes(node.key);
   const clauseNoteToggleHtml = renderClauseNoteToggle(node.key);
   const hasBlocks = Boolean((node.blocks || []).length);
   const hasChildren = Boolean((node.children || []).length);
@@ -562,7 +644,6 @@ function renderNode(node) {
         </div>
       </div>
       ${bodyHtml}
-      ${notesHtml}
     </article>
   `;
 }
@@ -659,6 +740,7 @@ function renderTableBlock(node, block, index) {
   const rows = block.rows || [];
   const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
   const selectionNotesHtml = renderSelectionNotes(node.key, index);
+  const hasExpandedSelectionNotes = getSelectionNotesForBlock(node.key, index).some((note) => !note.collapsed);
   const tableBody =
     cellRows.length
       ? cellRows
@@ -696,7 +778,7 @@ function renderTableBlock(node, block, index) {
           .join("");
 
   return `
-    <div class="table-block">
+    <div class="table-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""}">
       <div class="docx-table-wrap" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
         <table class="docx-table">
           <tbody>
@@ -717,8 +799,9 @@ function renderParagraphBlock(node, block, index) {
   const paragraphStyle = getParagraphInlineStyle(block);
   const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
   const selectionNotesHtml = renderSelectionNotes(node.key, index);
+  const hasExpandedSelectionNotes = getSelectionNotesForBlock(node.key, index).some((note) => !note.collapsed);
   return `
-    <div class="paragraph-block">
+    <div class="paragraph-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""}">
       <div class="paragraph-note-row">
         <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(block.text || "")}</p>
         ${selectionToggleHtml}
@@ -758,13 +841,9 @@ function renderClauseNotes(clauseKey) {
   if (!notes.length) {
     return "";
   }
-  const visibleNotes = notes.filter((note) => !note.collapsed);
-  if (!visibleNotes.length) {
-    return "";
-  }
   return `
     <div class="clause-note-list">
-      ${visibleNotes
+      ${notes
         .map(
           (note) => `
             <article class="clause-note-card ${note.collapsed ? "collapsed" : ""}" data-note-id="${escapeHtml(note.id)}">
@@ -776,7 +855,7 @@ function renderClauseNotes(clauseKey) {
                   <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
                 </div>
               </div>
-              <div class="clause-note-body ${note.collapsed ? "hidden" : ""}">
+              <div class="clause-note-body">
                 <label class="field">
                   <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="5" placeholder="번역 결과를 수정하세요.">${escapeHtml(
                     note.translation || ""
@@ -796,12 +875,12 @@ function renderClauseNoteToggle(clauseKey) {
   if (!notes.length) {
     return "";
   }
-  const expanded = notes.some((note) => !note.collapsed);
+  const expanded = state.ui.clauseNoteModalKey === clauseKey;
   return `
     <button
-      class="icon-button ghost note-toggle-button"
-      title="절 메모 ${expanded ? "접기" : "펼치기"}"
-      aria-label="절 메모 ${expanded ? "접기" : "펼치기"}"
+      class="icon-button note-toggle-button"
+      title="절 메모 ${expanded ? "닫기" : "열기"}"
+      aria-label="절 메모 ${expanded ? "닫기" : "열기"}"
       data-action="toggle-clause-notes"
       data-clause-key="${escapeHtml(clauseKey)}"
     >
@@ -818,7 +897,7 @@ function renderSelectionNoteToggle(clauseKey, blockIndex) {
   const expanded = notes.some((note) => !note.collapsed);
   return `
     <button
-      class="selection-note-toggle ghost"
+      class="selection-note-toggle ${expanded ? "expanded" : ""}"
       title="선택 메모 ${notes.length}개"
       aria-label="선택 메모 ${notes.length}개"
       data-action="toggle-selection-notes"
@@ -966,12 +1045,6 @@ function bindTreeEvents() {
   elements.treeContainer.querySelectorAll("[data-action='toggle-clause-notes']").forEach((button) => {
     button.addEventListener("click", () => {
       toggleClauseNotes(button.dataset.clauseKey || "");
-    });
-  });
-
-  elements.treeContainer.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
-    textarea.addEventListener("input", (event) => {
-      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
     });
   });
 
@@ -1588,16 +1661,11 @@ function updateNoteField(noteId, field, value) {
 }
 
 function toggleClauseNotes(clauseKey) {
-  const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
-  if (!notes.length) {
-    return;
+  if (state.ui.clauseNoteModalKey === clauseKey) {
+    closeClauseNoteModal();
+  } else {
+    openClauseNoteModal(clauseKey);
   }
-  const shouldCollapse = notes.some((note) => !note.collapsed);
-  const ids = new Set(notes.map((note) => note.id));
-  state.ui.notes = (state.ui.notes || []).map((note) =>
-    ids.has(note.id) ? { ...note, collapsed: shouldCollapse } : note
-  );
-  persistSessionState();
   renderLoadedTree();
 }
 
@@ -1617,8 +1685,19 @@ function toggleSelectionNotes(clauseKey, blockIndex) {
 
 function deleteNote(noteId) {
   state.ui.notes = (state.ui.notes || []).filter((note) => note.id !== noteId);
+  if (state.ui.clauseNoteModalKey) {
+    const remaining = getNotesForClause(state.ui.clauseNoteModalKey).filter((note) => note.type === "clause" && note.id !== noteId);
+    if (!remaining.length) {
+      state.ui.clauseNoteModalKey = "";
+      elements.clauseNoteModal.classList.add("hidden");
+      elements.clauseNoteModal.setAttribute("aria-hidden", "true");
+    }
+  }
   persistSessionState();
   renderLoadedTree();
+  if (state.ui.clauseNoteModalKey) {
+    renderClauseNoteModal();
+  }
 }
 
 function pruneNotesForNodeKey(nodeKey) {

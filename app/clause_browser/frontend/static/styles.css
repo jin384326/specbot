@@ -561,6 +561,8 @@ button:disabled {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .icon-button {
@@ -600,6 +602,14 @@ button:disabled {
 
 .paragraph-block {
   display: block;
+}
+
+.paragraph-block.has-selection-note,
+.table-block.has-selection-note {
+  background: rgba(47, 125, 50, 0.08);
+  border: 1px solid rgba(47, 125, 50, 0.22);
+  border-radius: 10px;
+  padding: 8px 10px;
 }
 
 .paragraph-note-row {
@@ -694,6 +704,16 @@ button:disabled {
   border-radius: 8px;
   font-size: 11px;
   color: var(--accent);
+  background: white;
+  border-color: var(--border);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.selection-note-toggle.expanded {
+  background: #2f7d32;
+  border-color: #2f7d32;
+  color: white;
 }
 
 .selection-note-list {
@@ -721,10 +741,50 @@ button:disabled {
   border-radius: 7px;
   color: var(--muted);
   font-size: 12px;
+  background: white;
+  border-color: var(--border);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.note-toggle-button.expanded {
+  background: #2f7d32;
+  border-color: #2f7d32;
+  color: white;
 }
 
 .notice-card {
   max-width: min(460px, calc(100vw - 32px));
+}
+
+.clause-note-modal-card {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.clause-note-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 120px;
+}
+
+.clause-note-modal-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 4px;
+}
+
+.clause-note-source-textarea {
+  min-height: 220px;
+  resize: vertical;
+  background: #f7faf6;
+  color: var(--text);
+}
+
+.clause-note-modal-textarea {
+  min-height: 260px;
+  resize: vertical;
 }
 
 .notice-modal-text {
