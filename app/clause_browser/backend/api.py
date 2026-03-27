@@ -4,12 +4,19 @@ from dataclasses import dataclass
 from typing import Any
 
 import asyncio
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.clause_browser.backend.repository import ClauseRepository
-from app.clause_browser.backend.services import DocxExportService, LLMActionService, SpecbotQueryService
+from app.clause_browser.backend.services import (
+    DocxExportService,
+    LLMActionCancelledError,
+    LLMActionQueueFullError,
+    LLMActionService,
+    SpecbotQueryService,
+)
 
 
 class ClauseTreePayload(BaseModel):
@@ -48,6 +55,7 @@ class ClauseBrowserConfig:
     actions: list[dict[str, str]]
     duplicate_policy: str = "focus-existing"
     specbot_defaults: dict[str, Any] | None = None
+    query_api_url: str | None = None
 
 
 class SpecbotSettingsPayload(BaseModel):
@@ -80,7 +88,7 @@ def create_router(
     *,
     repository: ClauseRepository,
     export_service: DocxExportService,
-    llm_service: LLMActionService,
+    llm_service,
     config: ClauseBrowserConfig,
     rich_document_service=None,
     specbot_service: SpecbotQueryService | None = None,
@@ -88,7 +96,7 @@ def create_router(
     router = APIRouter(prefix="/api/clause-browser", tags=["clause-browser"])
 
     @router.get("/config")
-    def get_config() -> dict[str, Any]:
+    def get_config(request: Request) -> dict[str, Any]:
         return success(
             {
                 "languages": config.languages,
@@ -96,6 +104,7 @@ def create_router(
                 "duplicatePolicy": config.duplicate_policy,
                 "corpusPath": str(repository.corpus_path),
                 "specbotDefaults": config.specbot_defaults or {},
+                "queryApiUrl": _resolve_public_query_api_url(request, config.query_api_url),
             }
         )
 
@@ -144,19 +153,49 @@ def create_router(
         return success(result.to_dict())
 
     @router.post("/llm-actions")
-    def run_llm_action(request: LLMActionRequest) -> dict[str, Any]:
+    async def run_llm_action(request: Request, payload: LLMActionRequest) -> dict[str, Any]:
+        disconnect_event = asyncio.Event()
+
+        async def watch_disconnect() -> None:
+            if request is None:
+                return
+            while not disconnect_event.is_set():
+                if await request.is_disconnected():
+                    disconnect_event.set()
+                    return
+                await asyncio.sleep(0.2)
+
+        watcher = asyncio.create_task(watch_disconnect())
         try:
-            result = llm_service.run(
-                action_type=request.actionType,
-                text=request.text,
-                source_language=request.sourceLanguage,
-                target_language=request.targetLanguage,
-                context=request.context,
-            )
+            if hasattr(llm_service, "run_async"):
+                result = await llm_service.run_async(
+                    action_type=payload.actionType,
+                    text=payload.text,
+                    source_language=payload.sourceLanguage,
+                    target_language=payload.targetLanguage,
+                    context=payload.context,
+                    should_cancel=disconnect_event.is_set,
+                )
+            else:
+                result = llm_service.run_limited(
+                    action_type=payload.actionType,
+                    text=payload.text,
+                    source_language=payload.sourceLanguage,
+                    target_language=payload.targetLanguage,
+                    context=payload.context,
+                    should_cancel=disconnect_event.is_set,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LLMActionQueueFullError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMActionCancelledError as exc:
+            raise HTTPException(status_code=499, detail=str(exc)) from exc
         except Exception as exc:  # pragma: no cover
             raise HTTPException(status_code=502, detail=f"LLM action failed: {exc}") from exc
+        finally:
+            disconnect_event.set()
+            watcher.cancel()
         return success(result)
 
     @router.post("/specbot/query")
@@ -193,6 +232,10 @@ def create_router(
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LLMActionQueueFullError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMActionCancelledError as exc:
+            raise HTTPException(status_code=499, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=f"SpecBot query failed: {exc}") from exc
         finally:
@@ -212,3 +255,19 @@ def create_router(
 
 def success(data: Any) -> dict[str, Any]:
     return {"success": True, "data": data}
+
+
+def _resolve_public_query_api_url(request: Request, configured_url: str | None) -> str | None:
+    if not configured_url:
+        return None
+    parts = urlsplit(configured_url)
+    if not parts.scheme or not parts.netloc:
+        return configured_url
+    hostname = parts.hostname or ""
+    if hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return configured_url
+    public_host = request.url.hostname or hostname
+    netloc = public_host
+    if parts.port:
+        netloc = f"{public_host}:{parts.port}"
+    return urlunsplit((parts.scheme or request.url.scheme, netloc, parts.path, parts.query, parts.fragment))

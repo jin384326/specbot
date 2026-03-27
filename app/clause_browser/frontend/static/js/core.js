@@ -41,6 +41,13 @@ const SPECBOT_QUERY_BUSY_LABEL = "SpecBot query 수행 중입니다.";
 const DOCUMENT_SEARCH_BUSY_LABEL = "문서 검색 중입니다.";
 const DOCUMENT_SELECT_BUSY_LABEL = "문서를 불러오는 중입니다.";
 const activeRequestControllers = new Set();
+const activeLocalWorkSlots = new Set();
+const LOCAL_WORK_SLOT_LIMIT = 7;
+const LOCAL_WORK_SLOT_TTL_MS = 10 * 60 * 1000;
+const LOCAL_WORK_LOCK_TTL_MS = 2000;
+const LOCAL_WORK_STATE_KEY = "specbot-work-slots-v1";
+const LOCAL_WORK_LOCK_KEY = "specbot-work-slots-lock-v1";
+const LOCAL_WORK_TAB_ID = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -1470,7 +1477,7 @@ function getClauseSourceText(node) {
 async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceText, clauseLabel, targetLanguage }) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
-    const response = await apiPost("/api/clause-browser/llm-actions", {
+    const response = await apiPostWork("/api/clause-browser/llm-actions", {
       actionType: "translate",
       text: sourceText,
       sourceLanguage,
@@ -1661,7 +1668,7 @@ async function runSpecbotQuery() {
   setSpecbotQueryLoading(true);
   try {
     const exclusions = buildSpecbotExclusions();
-    const response = await apiPost("/api/clause-browser/specbot/query", {
+    const response = await apiPostWork("/api/clause-browser/specbot/query", {
       query,
       settings: state.ui.specbotSettings,
       excludeSpecs: exclusions.excludeSpecs,
@@ -2063,6 +2070,36 @@ async function apiPost(url, body) {
   return payload;
 }
 
+async function apiPostWork(url, body) {
+  const targetUrl = resolveWorkApiUrl(url);
+  const slotId = await reserveLocalWorkSlot();
+  activeLocalWorkSlots.add(slotId);
+  try {
+    const payload = await apiPost(targetUrl, body);
+    if (payload && Object.prototype.hasOwnProperty.call(payload, "success")) {
+      return payload;
+    }
+    return { success: true, data: payload };
+  } finally {
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+  }
+}
+
+function resolveWorkApiUrl(url) {
+  const baseUrl = String(state.config?.queryApiUrl || "").trim();
+  if (!baseUrl) {
+    throw new Error("Query API URL is not configured.");
+  }
+  if (url === "/api/clause-browser/specbot/query") {
+    return `${baseUrl}/query`;
+  }
+  if (url === "/api/clause-browser/llm-actions") {
+    return `${baseUrl}/llm-actions`;
+  }
+  return url;
+}
+
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -2154,6 +2191,11 @@ function registerRequestController() {
 function abortActiveRequests() {
   activeRequestControllers.forEach((controller) => controller.abort());
   activeRequestControllers.clear();
+  const slotIds = [...activeLocalWorkSlots];
+  activeLocalWorkSlots.clear();
+  slotIds.forEach((slotId) => {
+    void releaseLocalWorkSlot(slotId);
+  });
 }
 
 function normalizeRequestError(error) {
@@ -2165,6 +2207,93 @@ function normalizeRequestError(error) {
 
 function isAbortedRequestError(error) {
   return error instanceof Error && error.message === "__REQUEST_ABORTED__";
+}
+
+async function reserveLocalWorkSlot() {
+  return await withLocalWorkLock(() => {
+    const entries = readLocalWorkSlots();
+    if (entries.length >= LOCAL_WORK_SLOT_LIMIT) {
+      throw new Error("현재 브라우저 작업 대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.");
+    }
+    const slotId = `${LOCAL_WORK_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    entries.push({ id: slotId, tabId: LOCAL_WORK_TAB_ID, createdAt: Date.now() });
+    writeLocalWorkSlots(entries);
+    return slotId;
+  });
+}
+
+async function releaseLocalWorkSlot(slotId) {
+  await withLocalWorkLock(() => {
+    const entries = readLocalWorkSlots().filter((entry) => entry.id !== slotId);
+    writeLocalWorkSlots(entries);
+    return null;
+  });
+}
+
+function readLocalWorkSlots() {
+  const raw = localStorage.getItem(LOCAL_WORK_STATE_KEY);
+  let entries = [];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        entries = parsed;
+      }
+    } catch (_error) {
+      entries = [];
+    }
+  }
+  const now = Date.now();
+  return entries.filter((entry) => entry && entry.id && Number(entry.createdAt) > now - LOCAL_WORK_SLOT_TTL_MS);
+}
+
+function writeLocalWorkSlots(entries) {
+  localStorage.setItem(LOCAL_WORK_STATE_KEY, JSON.stringify(entries));
+}
+
+async function withLocalWorkLock(fn) {
+  const lockId = `${LOCAL_WORK_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  while (true) {
+    const now = Date.now();
+    const raw = localStorage.getItem(LOCAL_WORK_LOCK_KEY);
+    if (raw) {
+      try {
+        const lock = JSON.parse(raw);
+        if (lock && Number(lock.expiresAt) > now && lock.id !== lockId) {
+          await wait(25);
+          continue;
+        }
+      } catch (_error) {
+        // Ignore malformed lock and take over below.
+      }
+    }
+    localStorage.setItem(
+      LOCAL_WORK_LOCK_KEY,
+      JSON.stringify({ id: lockId, expiresAt: now + LOCAL_WORK_LOCK_TTL_MS })
+    );
+    try {
+      const verify = JSON.parse(localStorage.getItem(LOCAL_WORK_LOCK_KEY) || "{}");
+      if (verify.id !== lockId) {
+        await wait(25);
+        continue;
+      }
+      return fn();
+    } finally {
+      const current = localStorage.getItem(LOCAL_WORK_LOCK_KEY);
+      try {
+        const parsed = current ? JSON.parse(current) : {};
+        if (parsed.id === lockId) {
+          localStorage.removeItem(LOCAL_WORK_LOCK_KEY);
+        }
+      } catch (_error) {
+        localStorage.removeItem(LOCAL_WORK_LOCK_KEY);
+      }
+    }
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function persistSessionState() {

@@ -8,6 +8,7 @@ QUERY_HOST="${SPECBOT_QUERY_API_HOST:-0.0.0.0}"
 QUERY_PORT="${SPECBOT_QUERY_API_PORT:-8010}"
 BROWSER_HOST="${SPECBOT_CLAUSE_BROWSER_HOST:-0.0.0.0}"
 BROWSER_PORT="${SPECBOT_CLAUSE_BROWSER_PORT:-8000}"
+BROWSER_WORKERS="${SPECBOT_CLAUSE_BROWSER_WORKERS:-2}"
 QUERY_URL="${SPECBOT_QUERY_API_URL:-http://127.0.0.1:${QUERY_PORT}}"
 LOG_DIR="${SPECBOT_STACK_LOG_DIR:-/tmp}"
 MODE="${1:-foreground}"
@@ -20,7 +21,7 @@ run_background() {
     > "${LOG_DIR}/specbot-query.log" 2>&1 &
   QUERY_PID=$!
 
-  nohup python3 -m uvicorn app.clause_browser.server:create_app --factory --host "$BROWSER_HOST" --port "$BROWSER_PORT" \
+  nohup python3 -m uvicorn app.clause_browser.server:create_app --factory --host "$BROWSER_HOST" --port "$BROWSER_PORT" --workers "$BROWSER_WORKERS" \
     > "${LOG_DIR}/clause-browser.log" 2>&1 &
   BROWSER_PID=$!
 
@@ -40,7 +41,7 @@ run_foreground() {
   }
   trap cleanup EXIT INT TERM
 
-  python3 -m uvicorn app.clause_browser.server:create_app --factory --host "$BROWSER_HOST" --port "$BROWSER_PORT"
+  python3 -m uvicorn app.clause_browser.server:create_app --factory --host "$BROWSER_HOST" --port "$BROWSER_PORT" --workers "$BROWSER_WORKERS"
 }
 
 case "$MODE" in

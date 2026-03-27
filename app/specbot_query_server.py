@@ -3,14 +3,20 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.clause_browser.services import SpecbotQueryDefaults
+from app.clause_browser.services import (
+    LLMActionCancelledError,
+    LLMActionQueueFullError,
+    LLMActionService,
+    SpecbotQueryDefaults,
+)
 from embedding.config import DEFAULT_EMBEDDING_DEVICE, DEFAULT_EMBEDDING_MODEL
 from embedding.registry import create_embedding_provider
 from retrieval.iterative_llm_retriever import ChatOpenAIRelevanceJudge, IterativeLLMRetriever, RetrievalCancelledError
@@ -46,12 +52,22 @@ class SpecbotQueryRequest(BaseModel):
     excludeClauses: list[ClauseExclusionPayload] = Field(default_factory=list)
 
 
+class LLMActionRequest(BaseModel):
+    actionType: str = Field(min_length=1, max_length=50)
+    text: str = Field(min_length=1, max_length=200000)
+    sourceLanguage: str = Field(min_length=2, max_length=16)
+    targetLanguage: str = Field(min_length=2, max_length=16)
+    context: str | None = Field(default=None, max_length=2000)
+
+
 @dataclass(frozen=True)
 class SpecbotQueryServerSettings:
     project_root: Path
     defaults: SpecbotQueryDefaults
     embed_model: str
     openai_model: str
+    llm_action_provider: str
+    llm_action_model: str
     timeout_seconds: float
     ranking: str
     schema: str
@@ -59,6 +75,100 @@ class SpecbotQueryServerSettings:
     anchor_boost: float
     title_boost: float
     stage_boost: float
+    task_max_concurrency: int
+    task_max_queue_size: int
+    cors_origins: tuple[str, ...]
+
+
+class SharedTaskLimiter:
+    def __init__(self, max_concurrent_tasks: int, max_queued_tasks: int) -> None:
+        self._max_concurrent_tasks = max(1, int(max_concurrent_tasks))
+        self._max_queued_tasks = max(0, int(max_queued_tasks))
+        self._lock = asyncio.Lock()
+        self._active_tasks = 0
+        self._accepted_tasks = 0
+        self._queue: asyncio.Queue[_QueuedTask] = asyncio.Queue()
+        self._workers: list[asyncio.Task] = []
+        self._started = False
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._workers = [asyncio.create_task(self._worker_loop()) for _ in range(self._max_concurrent_tasks)]
+
+    async def shutdown(self) -> None:
+        for worker in self._workers:
+            worker.cancel()
+        for worker in self._workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        self._workers.clear()
+        self._started = False
+
+    async def run_async(self, fn, *args, should_cancel=None, **kwargs):
+        await self.start()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        job = _QueuedTask(
+            fn=fn,
+            args=args,
+            kwargs=kwargs,
+            future=future,
+            should_cancel=should_cancel,
+        )
+        async with self._lock:
+            if self._accepted_tasks >= self._max_concurrent_tasks + self._max_queued_tasks:
+                raise LLMActionQueueFullError(
+                    "The shared query/translation queue is full. Wait for current tasks to finish and try again."
+                )
+            self._accepted_tasks += 1
+            self._queue.put_nowait(job)
+
+        while True:
+            if should_cancel and should_cancel():
+                job.cancelled = True
+                if not future.done():
+                    future.set_exception(LLMActionCancelledError("Task cancelled by client."))
+                raise LLMActionCancelledError("Task cancelled by client.")
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _worker_loop(self) -> None:
+        while True:
+            job = await self._queue.get()
+            async with self._lock:
+                self._active_tasks += 1
+            try:
+                if job.cancelled or job.future.done() or (job.should_cancel and job.should_cancel()):
+                    if not job.future.done():
+                        job.future.set_exception(LLMActionCancelledError("Task cancelled by client."))
+                    continue
+                result = await asyncio.to_thread(job.fn, *job.args, **job.kwargs)
+                if not job.future.done():
+                    job.future.set_result(result)
+            except Exception as exc:
+                if not job.future.done():
+                    job.future.set_exception(exc)
+            finally:
+                async with self._lock:
+                    self._active_tasks = max(0, self._active_tasks - 1)
+                    self._accepted_tasks = max(0, self._accepted_tasks - 1)
+                self._queue.task_done()
+
+
+@dataclass
+class _QueuedTask:
+    fn: Any
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    future: asyncio.Future
+    should_cancel: Any = None
+    cancelled: bool = field(default=False)
 
 
 class PersistentSpecbotQueryEngine:
@@ -213,7 +323,33 @@ class PersistentSpecbotQueryEngine:
 def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
     active_settings = settings or load_settings()
     engine = PersistentSpecbotQueryEngine(active_settings)
+    llm_service = LLMActionService(
+        provider=active_settings.llm_action_provider,
+        model=active_settings.llm_action_model,
+        system_prompt_path=active_settings.project_root / "system_prompt_translate.txt",
+        user_prompt_path=active_settings.project_root / "user_prompt_translate.txt",
+    )
+    task_limiter = SharedTaskLimiter(
+        max_concurrent_tasks=active_settings.task_max_concurrency,
+        max_queued_tasks=active_settings.task_max_queue_size,
+    )
     app = FastAPI(title="SpecBot Query API", version="0.1.0")
+    if active_settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(active_settings.cors_origins),
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    @app.on_event("startup")
+    async def startup_event() -> None:
+        await task_limiter.start()
+
+    @app.on_event("shutdown")
+    async def shutdown_event() -> None:
+        await task_limiter.shutdown()
 
     @app.get("/health", include_in_schema=False)
     def health() -> dict[str, object]:
@@ -223,28 +359,58 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
     def config() -> dict[str, object]:
         return {"defaults": engine.defaults.to_dict()}
 
+    async def watch_disconnect(request: Request, cancel_event: threading.Event) -> None:
+        while not cancel_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                return
+            await asyncio.sleep(0.2)
+
+    @app.post("/llm-actions")
+    async def llm_actions(request: Request, payload: LLMActionRequest) -> dict[str, object]:
+        cancel_event = threading.Event()
+        watcher = asyncio.create_task(watch_disconnect(request, cancel_event))
+        try:
+            return await task_limiter.run_async(
+                llm_service.run,
+                action_type=payload.actionType,
+                text=payload.text,
+                source_language=payload.sourceLanguage,
+                target_language=payload.targetLanguage,
+                context=payload.context,
+                should_cancel=cancel_event.is_set,
+            )
+        except LLMActionQueueFullError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMActionCancelledError as exc:
+            raise HTTPException(status_code=499, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            cancel_event.set()
+            watcher.cancel()
+
     @app.post("/query")
     async def query(request: Request, payload: SpecbotQueryRequest) -> dict[str, object]:
         cancel_event = threading.Event()
-
-        async def watch_disconnect() -> None:
-            while not cancel_event.is_set():
-                if await request.is_disconnected():
-                    cancel_event.set()
-                    return
-                await asyncio.sleep(0.2)
-
-        watcher = asyncio.create_task(watch_disconnect())
+        watcher = asyncio.create_task(watch_disconnect(request, cancel_event))
         try:
-            return await asyncio.to_thread(
+            return await task_limiter.run_async(
                 engine.run,
                 payload.query.strip(),
                 payload.settings.model_dump(mode="json") if payload.settings else None,
                 payload.excludeSpecs,
                 [item.model_dump(mode="json") for item in payload.excludeClauses],
                 cancel_event.is_set,
+                should_cancel=cancel_event.is_set,
             )
         except RetrievalCancelledError as exc:
+            raise HTTPException(status_code=499, detail=str(exc)) from exc
+        except LLMActionQueueFullError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except LLMActionCancelledError as exc:
             raise HTTPException(status_code=499, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -259,11 +425,13 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
 
 def load_settings() -> SpecbotQueryServerSettings:
     project_root = Path(__file__).resolve().parents[1]
+    cors_env = os.environ.get("SPECBOT_QUERY_API_CORS_ORIGINS", "*").strip()
+    cors_origins = tuple(part.strip() for part in cors_env.split(",") if part.strip())
     defaults = SpecbotQueryDefaults(
         base_url=os.environ.get("SPECBOT_QUERY_BASE_URL", "http://localhost:8080").strip() or "http://localhost:8080",
         config_base_url=os.environ.get("SPECBOT_QUERY_CONFIG_BASE_URL", "http://localhost:19071").strip() or "http://localhost:19071",
         limit=int(os.environ.get("SPECBOT_QUERY_LIMIT", "4")),
-        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "2")),
+        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "1")),
         next_iteration_limit=int(os.environ.get("SPECBOT_QUERY_NEXT_ITERATION_LIMIT", "2")),
         summary=os.environ.get("SPECBOT_QUERY_SUMMARY", "short").strip() or "short",
         registry=os.environ.get("SPECBOT_QUERY_REGISTRY", "./artifacts/spec_query_registry.json").strip() or "./artifacts/spec_query_registry.json",
@@ -277,6 +445,8 @@ def load_settings() -> SpecbotQueryServerSettings:
         defaults=defaults,
         embed_model=os.environ.get("SPECBOT_QUERY_EMBED_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL,
         openai_model=os.environ.get("SPECBOT_QUERY_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+        llm_action_provider=os.environ.get("SPECBOT_LLM_ACTION_PROVIDER", "openai").strip() or "openai",
+        llm_action_model=os.environ.get("SPECBOT_LLM_ACTION_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
         timeout_seconds=float(os.environ.get("SPECBOT_QUERY_TIMEOUT", "30")),
         ranking=os.environ.get("SPECBOT_QUERY_RANKING", "hybrid").strip() or "hybrid",
         schema=os.environ.get("SPECBOT_QUERY_SCHEMA", "spec_finder").strip() or "spec_finder",
@@ -284,4 +454,7 @@ def load_settings() -> SpecbotQueryServerSettings:
         anchor_boost=float(os.environ.get("SPECBOT_QUERY_ANCHOR_BOOST", "1.15")),
         title_boost=float(os.environ.get("SPECBOT_QUERY_TITLE_BOOST", "1.2")),
         stage_boost=float(os.environ.get("SPECBOT_QUERY_STAGE_BOOST", "1.1")),
+        task_max_concurrency=max(1, int(os.environ.get("SPECBOT_TASK_MAX_CONCURRENCY", "2"))),
+        task_max_queue_size=max(0, int(os.environ.get("SPECBOT_TASK_MAX_QUEUE_SIZE", "5"))),
+        cors_origins=cors_origins,
     )

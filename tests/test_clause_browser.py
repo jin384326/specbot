@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from docx import Document
@@ -13,11 +14,19 @@ from docx.shared import Pt
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
-from app.clause_browser.api import ExportRequest, LLMActionRequest, SpecbotQueryRequest
+from app.clause_browser.api import (
+    ClauseBrowserConfig,
+    ExportRequest,
+    LLMActionRequest,
+    SpecbotQueryRequest,
+    create_router,
+)
 from app.clause_browser.preprocess import build_clause_browser_corpus
+from app.clause_browser.repository import ClauseRepository
 from app.clause_browser.server import ClauseBrowserSettings, create_app
 from app.clause_browser.services import (
     DocxExportService,
+    LLMActionQueueFullError,
     LLMActionService,
     SpecbotQueryDefaults,
     SpecbotQueryService,
@@ -238,9 +247,12 @@ def build_app(tmp_path: Path):
             cors_origins=(),
             llm_provider="mock",
             llm_model="mock-model",
+            llm_max_concurrent_requests=2,
+            llm_max_queued_requests=5,
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
-        )
+        ),
+        llm_service=LLMActionService(provider="mock", model="mock-model"),
     )
 
 
@@ -342,6 +354,8 @@ def test_synthesized_ancestor_clause_is_searchable(tmp_path: Path) -> None:
             cors_origins=(),
             llm_provider="mock",
             llm_model="mock-model",
+            llm_max_concurrent_requests=2,
+            llm_max_queued_requests=5,
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
         )
@@ -443,6 +457,8 @@ def test_subtree_endpoint_preserves_table_rowspan_metadata(tmp_path: Path) -> No
             cors_origins=(),
             llm_provider="mock",
             llm_model="mock-model",
+            llm_max_concurrent_requests=2,
+            llm_max_queued_requests=5,
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
         )
@@ -475,6 +491,8 @@ def test_subtree_endpoint_returns_paragraph_indent_metadata(tmp_path: Path) -> N
             cors_origins=(),
             llm_provider="mock",
             llm_model="mock-model",
+            llm_max_concurrent_requests=2,
+            llm_max_queued_requests=5,
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
         )
@@ -507,13 +525,16 @@ def test_llm_action_endpoint_returns_mock_translation(tmp_path: Path) -> None:
     app = build_app(tmp_path)
     endpoint = get_endpoint(app, "/api/clause-browser/llm-actions")
 
-    payload = endpoint(
-        LLMActionRequest(
-            actionType="translate",
-            text="Session management",
-            sourceLanguage="en",
-            targetLanguage="ko",
-            context="23501 / 5",
+    payload = asyncio.run(
+        endpoint(
+            None,
+            LLMActionRequest(
+                actionType="translate",
+                text="Session management",
+                sourceLanguage="en",
+                targetLanguage="ko",
+                context="23501 / 5",
+            )
         )
     )["data"]
     assert payload["provider"] == "mock"
@@ -525,17 +546,104 @@ def test_llm_action_rejects_empty_text(tmp_path: Path) -> None:
     endpoint = get_endpoint(app, "/api/clause-browser/llm-actions")
 
     try:
-        endpoint(
-            LLMActionRequest(
-                actionType="translate",
-                text=" ",
-                sourceLanguage="en",
-                targetLanguage="ko",
+        asyncio.run(
+            endpoint(
+                None,
+                LLMActionRequest(
+                    actionType="translate",
+                    text=" ",
+                    sourceLanguage="en",
+                    targetLanguage="ko",
+                )
             )
         )
     except HTTPException as exc:
         assert exc.status_code == 400
         assert "Select text" in exc.detail
+    else:
+        raise AssertionError("Expected HTTPException")
+
+
+def test_llm_action_service_rejects_requests_when_queue_is_full() -> None:
+    service = LLMActionService(
+        provider="mock",
+        model="mock-model",
+        max_concurrent_requests=2,
+        max_queued_requests=1,
+    )
+    original_run = service.run
+
+    def slow_run(**kwargs):
+        import time
+
+        time.sleep(0.1)
+        return original_run(**kwargs)
+
+    service.run = slow_run
+
+    def invoke(index: int):
+        return service.run_limited(
+            action_type="translate",
+            text=f"text-{index}",
+            source_language="en",
+            target_language="ko",
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(invoke, index) for index in range(4)]
+        results = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append(exc)
+
+    queue_errors = [item for item in results if isinstance(item, LLMActionQueueFullError)]
+    assert len(queue_errors) == 1
+
+
+def test_llm_action_endpoint_returns_429_when_queue_is_full(tmp_path: Path) -> None:
+    class BusyLLMActionService(LLMActionService):
+        def run_limited(self, **kwargs):
+            raise LLMActionQueueFullError("queue full")
+
+    write_docx_files(tmp_path)
+    browser_corpus_path = tmp_path / "browser-corpus.jsonl"
+    build_clause_browser_corpus(
+        inputs=[str(tmp_path / "23501.docx"), str(tmp_path / "24501.docx")],
+        output_path=browser_corpus_path,
+        media_dir=tmp_path / "media",
+    )
+    router = create_router(
+        repository=ClauseRepository(browser_corpus_path),
+        export_service=DocxExportService(export_dir=tmp_path / "exports", project_root=tmp_path),
+        llm_service=BusyLLMActionService(),
+        config=ClauseBrowserConfig(
+            languages=[{"code": "ko", "label": "Korean"}, {"code": "en", "label": "English"}],
+            actions=[{"type": "translate", "label": "Translate"}],
+        ),
+    )
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/llm-actions"
+    )
+
+    try:
+        asyncio.run(
+            endpoint(
+                None,
+                LLMActionRequest(
+                    actionType="translate",
+                    text="Session management",
+                    sourceLanguage="en",
+                    targetLanguage="ko",
+                )
+            )
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 429
+        assert exc.detail == "queue full"
     else:
         raise AssertionError("Expected HTTPException")
 
@@ -583,6 +691,8 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
             cors_origins=(),
             llm_provider="mock",
             llm_model="mock-model",
+            llm_max_concurrent_requests=2,
+            llm_max_queued_requests=5,
             languages=(("ko", "Korean"), ("en", "English")),
             specbot_query_api_url="http://127.0.0.1:8010",
         ),

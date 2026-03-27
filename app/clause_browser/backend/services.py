@@ -6,6 +6,7 @@ import subprocess
 import sys
 import json
 import asyncio
+import threading
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from dataclasses import dataclass
@@ -36,6 +37,14 @@ class ExportResult:
             "relativePath": self.relative_path,
             "clauseCount": self.clause_count,
         }
+
+
+class LLMActionQueueFullError(RuntimeError):
+    pass
+
+
+class LLMActionCancelledError(RuntimeError):
+    pass
 
 
 class DocxExportService:
@@ -108,9 +117,16 @@ class LLMActionService:
         model: str = "gpt-4o-mini",
         system_prompt_path: str | Path | None = None,
         user_prompt_path: str | Path | None = None,
+        max_concurrent_requests: int = 2,
+        max_queued_requests: int = 5,
     ) -> None:
         self._provider = provider
         self._model = model
+        self._max_concurrent_requests = max(1, int(max_concurrent_requests))
+        self._max_queued_requests = max(0, int(max_queued_requests))
+        self._queue_condition = threading.Condition()
+        self._active_requests = 0
+        self._queued_requests = 0
         self._system_prompt = self._load_prompt(
             system_prompt_path,
             default=(
@@ -135,6 +151,7 @@ class LLMActionService:
         source_language: str,
         target_language: str,
         context: str | None = None,
+        should_cancel=None,
     ) -> dict[str, Any]:
         cleaned_text = text.strip()
         if not cleaned_text:
@@ -150,14 +167,65 @@ class LLMActionService:
                 source_language=source_language,
                 target_language=target_language,
                 context=context or "",
+                should_cancel=should_cancel,
             )
         if self._provider == "mock":
+            if should_cancel and should_cancel():
+                raise LLMActionCancelledError("LLM action cancelled by client.")
             return self._run_mock_translation(
                 text=cleaned_text,
                 source_language=source_language,
                 target_language=target_language,
             )
         raise RuntimeError(f"Unsupported LLM provider: {self._provider}")
+
+    def run_limited(
+        self,
+        *,
+        action_type: str,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: str | None = None,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        self._acquire_request_slot()
+        try:
+            return self.run(
+                action_type=action_type,
+                text=text,
+                source_language=source_language,
+                target_language=target_language,
+                context=context,
+                should_cancel=should_cancel,
+            )
+        finally:
+            self._release_request_slot()
+
+    def _acquire_request_slot(self) -> None:
+        with self._queue_condition:
+            if self._active_requests < self._max_concurrent_requests:
+                self._active_requests += 1
+                return
+            if self._queued_requests >= self._max_queued_requests:
+                raise LLMActionQueueFullError(
+                    "The translation queue is full. Wait for current requests to finish and try again."
+                )
+            self._queued_requests += 1
+            try:
+                while self._active_requests >= self._max_concurrent_requests:
+                    self._queue_condition.wait()
+                self._queued_requests -= 1
+                self._active_requests += 1
+            except BaseException:
+                self._queued_requests = max(0, self._queued_requests - 1)
+                self._queue_condition.notify(1)
+                raise
+
+    def _release_request_slot(self) -> None:
+        with self._queue_condition:
+            self._active_requests = max(0, self._active_requests - 1)
+            self._queue_condition.notify(1)
 
     def _run_openai_translation(
         self,
@@ -166,6 +234,7 @@ class LLMActionService:
         source_language: str,
         target_language: str,
         context: str,
+        should_cancel=None,
     ) -> dict[str, Any]:
         try:
             from langchain_openai import ChatOpenAI
@@ -175,6 +244,8 @@ class LLMActionService:
         client = ChatOpenAI(model=self._model, temperature=0)
         translated_parts: list[str] = []
         for chunk in self._split_translation_text(text):
+            if should_cancel and should_cancel():
+                raise LLMActionCancelledError("LLM action cancelled by client.")
             system_prompt = self._system_prompt
             context_text = chunk if not context else f"{context}\n\n{chunk}"
             human_prompt = self._user_prompt_template.replace("{context_text}", context_text)
@@ -262,7 +333,7 @@ class SpecbotQueryDefaults:
     base_url: str = "http://localhost:8080"
     config_base_url: str = "http://localhost:19071"
     limit: int = 4
-    iterations: int = 2
+    iterations: int = 1
     next_iteration_limit: int = 2
     followup_mode: str = "sentence-summary"
     summary: str = "short"
@@ -508,12 +579,76 @@ class SpecbotQueryHttpService:
                 raise RuntimeError(f"Unable to reach SpecBot query API at {self._base_url}: {exc}") from exc
 
         if response.status_code >= 400:
+            if response.status_code == 429:
+                raise LLMActionQueueFullError(
+                    _extract_error_detail(response.text) or "The shared query/translation queue is full."
+                )
+            if response.status_code == 499:
+                raise LLMActionCancelledError(_extract_error_detail(response.text) or "SpecBot query cancelled by client.")
             raise RuntimeError(_extract_error_detail(response.text) or f"Query API HTTP {response.status_code}")
 
         try:
             return dict(response.json())
         except Exception as exc:
             raise RuntimeError(f"SpecBot query API returned invalid JSON: {exc}") from exc
+
+
+class LLMActionHttpService:
+    def __init__(self, base_url: str, timeout_seconds: float = 180.0) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
+
+    def available_actions(self) -> list[dict[str, str]]:
+        return [{"type": "translate", "label": "Translate"}]
+
+    async def run_async(
+        self,
+        *,
+        action_type: str,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: str | None = None,
+        should_cancel=None,
+    ) -> dict[str, Any]:
+        import httpx
+
+        payload = {
+            "actionType": action_type,
+            "text": text,
+            "sourceLanguage": source_language,
+            "targetLanguage": target_language,
+            "context": context,
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            request_task = asyncio.create_task(client.post(f"{self._base_url}/llm-actions", json=payload))
+            try:
+                while True:
+                    if should_cancel and should_cancel():
+                        request_task.cancel()
+                        raise LLMActionCancelledError("LLM action cancelled by client.")
+                    if request_task.done():
+                        break
+                    await asyncio.sleep(0.2)
+                response = await request_task
+            except asyncio.CancelledError as exc:
+                request_task.cancel()
+                raise LLMActionCancelledError("LLM action cancelled by client.") from exc
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Unable to reach SpecBot query API at {self._base_url}: {exc}") from exc
+
+        if response.status_code == 429:
+            raise LLMActionQueueFullError(_extract_error_detail(response.text) or "LLM action queue is full.")
+        if response.status_code == 499:
+            raise LLMActionCancelledError(_extract_error_detail(response.text) or "LLM action cancelled by client.")
+        if response.status_code >= 400:
+            raise RuntimeError(_extract_error_detail(response.text) or f"LLM action API HTTP {response.status_code}")
+
+        try:
+            return dict(response.json())
+        except Exception as exc:
+            raise RuntimeError(f"LLM action API returned invalid JSON: {exc}") from exc
 
 
 def _extract_error_detail(payload_text: str) -> str:
