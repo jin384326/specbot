@@ -41,6 +41,10 @@ textarea {
   padding: 20px;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
@@ -90,6 +94,90 @@ h2 {
   min-height: calc(100vh - 120px);
 }
 
+.board-screen,
+.editor-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.board-panel {
+  padding: 16px;
+}
+
+.board-post-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.board-post-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: white;
+}
+
+.board-post-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.board-post-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.board-post-body {
+  color: var(--muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.board-post-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.board-post-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.editor-topbar {
+  margin-bottom: 0;
+}
+
+.editor-postbar {
+  margin-bottom: 0;
+}
+
+.editor-title-field {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.editor-screen-topbar {
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.editor-topbar-spacer {
+  flex: 1 1 auto;
+  min-height: 1px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid rgba(207, 216, 202, 0.9);
@@ -128,6 +216,7 @@ h2 {
   flex-direction: column;
   padding: 16px;
   min-width: 0;
+  gap: 4px;
 }
 
 .panel-header,
@@ -137,6 +226,30 @@ h2 {
   align-items: baseline;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.editor-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.editor-toolbar .pill {
+  margin-right: auto;
+}
+
+.right-panel-actions {
+  justify-content: flex-start;
+  align-items: flex-end;
+}
+
+.right-panel-actions .field {
+  flex: 1 1 auto;
+}
+
+.export-controls {
+  align-items: flex-end;
 }
 
 .specbot-results-heading {

@@ -12,6 +12,7 @@ import {
   restoreSessionState,
   state,
 } from "./core.js";
+import { bindBoardFeature, initializeBoard } from "./features/board.js";
 import { bindDocumentsFeature } from "./features/documents.js";
 import { bindExportFeature } from "./features/export.js";
 import { bindSelectionFeature } from "./features/selection.js";
@@ -21,6 +22,7 @@ import { bindTreeFeature } from "./features/tree.js";
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
   bindGlobalEvents();
+  bindBoardFeature();
   bindDocumentsFeature();
   bindSpecbotFeature();
   bindSelectionFeature();
@@ -40,4 +42,5 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderSelectedClauseList();
   renderSpecbotResults();
   renderClauseTree();
+  await initializeBoard();
 });

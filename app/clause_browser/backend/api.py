@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import asyncio
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.clause_browser.backend.repository import ClauseRepository
@@ -16,6 +17,7 @@ from app.clause_browser.backend.services import (
     LLMActionQueueFullError,
     LLMActionService,
     SpecbotQueryService,
+    sanitize_file_stem,
 )
 
 
@@ -30,6 +32,7 @@ class ClauseTreePayload(BaseModel):
     clausePath: list[str] = Field(default_factory=list)
     sourceFile: str | None = None
     orderInSource: int | None = None
+    blocks: list[dict[str, Any]] = Field(default_factory=list)
     children: list["ClauseTreePayload"] = Field(default_factory=list)
 
 
@@ -39,6 +42,7 @@ ClauseTreePayload.model_rebuild()
 class ExportRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     roots: list[ClauseTreePayload] = Field(min_length=1)
+    notes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LLMActionRequest(BaseModel):
@@ -145,12 +149,41 @@ def create_router(
             result = export_service.export(
                 title=request.title,
                 roots=[root.model_dump(mode="json") for root in request.roots],
+                notes=request.notes,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"DOCX export failed: {exc}") from exc
         return success(result.to_dict())
+
+    @router.post("/exports/docx/download")
+    def export_docx_download(request: ExportRequest) -> Response:
+        try:
+            file_name, payload = export_service.export_bytes(
+                title=request.title,
+                roots=[root.model_dump(mode="json") for root in request.roots],
+                notes=request.notes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"DOCX export failed: {exc}") from exc
+        stem = file_name[:-5] if file_name.lower().endswith(".docx") else file_name
+        ascii_stem = sanitize_file_stem(stem.encode("ascii", "ignore").decode("ascii"))
+        if not any(char.isalnum() for char in ascii_stem):
+            ascii_stem = "clause-export"
+        ascii_name = f"{ascii_stem}.docx"
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(file_name)}'
+            )
+        }
+        return Response(
+            content=payload,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers=headers,
+        )
 
     @router.post("/llm-actions")
     async def run_llm_action(request: Request, payload: LLMActionRequest) -> dict[str, Any]:

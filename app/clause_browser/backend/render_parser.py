@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.oxml.ns import qn
@@ -253,9 +254,11 @@ class RichDocxClauseParser:
         return image_blocks
 
     @staticmethod
-    def _extract_paragraph_format(paragraph: Paragraph) -> dict[str, int]:
+    def _extract_paragraph_format(paragraph: Paragraph) -> dict[str, float | int]:
         direct_format = paragraph.paragraph_format
         style_format = getattr(paragraph.style, "paragraph_format", None)
+        style_name = paragraph.style.name if paragraph.style else ""
+        alignment = paragraph.alignment
 
         left_indent_pt = RichDocxClauseParser._get_length_points(
             direct_format.left_indent,
@@ -269,11 +272,21 @@ class RichDocxClauseParser:
         left_indent_px = RichDocxClauseParser._points_to_pixels(left_indent_pt)
         text_indent_px = RichDocxClauseParser._points_to_pixels(first_line_indent_pt)
 
-        payload: dict[str, int] = {}
+        payload: dict[str, float | int] = {}
         if left_indent_px:
             payload["leftIndentPx"] = left_indent_px
+        if left_indent_pt:
+            payload["leftIndentPt"] = round(left_indent_pt, 2)
         if text_indent_px:
             payload["textIndentPx"] = text_indent_px
+        if first_line_indent_pt:
+            payload["textIndentPt"] = round(first_line_indent_pt, 2)
+        if style_name:
+            payload["styleName"] = style_name
+        if alignment is not None:
+            payload["alignment"] = int(alignment)
+        elif getattr(style_format, "alignment", None) is not None:
+            payload["alignment"] = int(style_format.alignment)
         return payload
 
     @staticmethod

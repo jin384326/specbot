@@ -10,6 +10,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.clause_browser.backend.api import ClauseBrowserConfig, create_router
+from app.clause_browser.backend.board_api import create_board_router
+from app.clause_browser.backend.board_repository import BoardLockManager, BoardPostRepository
 from app.clause_browser.backend.render_parser import RichClauseDocumentService
 from app.clause_browser.backend.repository import ClauseRepository
 from app.clause_browser.backend.services import (
@@ -23,6 +25,7 @@ from app.clause_browser.backend.services import (
 DEFAULT_CORPUS_PATH = Path("artifacts/clause_browser_corpus.jsonl")
 DEFAULT_EXPORT_DIR = Path("artifacts/clause_exports")
 DEFAULT_MEDIA_DIR = Path("artifacts/clause_browser_media")
+DEFAULT_BOARD_STORAGE_PATH = Path("artifacts/clause_board/posts.json")
 STATIC_DIR = Path(__file__).resolve().parents[1] / "frontend" / "static"
 
 
@@ -39,11 +42,15 @@ class ClauseBrowserSettings:
     llm_max_queued_requests: int
     languages: tuple[tuple[str, str], ...]
     specbot_query_api_url: str
+    board_storage_path: Path = DEFAULT_BOARD_STORAGE_PATH
+    board_lock_ttl_seconds: int = 120
 
 
 def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=None, llm_service=None) -> FastAPI:
     active_settings = settings or load_settings()
     repository = ClauseRepository(active_settings.corpus_path)
+    board_repository = BoardPostRepository(active_settings.board_storage_path)
+    board_locks = BoardLockManager(ttl_seconds=active_settings.board_lock_ttl_seconds)
     export_service = DocxExportService(
         export_dir=active_settings.export_dir,
         project_root=active_settings.project_root,
@@ -82,6 +89,7 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
             specbot_service=active_specbot_service,
         )
     )
+    app.include_router(create_board_router(repository=board_repository, locks=board_locks))
 
     app.mount("/clause-browser", StaticFiles(directory=str(STATIC_DIR), html=True), name="clause-browser")
     app.mount("/clause-browser-media", StaticFiles(directory=str(active_settings.media_dir)), name="clause-browser-media")
@@ -109,6 +117,9 @@ def load_settings() -> ClauseBrowserSettings:
     media_dir = Path(os.environ.get("SPECBOT_CLAUSE_BROWSER_MEDIA_DIR", DEFAULT_MEDIA_DIR))
     if not media_dir.is_absolute():
         media_dir = project_root / media_dir
+    board_storage_path = Path(os.environ.get("SPECBOT_CLAUSE_BOARD_STORAGE", DEFAULT_BOARD_STORAGE_PATH))
+    if not board_storage_path.is_absolute():
+        board_storage_path = project_root / board_storage_path
 
     cors_env = os.environ.get("SPECBOT_CLAUSE_BROWSER_CORS_ORIGINS", "").strip()
     cors_origins = tuple(part.strip() for part in cors_env.split(",") if part.strip())
@@ -137,6 +148,8 @@ def load_settings() -> ClauseBrowserSettings:
         corpus_path=corpus_path,
         export_dir=export_dir,
         media_dir=media_dir,
+        board_storage_path=board_storage_path,
+        board_lock_ttl_seconds=max(30, int(os.environ.get("SPECBOT_CLAUSE_BOARD_LOCK_TTL_SECONDS", "120"))),
         cors_origins=cors_origins,
         llm_provider=llm_provider,
         llm_model=llm_model,

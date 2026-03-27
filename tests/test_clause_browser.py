@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import base64
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -129,6 +131,9 @@ def write_docx_files(tmp_path: Path) -> None:
     table.cell(1, 0).text = "Mode"
     table.cell(1, 1).text = "SSC1"
     doc.add_paragraph().add_run().add_picture(str(image_path))
+    caption_style = doc.styles.add_style("TF", WD_STYLE_TYPE.PARAGRAPH)
+    caption_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph("Figure 5-1: Example figure caption", style="TF")
     doc.add_paragraph("5.1 PDU session procedures", style="Heading 2")
     doc.add_paragraph("Detailed clause body.")
     doc.add_paragraph("5.1.1 Request handling", style="Heading 3")
@@ -371,7 +376,7 @@ def test_subtree_endpoint_returns_descendants(tmp_path: Path) -> None:
 
     payload = endpoint("23501", "5")["data"]
     assert payload["clauseId"] == "5"
-    assert [block["type"] for block in payload["blocks"]] == ["paragraph", "table", "image"]
+    assert [block["type"] for block in payload["blocks"]] == ["paragraph", "table", "image", "paragraph"]
     assert payload["children"][0]["clauseId"] == "5.1"
     assert payload["children"][0]["children"][0]["clauseId"] == "5.1.1"
     assert payload["blocks"][1]["rows"][1][1] == "SSC1"
@@ -503,7 +508,9 @@ def test_subtree_endpoint_returns_paragraph_indent_metadata(tmp_path: Path) -> N
     paragraph_block = next(block for block in payload["blocks"] if block["type"] == "paragraph")
 
     assert paragraph_block["format"]["leftIndentPx"] == 24
+    assert paragraph_block["format"]["leftIndentPt"] == 18.0
     assert paragraph_block["format"]["textIndentPx"] == -24
+    assert paragraph_block["format"]["textIndentPt"] == -18.0
 
 
 def test_docx_export_endpoint_saves_file(tmp_path: Path) -> None:
@@ -519,6 +526,38 @@ def test_docx_export_endpoint_saves_file(tmp_path: Path) -> None:
     headings = [p.text for p in exported.paragraphs if p.style.name.startswith("Heading")]
     assert "5 Session management" in headings
     assert "5.1 PDU session procedures" in headings
+
+
+def test_docx_download_endpoint_returns_attachment(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    subtree_endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses/{clause_id:path}/subtree")
+    export_endpoint = get_endpoint(app, "/api/clause-browser/exports/docx/download")
+    subtree = subtree_endpoint("23501", "5")["data"]
+
+    response = export_endpoint(ExportRequest(title="Session Export", roots=[subtree]))
+
+    assert response.media_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="Session_Export.docx"; '
+        "filename*=UTF-8''Session_Export.docx"
+    )
+    exported = Document(BytesIO(response.body))
+    headings = [p.text for p in exported.paragraphs if p.style.name.startswith("Heading")]
+    assert "5 Session management" in headings
+
+
+def test_docx_download_endpoint_uses_safe_ascii_fallback_for_non_ascii_title(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    subtree_endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses/{clause_id:path}/subtree")
+    export_endpoint = get_endpoint(app, "/api/clause-browser/exports/docx/download")
+    subtree = subtree_endpoint("23501", "5")["data"]
+
+    response = export_endpoint(ExportRequest(title="새 게시글", roots=[subtree]))
+
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="clause-export.docx"; '
+        "filename*=UTF-8''%EC%83%88_%EA%B2%8C%EC%8B%9C%EA%B8%80.docx"
+    )
 
 
 def test_llm_action_endpoint_returns_mock_translation(tmp_path: Path) -> None:
@@ -748,9 +787,80 @@ def test_docx_export_service_adds_numeric_suffix(tmp_path: Path) -> None:
     first = service.export("My Export", roots)
     second = service.export("My Export", roots)
 
-    assert first.file_name == "My-Export.docx"
-    assert second.file_name == "My-Export-2.docx"
+    assert first.file_name == "My_Export.docx"
+    assert second.file_name == "My_Export_2.docx"
+
+
+def test_docx_export_service_includes_notes_and_images(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    media_dir = tmp_path / "artifacts" / "clause_browser_media" / "23501" / "5"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    image_path = media_dir / "tiny.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII="
+        )
+    )
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "paragraph",
+                    "text": "Paragraph body",
+                    "format": {"leftIndentPt": 18.0, "textIndentPt": -18.0},
+                },
+                {"type": "paragraph", "text": "Figure 5-1: Example figure caption", "format": {"styleName": "TF"}},
+                {
+                    "type": "table",
+                    "cells": [
+                        [{"text": "H1", "rowspan": 1, "colspan": 1, "header": True}],
+                        [{"text": "V1", "rowspan": 1, "colspan": 1, "header": False}],
+                    ],
+                },
+                {"type": "image", "src": "/clause-browser-media/23501/5/tiny.png", "alt": "Figure 1"},
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "23501:5:clause",
+            "type": "clause",
+            "clauseKey": "23501:5",
+            "translation": "Clause memo translation",
+            "sourceText": "Source clause text",
+        },
+        {
+            "id": "selection:1",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "translation": "Selection memo translation",
+            "sourceText": "Selected source text",
+        },
+    ]
+
+    result = service.export("My Export", roots, notes=notes)
+
+    exported = Document(export_dir / result.file_name)
+    texts = [paragraph.text for paragraph in exported.paragraphs]
+    assert "Paragraph body" in texts
+    caption = next(item for item in exported.paragraphs if item.text == "Figure 5-1: Example figure caption")
+    assert caption.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert "Selection memo: Selection memo translation" in texts
+    assert "Clause memo: Clause memo translation" in texts
+    paragraph = next(item for item in exported.paragraphs if item.text == "Paragraph body")
+    assert round(paragraph.paragraph_format.left_indent.pt, 1) == 18.0
+    assert round(paragraph.paragraph_format.first_line_indent.pt, 1) == -18.0
+    assert len(exported.inline_shapes) == 1
+    assert len(exported.tables) == 1
+    assert exported.tables[0].style.name == "Table Grid"
 
 
 def test_sanitize_file_stem_removes_invalid_characters() -> None:
-    assert sanitize_file_stem('A/B:C*D? E') == "ABCD-E"
+    assert sanitize_file_stem('A/B:C*D? E') == "ABCD_E"

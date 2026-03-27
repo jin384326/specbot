@@ -7,6 +7,7 @@ import sys
 import json
 import asyncio
 import threading
+from io import BytesIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from dataclasses import dataclass
@@ -14,11 +15,15 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches
+from docx.shared import Pt
 
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE_RUN = re.compile(r"\s+")
 TRANSLATION_CHUNK_LIMIT = 12000
+CAPTION_PARAGRAPH = re.compile(r"^(Figure|Table)\s+[A-Za-z0-9.\-]+(?:\s*[:.\-]\s*|\s{2,})")
 
 
 @dataclass(frozen=True)
@@ -51,20 +56,11 @@ class DocxExportService:
     def __init__(self, export_dir: str | Path, project_root: str | Path) -> None:
         self._export_dir = Path(export_dir)
         self._project_root = Path(project_root)
+        self._media_root = self._project_root / "artifacts" / "clause_browser_media"
         self._export_dir.mkdir(parents=True, exist_ok=True)
 
-    def export(self, title: str, roots: list[dict[str, Any]]) -> ExportResult:
-        cleaned_title = title.strip()
-        if not cleaned_title:
-            raise ValueError("Document title is required.")
-        if not roots:
-            raise ValueError("At least one loaded clause is required to export a DOCX.")
-
-        document = Document()
-        document.add_heading(cleaned_title, level=0)
-        clause_count = 0
-        for root in roots:
-            clause_count += self._write_clause(document, root, depth=0)
+    def export(self, title: str, roots: list[dict[str, Any]], notes: list[dict[str, Any]] | None = None) -> ExportResult:
+        cleaned_title, document, clause_count = self._build_document(title=title, roots=roots, notes=notes or [])
 
         file_name = self._allocate_file_name(cleaned_title)
         absolute_path = self._export_dir / file_name
@@ -82,32 +78,237 @@ class DocxExportService:
             clause_count=clause_count,
         )
 
+    def export_bytes(
+        self,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, bytes]:
+        cleaned_title, document, _clause_count = self._build_document(title=title, roots=roots, notes=notes or [])
+        file_name = f"{sanitize_file_stem(cleaned_title)}.docx"
+        buffer = BytesIO()
+        document.save(buffer)
+        return file_name, buffer.getvalue()
+
+    def _build_document(
+        self,
+        *,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]],
+    ) -> tuple[str, Document, int]:
+        cleaned_title = title.strip()
+        if not cleaned_title:
+            raise ValueError("Document title is required.")
+        if not roots:
+            raise ValueError("At least one loaded clause is required to export a DOCX.")
+
+        document = Document()
+        document.add_heading(cleaned_title, level=0)
+        note_index = self._index_notes(notes)
+        clause_count = 0
+        for root in roots:
+            clause_count += self._write_clause(document, root, depth=0, note_index=note_index)
+        return cleaned_title, document, clause_count
+
     def _allocate_file_name(self, title: str) -> str:
         base_name = sanitize_file_stem(title)
         candidate = f"{base_name}.docx"
         suffix = 2
         while (self._export_dir / candidate).exists():
-            candidate = f"{base_name}-{suffix}.docx"
+            candidate = f"{base_name}_{suffix}.docx"
             suffix += 1
         return candidate
 
-    def _write_clause(self, document: Document, clause: dict[str, Any], depth: int) -> int:
+    def _write_clause(
+        self,
+        document: Document,
+        clause: dict[str, Any],
+        depth: int,
+        note_index: dict[str, Any],
+    ) -> int:
         clause_id = str(clause.get("clauseId") or "").strip()
         clause_title = str(clause.get("clauseTitle") or "").strip()
+        clause_key = str(clause.get("key") or "").strip()
         heading_text = " ".join(part for part in [clause_id, clause_title] if part).strip() or clause_id or clause_title
         document.add_heading(heading_text, level=min(depth + 1, 9))
 
-        body = str(clause.get("text") or "").strip()
-        if body:
-            for paragraph in body.splitlines():
-                trimmed = paragraph.strip()
-                if trimmed:
-                    document.add_paragraph(trimmed)
+        blocks = list(clause.get("blocks") or [])
+        if blocks:
+            for block_index, block in enumerate(blocks):
+                self._write_block(document, block, clause_key=clause_key, block_index=block_index, note_index=note_index)
+        else:
+            body = str(clause.get("text") or "").strip()
+            if body:
+                for paragraph in body.splitlines():
+                    trimmed = paragraph.strip()
+                    if trimmed:
+                        exported_paragraph = document.add_paragraph(trimmed)
+                        if self._is_caption_paragraph(trimmed, {}):
+                            exported_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        for note in note_index.get("clause", {}).get(clause_key, []):
+            self._write_note(document, note, prefix="Clause memo")
 
         total = 1
         for child in clause.get("children") or []:
-            total += self._write_clause(document, child, depth + 1)
+            total += self._write_clause(document, child, depth + 1, note_index=note_index)
         return total
+
+    def _write_block(
+        self,
+        document: Document,
+        block: dict[str, Any],
+        *,
+        clause_key: str,
+        block_index: int,
+        note_index: dict[str, Any],
+    ) -> None:
+        block_type = str(block.get("type") or "")
+        if block_type == "paragraph":
+            text = str(block.get("text") or "").strip()
+            if text:
+                paragraph = document.add_paragraph(text)
+                self._apply_paragraph_format(paragraph, block.get("format") or {})
+                if self._is_caption_paragraph(text, block.get("format") or {}):
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif block_type == "table":
+            self._write_table(document, block)
+        elif block_type == "image":
+            self._write_image(document, block)
+
+        for note in note_index.get("selection", {}).get((clause_key, block_index), []):
+            self._write_note(document, note, prefix="Selection memo")
+
+    def _write_table(self, document: Document, block: dict[str, Any]) -> None:
+        cells = list(block.get("cells") or [])
+        if not cells:
+            rows = list(block.get("rows") or [])
+            if not rows:
+                return
+            table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
+            table.style = "Table Grid"
+            for row_idx, row in enumerate(rows):
+                for col_idx, value in enumerate(row):
+                    table.cell(row_idx, col_idx).text = str(value or "")
+            return
+
+        row_count = len(cells)
+        col_count = max(sum(int(cell.get("colspan") or 1) for cell in row) for row in cells)
+        table = document.add_table(rows=row_count, cols=col_count)
+        table.style = "Table Grid"
+        occupied: set[tuple[int, int]] = set()
+        for row_idx, row in enumerate(cells):
+            col_idx = 0
+            for cell_data in row:
+                while (row_idx, col_idx) in occupied:
+                    col_idx += 1
+                rowspan = max(1, int(cell_data.get("rowspan") or 1))
+                colspan = max(1, int(cell_data.get("colspan") or 1))
+                base_cell = table.cell(row_idx, col_idx)
+                base_cell.text = str(cell_data.get("text") or "")
+                if colspan > 1:
+                    base_cell = base_cell.merge(table.cell(row_idx, col_idx + colspan - 1))
+                if rowspan > 1:
+                    base_cell = base_cell.merge(table.cell(row_idx + rowspan - 1, col_idx + colspan - 1))
+                for row_offset in range(rowspan):
+                    for col_offset in range(colspan):
+                        occupied.add((row_idx + row_offset, col_idx + col_offset))
+                col_idx += colspan
+
+    def _write_image(self, document: Document, block: dict[str, Any]) -> None:
+        image_path = self._resolve_image_path(str(block.get("src") or ""))
+        if image_path and image_path.exists():
+            try:
+                resolved_path = self._prepare_export_image(image_path)
+                document.add_picture(str(resolved_path), width=Inches(6))
+            except Exception:
+                alt = str(block.get("alt") or "").strip()
+                if alt:
+                    document.add_paragraph(alt)
+        else:
+            alt = str(block.get("alt") or "").strip()
+            if alt:
+                document.add_paragraph(alt)
+
+    def _resolve_image_path(self, src: str) -> Path | None:
+        if not src:
+            return None
+        if src.startswith("/clause-browser-media/"):
+            relative = src.removeprefix("/clause-browser-media/").lstrip("/")
+            return self._media_root / relative
+        candidate = Path(src)
+        if candidate.is_absolute():
+            return candidate
+        return self._project_root / src.lstrip("./")
+
+    def _prepare_export_image(self, path: Path) -> Path:
+        if path.suffix.lower() != ".svg":
+            return path
+        png_path = path.with_suffix(".export.png")
+        if png_path.exists():
+            return png_path
+        try:
+            import cairosvg  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"SVG export requires cairosvg: {exc}") from exc
+        cairosvg.svg2png(url=str(path), write_to=str(png_path))
+        return png_path
+
+    @staticmethod
+    def _apply_paragraph_format(paragraph, format_data: dict[str, Any]) -> None:
+        left_indent_pt = format_data.get("leftIndentPt")
+        text_indent_pt = format_data.get("textIndentPt")
+        left_indent_px = format_data.get("leftIndentPx")
+        text_indent_px = format_data.get("textIndentPx")
+        if left_indent_pt is not None:
+            paragraph.paragraph_format.left_indent = Pt(float(left_indent_pt))
+        elif left_indent_px is not None:
+            paragraph.paragraph_format.left_indent = Pt(float(left_indent_px) * 72 / 96)
+        if text_indent_pt is not None:
+            paragraph.paragraph_format.first_line_indent = Pt(float(text_indent_pt))
+        elif text_indent_px is not None:
+            paragraph.paragraph_format.first_line_indent = Pt(float(text_indent_px) * 72 / 96)
+
+    @staticmethod
+    def _is_caption_paragraph(text: str, format_data: dict[str, Any]) -> bool:
+        style_name = str(format_data.get("styleName") or "").strip().upper()
+        alignment = format_data.get("alignment")
+        if style_name == "TF":
+            return True
+        if alignment is not None and int(alignment) == int(WD_ALIGN_PARAGRAPH.CENTER):
+            return True
+        return bool(re.match(r"^(Figure|Table)\s+[A-Za-z0-9.\-]+:\s+\S+", text.strip()))
+
+    @staticmethod
+    def _index_notes(notes: list[dict[str, Any]]) -> dict[str, Any]:
+        clause_notes: dict[str, list[dict[str, Any]]] = {}
+        selection_notes: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        for note in notes or []:
+            translation = str(note.get("translation") or "").strip()
+            if not translation:
+                continue
+            note_type = str(note.get("type") or "")
+            clause_key = str(note.get("clauseKey") or "")
+            if note_type == "clause" and clause_key:
+                clause_notes.setdefault(clause_key, []).append(note)
+            elif note_type == "selection" and clause_key:
+                block_index = int(note.get("blockIndex") or 0)
+                selection_notes.setdefault((clause_key, block_index), []).append(note)
+        return {"clause": clause_notes, "selection": selection_notes}
+
+    @staticmethod
+    def _write_note(document: Document, note: dict[str, Any], *, prefix: str) -> None:
+        source_text = str(note.get("sourceText") or "").strip()
+        translation = str(note.get("translation") or "").strip()
+        if source_text:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(f"{prefix} source: ").bold = True
+            paragraph.add_run(source_text)
+        if translation:
+            paragraph = document.add_paragraph()
+            paragraph.add_run(f"{prefix}: ").bold = True
+            paragraph.add_run(translation)
 
 
 class LLMActionService:
@@ -323,7 +524,7 @@ class LLMActionService:
 
 def sanitize_file_stem(value: str) -> str:
     candidate = INVALID_FILENAME_CHARS.sub("", value.strip())
-    candidate = WHITESPACE_RUN.sub("-", candidate)
+    candidate = WHITESPACE_RUN.sub("_", candidate)
     candidate = candidate.strip(".- ")
     return candidate or "clause-export"
 

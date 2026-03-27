@@ -8,72 +8,107 @@
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Specbot</p>
-          <h1>Clause Browser</h1>
-        </div>
-        <div class="topbar-actions">
-          <button id="open-picker-button" class="primary">문서 탐색</button>
-          <label class="field query-field">
-            <span>SpecBot Query</span>
-            <input id="specbot-query" type="search" placeholder="예: End to End Redundant Paths" />
-          </label>
-          <button id="run-specbot-query">
-            <span id="specbot-spinner" class="spinner hidden" aria-hidden="true"></span>
-            <span id="run-specbot-label">수행</span>
-          </button>
-          <button id="open-specbot-settings" class="ghost">설정</button>
-          <label class="field compact">
-            <span>DOCX 제목</span>
-            <input id="export-title" type="text" placeholder="예: Session management subset" />
-          </label>
-          <button id="export-button" class="primary">DOCX 저장</button>
-        </div>
-      </header>
+      <section id="board-screen" class="board-screen">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Specbot Board</p>
+            <h1>게시글 목록</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="field query-field">
+              <span>게시글 검색</span>
+              <input id="board-search" type="search" placeholder="제목 또는 내용 검색" />
+            </label>
+            <button id="board-create-post" class="primary">게시글 작성</button>
+          </div>
+        </header>
 
-      <div id="picker-selection-summary" class="hidden" aria-hidden="true"></div>
-
-      <main class="layout">
-        <aside class="panel left-panel">
-          <section class="panel-section selected-panel">
-            <div class="section-heading">
-              <h2>선택한 절</h2>
-              <span id="selected-clause-count" class="muted">0</span>
-            </div>
-            <div id="selected-clause-list" class="selected-clause-list"></div>
-          </section>
-        </aside>
-
-        <section class="panel center-panel">
+        <section class="panel board-panel">
           <div class="panel-header">
             <div>
-              <h2>현재 로드된 절</h2>
-              <p class="muted">절 단위 추가/제거, 접기/펼치기, 텍스트 선택 후 LLM 액션</p>
+              <h2>게시판</h2>
+              <p class="muted">게시글 검색, 생성, 편집 잠금 상태 확인</p>
             </div>
-            <div id="loaded-summary" class="pill">0 clauses</div>
+            <div id="board-list-count" class="pill">0 posts</div>
           </div>
-          <div id="message-bar" class="message-bar" aria-live="polite"></div>
-          <div id="translation-status" class="translation-status hidden" aria-live="polite"></div>
-          <div id="tree-container" class="tree-container"></div>
+          <div id="board-message-bar" class="message-bar" aria-live="polite"></div>
+          <div id="board-post-list" class="board-post-list"></div>
         </section>
+      </section>
 
-        <aside class="panel right-panel">
-          <section class="panel-section">
-            <div class="section-heading specbot-results-heading">
-              <h2 class="specbot-results-title">SpecBot 결과</h2>
-              <button
-                id="clear-specbot-results"
-                class="ghost icon-button"
-                type="button"
-                title="결과 비우기"
-                aria-label="결과 비우기"
-              >✕</button>
+      <section id="editor-screen" class="editor-screen hidden">
+        <header class="topbar editor-screen-topbar">
+          <div class="editor-topbar-spacer" aria-hidden="true"></div>
+          <div class="topbar-actions">
+            <button id="board-back-to-list" class="ghost">목록</button>
+            <button id="export-button" class="ghost hidden">export</button>
+            <button id="board-save-post" class="primary">저장</button>
+          </div>
+        </header>
+
+        <div id="picker-selection-summary" class="hidden" aria-hidden="true"></div>
+
+        <main class="layout">
+          <aside class="panel left-panel">
+            <section class="panel-section selected-panel">
+              <div class="section-heading">
+                <h2>선택한 절</h2>
+                <span id="selected-clause-count" class="muted">0</span>
+              </div>
+              <div id="selected-clause-list" class="selected-clause-list"></div>
+            </section>
+          </aside>
+
+          <section class="panel center-panel">
+            <label class="field editor-title-field">
+              <span>게시글 제목</span>
+              <input id="board-post-title" type="text" placeholder="게시글 제목" />
+            </label>
+            <div class="panel-header editor-toolbar">
+              <button id="open-picker-button" class="primary">문서 탐색</button>
+              <div id="loaded-summary" class="pill">0 clauses</div>
             </div>
-            <div id="specbot-result-list" class="result-list"></div>
+            <div class="panel-header">
+              <div>
+                <h2>현재 로드된 절</h2>
+                <p class="muted">절 단위 추가/제거, 접기/펼치기, 텍스트 선택 후 LLM 액션</p>
+              </div>
+            </div>
+            <div id="message-bar" class="message-bar" aria-live="polite"></div>
+            <div id="translation-status" class="translation-status hidden" aria-live="polite"></div>
+            <div id="tree-container" class="tree-container"></div>
           </section>
-        </aside>
-      </main>
+
+          <aside class="panel right-panel">
+            <section class="panel-section">
+              <label class="field">
+                <span>SpecBot Query</span>
+                <input id="specbot-query" type="search" placeholder="예: End to End Redundant Paths" />
+              </label>
+              <div class="topbar-actions right-panel-actions">
+                <button id="run-specbot-query">
+                  <span id="specbot-spinner" class="spinner hidden" aria-hidden="true"></span>
+                  <span id="run-specbot-label">수행</span>
+                </button>
+                <button id="open-specbot-settings" class="ghost">설정</button>
+              </div>
+            </section>
+            <section class="panel-section">
+              <div class="section-heading specbot-results-heading">
+                <h2 class="specbot-results-title">SpecBot 결과</h2>
+                <button
+                  id="clear-specbot-results"
+                  class="ghost icon-button"
+                  type="button"
+                  title="결과 비우기"
+                  aria-label="결과 비우기"
+                >✕</button>
+              </div>
+              <div id="specbot-result-list" class="result-list"></div>
+            </section>
+          </aside>
+        </main>
+      </section>
     </div>
 
     <div id="selection-menu" class="selection-menu hidden">

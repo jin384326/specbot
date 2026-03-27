@@ -19,6 +19,7 @@ sentence-transformers>=3.0.0
 bitsandbytes>=0.43.0
 accelerate
 langchain-openai>=0.2.0
+cairosvg>=2.7.0
 
 # 테스트
 pytest>=8.0.0

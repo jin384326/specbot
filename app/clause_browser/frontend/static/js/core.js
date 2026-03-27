@@ -815,7 +815,15 @@ function getParagraphInlineStyle(block) {
   const format = block?.format || {};
   const text = String(block?.text || "").trim();
   const styles = [];
-  if (Number.isFinite(Number(format.leftIndentPx)) && Number(format.leftIndentPx) !== 0) {
+  const hasDocxLeftIndent =
+    (Number.isFinite(Number(format.leftIndentPt)) && Number(format.leftIndentPt) !== 0) ||
+    (Number.isFinite(Number(format.leftIndentPx)) && Number(format.leftIndentPx) !== 0);
+  const hasDocxTextIndent =
+    (Number.isFinite(Number(format.textIndentPt)) && Number(format.textIndentPt) !== 0) ||
+    (Number.isFinite(Number(format.textIndentPx)) && Number(format.textIndentPx) !== 0);
+  if (Number.isFinite(Number(format.leftIndentPt)) && Number(format.leftIndentPt) !== 0) {
+    styles.push(`margin-left:${Number(format.leftIndentPt)}pt`);
+  } else if (Number.isFinite(Number(format.leftIndentPx)) && Number(format.leftIndentPx) !== 0) {
     styles.push(`margin-left:${Number(format.leftIndentPx)}px`);
   }
   const shouldUseHangingIndent =
@@ -824,13 +832,25 @@ function getParagraphInlineStyle(block) {
     /^(WARNING|CAUTION)\s*:/i.test(text) ||
     /^(?:[-*•]|[A-Za-z]\)|\d+[A-Za-z]+\)|\d+\)|\d+[A-Za-z]+\.\s+|\d+\.\s+)/.test(text);
   if (
-    shouldUseHangingIndent &&
+    hasDocxTextIndent &&
+    Number.isFinite(Number(format.textIndentPt)) &&
+    Number(format.textIndentPt) !== 0
+  ) {
+    styles.push(`text-indent:${Number(format.textIndentPt)}pt`);
+  } else if (
+    hasDocxTextIndent &&
     Number.isFinite(Number(format.textIndentPx)) &&
     Number(format.textIndentPx) !== 0
   ) {
     styles.push(`text-indent:${Number(format.textIndentPx)}px`);
+  } else if (
+    shouldUseHangingIndent &&
+    Number.isFinite(Number(format.textIndentPt)) &&
+    Number(format.textIndentPt) !== 0
+  ) {
+    styles.push(`text-indent:${Number(format.textIndentPt)}pt`);
   }
-  if (!shouldUseHangingIndent) {
+  if (!hasDocxLeftIndent && !hasDocxTextIndent && !shouldUseHangingIndent) {
     styles.push("padding-left:0");
   }
   return styles.join("; ");
@@ -1272,19 +1292,33 @@ function compareMixedToken(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
 }
 
-function isCaptionParagraph(text) {
-  return /^(Figure|Table)\s+[A-Za-z0-9.\-]+:/.test(String(text).trim());
+function isCaptionParagraph(text, block = null) {
+  const format = block?.format || {};
+  const styleName = String(format.styleName || "").trim().toUpperCase();
+  const alignment = Number(format.alignment);
+  if (styleName === "TF") {
+    return true;
+  }
+  if (Number.isFinite(alignment) && alignment === 1) {
+    return true;
+  }
+  return /^(Figure|Table)\s+[A-Za-z0-9.\-]+:\s+\S+/.test(String(text).trim());
 }
 
 function hasDocxParagraphFormat(block) {
   const format = block?.format || {};
-  return Number.isFinite(Number(format.leftIndentPx)) || Number.isFinite(Number(format.textIndentPx));
+  return (
+    Number.isFinite(Number(format.leftIndentPt)) ||
+    Number.isFinite(Number(format.textIndentPt)) ||
+    Number.isFinite(Number(format.leftIndentPx)) ||
+    Number.isFinite(Number(format.textIndentPx))
+  );
 }
 
 function getParagraphClass(text, block = null) {
   const value = String(text).trim();
   const fallbackClass = hasDocxParagraphFormat(block) ? "" : " docx-fallback";
-  if (isCaptionParagraph(value)) {
+  if (isCaptionParagraph(value, block)) {
     return "tree-text docx-paragraph docx-caption";
   }
   if (/^NOTE\s*:/i.test(value)) {
@@ -2098,20 +2132,49 @@ async function exportDocx() {
     setMessage("저장할 절이 없습니다.", true);
     return;
   }
-  const title = elements.exportTitle.value.trim();
+  const boardTitle = document.getElementById("board-post-title")?.value?.trim() || "";
+  const exportInputTitle = elements.exportTitle?.value?.trim?.() || "";
+  const title = boardTitle || exportInputTitle;
   if (!title) {
     endBusy();
-    setMessage("DOCX 제목을 입력하세요.", true);
+    setMessage("게시글 제목이 없습니다.", true);
     return;
   }
 
   try {
-    const response = await apiPost("/api/clause-browser/exports/docx", {
-      title,
-      roots: state.loadedRoots,
+    const response = await fetch("/api/clause-browser/exports/docx/download", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      },
+      body: JSON.stringify({
+        title,
+        roots: state.loadedRoots,
+        notes: state.ui.notes || [],
+      }),
     });
-    setMessage(`DOCX 저장 완료: ${response.data.relativePath}`, false);
-    elements.exportTitle.value = "";
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const detail = payload?.detail || "DOCX export failed";
+      throw new Error(formatErrorMessage(detail));
+    }
+    const blob = await response.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const asciiMatch = disposition.match(/filename="([^"]+)"/i);
+    const fileName = utf8Match?.[1]
+      ? decodeURIComponent(utf8Match[1])
+      : (asciiMatch?.[1] || `${title}.docx`);
+    const anchor = document.createElement("a");
+    anchor.href = downloadUrl;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+    setMessage(`Export 완료: ${fileName}`, false);
   } catch (error) {
     if (!isAbortedRequestError(error)) {
       setMessage(error.message, true);
@@ -2160,7 +2223,9 @@ function updateBusyUi() {
   elements.openPickerButton.disabled = isBusy && !allowsDocumentBrowsing;
   elements.documentSearch.disabled = isBusy && !allowsDocumentBrowsing;
   elements.clauseSearch.disabled = isBusy && !allowsDocumentBrowsing;
-  elements.exportButton.disabled = isBusy;
+  if (elements.exportButton) {
+    elements.exportButton.disabled = isBusy;
+  }
   elements.openSpecbotSettings.disabled = isBusy;
   elements.runSpecbotQuery.disabled = isBusy;
   elements.specbotQuery.disabled = isBusy;
@@ -2672,7 +2737,16 @@ function wait(ms) {
 }
 
 function persistSessionState() {
-  const payload = {
+  const payload = getWorkspaceSnapshot();
+  try {
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // Ignore storage failures.
+  }
+}
+
+function getWorkspaceSnapshot() {
+  return {
     activeSpecNo: state.activeSpecNo,
     loadedRoots: state.loadedRoots,
     expandedKeys: [...state.ui.expandedKeys],
@@ -2686,11 +2760,6 @@ function persistSessionState() {
     specbotResults: state.ui.specbotResults,
     notes: state.ui.notes || [],
   };
-  try {
-    window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
-  } catch (_error) {
-    // Ignore storage failures.
-  }
 }
 
 function restoreSessionState() {
@@ -2724,6 +2793,60 @@ function restoreSessionState() {
   }
 }
 
+async function applyWorkspaceSnapshot(payload) {
+  state.activeSpecNo = payload?.activeSpecNo || "";
+  state.loadedRoots = Array.isArray(payload?.loadedRoots) ? payload.loadedRoots : [];
+  state.ui.expandedKeys = new Set(Array.isArray(payload?.expandedKeys) ? payload.expandedKeys : []);
+  state.ui.focusedKey = payload?.focusedKey || "";
+  state.ui.viewportKey = payload?.viewportKey || "";
+  state.ui.collapsedSpecs = new Set(Array.isArray(payload?.collapsedSpecs) ? payload.collapsedSpecs : []);
+  state.ui.collapsedLoadedSpecs = new Set(Array.isArray(payload?.collapsedLoadedSpecs) ? payload.collapsedLoadedSpecs : []);
+  state.ui.clauseQuery = payload?.clauseQuery || "";
+  state.ui.specbotQueryText = payload?.specbotQueryText || "";
+  state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  state.ui.specbotResults = Array.isArray(payload?.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
+  if (payload?.specbotSettings && typeof payload.specbotSettings === "object") {
+    state.ui.specbotSettings = {
+      ...payload.specbotSettings,
+      rejectedClauses: getNormalizedRejectedClauses(payload.specbotSettings.rejectedClauses),
+    };
+  }
+  if (state.activeSpecNo) {
+    await ensureClauseCatalog(state.activeSpecNo);
+  }
+  if (elements.activeDocumentLabel) {
+    elements.activeDocumentLabel.textContent = state.activeSpecNo || "문서를 선택하세요";
+  }
+  if (elements.clauseSearch) {
+    elements.clauseSearch.value = state.ui.clauseQuery || "";
+  }
+  if (elements.specbotQuery) {
+    elements.specbotQuery.value = state.ui.specbotQueryText || "";
+  }
+  persistSessionState();
+  renderLoadedTree();
+  renderSelectedClauseList();
+  renderSpecbotResults();
+  renderClauseTree();
+}
+
+async function resetWorkspace() {
+  await applyWorkspaceSnapshot({
+    activeSpecNo: "",
+    loadedRoots: [],
+    expandedKeys: [],
+    focusedKey: "",
+    viewportKey: "",
+    collapsedSpecs: [],
+    collapsedLoadedSpecs: [],
+    clauseQuery: "",
+    specbotQueryText: "",
+    notes: [],
+    specbotResults: [],
+    specbotSettings: state.ui.specbotSettings,
+  });
+}
+
 export {
   state,
   elements,
@@ -2745,6 +2868,9 @@ export {
   clearRejectedSpecbotClauses,
   exportDocx,
   runSelectionAction,
+  getWorkspaceSnapshot,
+  applyWorkspaceSnapshot,
+  resetWorkspace,
   handleSelectionChange,
   hideSelectionMenu,
   hideNodeMenu,
