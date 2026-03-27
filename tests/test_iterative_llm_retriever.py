@@ -206,6 +206,36 @@ def test_iterative_retriever_runs_stage_fanout_and_keyword_expansion() -> None:
     ]
 
 
+def test_iterative_retriever_can_emit_iteration_callbacks() -> None:
+    backend = StubBackend()
+    judge = StubJudge()
+    retriever = IterativeLLMRetriever(backend=backend, evaluator=judge)
+    emitted: list[dict] = []
+
+    result = retriever.run("registration", limit=2, iterations=2, on_iteration_complete=emitted.append)
+
+    assert len(emitted) == 2
+    assert emitted[0]["iteration"] == 1
+    assert emitted[1]["iteration"] == 2
+    assert emitted[0]["results"][0]["judgement"]["is_relevant"] is True
+    assert result["iterations"][0]["iteration"] == emitted[0]["iteration"]
+
+
+def test_iterative_retriever_can_emit_relevant_results_as_they_are_judged() -> None:
+    backend = StubBackend()
+    judge = StubJudge()
+    retriever = IterativeLLMRetriever(backend=backend, evaluator=judge)
+    emitted: list[dict] = []
+
+    retriever.run("registration", limit=2, iterations=1, on_relevant_result=emitted.append)
+
+    assert len(emitted) == 3
+    assert emitted[0]["doc_id"] == "registration:stage2"
+    assert emitted[0]["judgement"]["is_relevant"] is True
+    assert emitted[1]["doc_id"] == "registration:stage3"
+    assert emitted[2]["doc_id"] == "registration:else"
+
+
 def test_iterative_retriever_stops_early_when_no_keywords_returned() -> None:
     backend = StubBackend()
 

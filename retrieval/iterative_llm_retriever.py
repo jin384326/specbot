@@ -206,13 +206,14 @@ class ChatOpenAIRelevanceJudge:
         self._summary_llm = self._llm.with_structured_output(SummaryDecision, method="json_schema")
 
     def judge_relevance(self, query_text: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return self._judge_relevance(query_text, candidates, should_cancel=None)
+        return self._judge_relevance(query_text, candidates, should_cancel=None, on_relevance_decision=None)
 
     def _judge_relevance(
         self,
         query_text: str,
         candidates: list[dict[str, Any]],
         should_cancel: Callable[[], bool] | None,
+        on_relevance_decision: Callable[[dict[str, Any], dict[str, Any]], None] | None,
     ) -> list[dict[str, Any]]:
         if not candidates:
             logger.debug("LLM relevance check skipped because there are no candidates for query=%r", query_text)
@@ -251,14 +252,15 @@ class ChatOpenAIRelevanceJudge:
             response_doc_id = str(response.doc_id).strip()
             if response_doc_id != candidate_doc_id:
                 response_doc_id = candidate_doc_id
-            ordered.append(
-                {
-                    "doc_id": response_doc_id,
-                    "is_relevant": bool(response.is_relevant),
-                    "keywords": [],
-                    "reason": str(response.reason).strip(),
-                }
-            )
+            decision = {
+                "doc_id": response_doc_id,
+                "is_relevant": bool(response.is_relevant),
+                "keywords": [],
+                "reason": str(response.reason).strip(),
+            }
+            ordered.append(decision)
+            if on_relevance_decision is not None:
+                on_relevance_decision(candidate, decision)
         logger.debug(
             "LLM relevance check complete query=%r relevant=%d/%d",
             query_text,
@@ -376,6 +378,8 @@ class IterativeLLMRetriever:
         iterations: int = 1,
         next_iteration_limit: int = 2,
         should_cancel: Callable[[], bool] | None = None,
+        on_iteration_complete: Callable[[dict[str, Any]], None] | None = None,
+        on_relevant_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         self._excluded_keywords = self._load_excluded_keywords()
         active_stages = self.stage_buckets or list(DEFAULT_STAGE_BUCKETS)
@@ -451,13 +455,51 @@ class IterativeLLMRetriever:
                 logger.debug("Iteration %d only produced already-seen docs; stopping", iteration_index + 1)
                 break
             candidates = [self._candidate_payload(item) for item in unseen_hits]
+            hits_by_doc_id = {item["doc"].doc_id: item for item in unseen_hits}
+            emitted_relevant_doc_ids: set[str] = set()
+
+            def emit_relevant_result(candidate: dict[str, Any], decision: dict[str, Any]) -> None:
+                if on_relevant_result is None or not decision.get("is_relevant"):
+                    return
+                doc_id = str(candidate.get("doc_id", "")).strip()
+                if not doc_id or doc_id in emitted_relevant_doc_ids:
+                    return
+                hit_item = hits_by_doc_id.get(doc_id)
+                if hit_item is None:
+                    return
+                emitted_relevant_doc_ids.add(doc_id)
+                doc = hit_item["doc"]
+                on_relevant_result(
+                    {
+                        "doc_id": doc.doc_id,
+                        "spec_no": doc.spec_no,
+                        "stage_hint": doc.stage_hint or hit_item["stage_bucket"],
+                        "clause_id": doc.clause_id,
+                        "parent_clause_id": doc.parent_clause_id,
+                        "clause_path": list(doc.clause_path),
+                        "clause_title": doc.clause_title,
+                        "search_term": hit_item["iteration_search_term"],
+                        "stage_bucket": hit_item["stage_bucket"],
+                        "score": hit_item["score"],
+                        "reason_type": hit_item["reason_type"],
+                        "matched_text": hit_item["matched_text"],
+                        "summary": doc.summary,
+                        "text": doc.text,
+                        "judgement": decision,
+                    }
+                )
+
             self._check_cancelled(should_cancel)
             relevances = self._call_evaluator(
                 "judge_relevance",
                 query_text,
                 candidates,
                 should_cancel=should_cancel,
+                on_relevance_decision=emit_relevant_result,
             )
+            if on_relevant_result is not None:
+                for candidate, decision in zip(candidates, relevances, strict=False):
+                    emit_relevant_result(candidate, decision)
             seen_doc_ids.update(candidate["doc_id"] for candidate in candidates)
             seen_content_fingerprints.update(str(candidate["content_fingerprint"]) for candidate in candidates)
             relevant_doc_ids = {
@@ -511,6 +553,8 @@ class IterativeLLMRetriever:
                 "next_search_terms": next_terms,
                 "next_clause_targets": pending_clause_targets,
             }
+            if on_iteration_complete is not None:
+                on_iteration_complete(payload)
             iteration_results.append(payload)
             all_results.extend(judged_hits)
             if not next_terms and not pending_clause_targets:
@@ -794,6 +838,13 @@ class IterativeLLMRetriever:
             signature = inspect.signature(method)
         except (TypeError, ValueError):
             signature = None
-        if signature and "should_cancel" in signature.parameters:
-            return method(*args, should_cancel=should_cancel, **kwargs)
-        return method(*args, **kwargs)
+        call_kwargs = dict(kwargs)
+        if signature:
+            if "should_cancel" in signature.parameters:
+                call_kwargs["should_cancel"] = should_cancel
+            else:
+                call_kwargs.pop("should_cancel", None)
+            for key in list(call_kwargs.keys()):
+                if key not in signature.parameters:
+                    call_kwargs.pop(key, None)
+        return method(*args, **call_kwargs)

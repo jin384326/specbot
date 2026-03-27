@@ -17,9 +17,11 @@ const state = {
     specbotQueryText: "",
     specbotSettings: {},
     specbotResults: [],
+    specbotQueryStatus: "",
     notes: [],
     busy: null,
     translationJob: null,
+    translationTask: null,
     selection: {
       text: "",
       clauseKey: "",
@@ -423,13 +425,13 @@ async function loadClauseWithSpec(specNo, clauseId) {
     setMessage("먼저 문서를 선택하세요.", true);
     return null;
   }
-  if (!beginBusy("절을 불러오는 중입니다.")) {
+  if (!beginBusy("절을 불러오는 중입니다.", { allowDuringSpecbotQuery: true })) {
     return null;
   }
   const key = `${specNo}:${clauseId}`;
   const existing = findNodeByKey(key);
   if (existing) {
-    endBusy();
+    endBusy({ allowDuringSpecbotQuery: true });
     closePicker();
     focusNode(key);
     setMessage(`이미 로드된 절입니다. ${clauseId} 위치로 이동했습니다.`, false);
@@ -438,7 +440,7 @@ async function loadClauseWithSpec(specNo, clauseId) {
 
   const loadedAncestor = findLoadedAncestor(specNo, clauseId);
   if (loadedAncestor) {
-    endBusy();
+    endBusy({ allowDuringSpecbotQuery: true });
     closePicker();
     focusNode(loadedAncestor.key);
     setMessage(`이미 로드된 상위 절에 포함되어 있습니다. ${loadedAncestor.clauseId} 위치로 이동했습니다.`, false);
@@ -467,7 +469,7 @@ async function loadClauseWithSpec(specNo, clauseId) {
     }
     return null;
   } finally {
-    endBusy();
+    endBusy({ allowDuringSpecbotQuery: true });
   }
 }
 
@@ -567,9 +569,31 @@ function renderNode(node) {
 
 function renderTranslationStatus() {
   const job = state.ui.translationJob;
-  if (!job || !job.totalRequests) {
+  const task = state.ui.translationTask;
+  if ((!job || !job.totalRequests) && !task) {
     elements.translationStatus.classList.add("hidden");
     elements.translationStatus.innerHTML = "";
+    return;
+  }
+  if (!job || !job.totalRequests) {
+    const active = task?.status === "queued" || task?.status === "started";
+    const label = task?.label ? escapeHtml(task.label) : "번역";
+    const detail =
+      task?.status === "queued"
+        ? `대기 중${Number(task.queuedPosition || 0) > 0 ? ` · 대기열 ${Number(task.queuedPosition)}번째` : ""}`
+        : task?.status === "started"
+          ? "실행 중"
+          : "완료";
+    elements.translationStatus.classList.remove("hidden");
+    elements.translationStatus.innerHTML = `
+      <div class="translation-status-card ${active ? "active" : ""}">
+        <div class="translation-status-main">
+          ${active ? '<span class="spinner" aria-hidden="true"></span>' : ""}
+          <strong>${label}</strong>
+          <span class="muted">${detail}</span>
+        </div>
+      </div>
+    `;
     return;
   }
   const done = Number(job.completedRequests || 0);
@@ -1029,7 +1053,7 @@ function focusNode(key) {
 }
 
 async function addParentClause(nodeKey) {
-  if (state.ui.busy) {
+  if (state.ui.busy && state.ui.busy !== SPECBOT_QUERY_BUSY_LABEL) {
     setMessage(`다른 작업이 진행 중입니다: ${state.ui.busy}`, true);
     return;
   }
@@ -1477,7 +1501,13 @@ function getClauseSourceText(node) {
 async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceText, clauseLabel, targetLanguage }) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
-    const response = await apiPostWork("/api/clause-browser/llm-actions", {
+    state.ui.translationTask = {
+      status: "queued",
+      queuedPosition: 0,
+      label: type === "clause" ? "절 메모 번역" : "선택 메모 번역",
+    };
+    renderTranslationStatus();
+    const response = await streamLlmAction("/api/clause-browser/llm-actions", {
       actionType: "translate",
       text: sourceText,
       sourceLanguage,
@@ -1491,7 +1521,7 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceTe
       blockIndex,
       clauseLabel,
       sourceText,
-      translation: response.data.outputText,
+      translation: response.outputText || response.data?.outputText || "",
       sourceLanguage,
       targetLanguage,
       collapsed: false,
@@ -1503,6 +1533,9 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceTe
     if (!isAbortedRequestError(error)) {
       setMessage(error.message, true);
     }
+  } finally {
+    state.ui.translationTask = null;
+    renderTranslationStatus();
   }
 }
 
@@ -1523,8 +1556,30 @@ function upsertNote(note) {
   } else {
     state.ui.notes = [note, ...(state.ui.notes || [])];
   }
+  if (note.type === "clause" && note.clauseKey) {
+    expandNodePath(note.clauseKey);
+  }
   persistSessionState();
   renderLoadedTree();
+}
+
+function expandNodePath(targetKey) {
+  const keys = new Set(state.ui.expandedKeys || []);
+
+  function visit(node, ancestors = []) {
+    if (!node) {
+      return false;
+    }
+    if (node.key === targetKey) {
+      ancestors.forEach((key) => keys.add(key));
+      keys.add(node.key);
+      return true;
+    }
+    return (node.children || []).some((child) => visit(child, [...ancestors, node.key]));
+  }
+
+  (state.loadedRoots || []).some((root) => visit(root, []));
+  state.ui.expandedKeys = keys;
 }
 
 function updateNoteField(noteId, field, value) {
@@ -1665,16 +1720,20 @@ async function runSpecbotQuery() {
     setMessage("SpecBot query를 입력하세요.", true);
     return;
   }
+  state.ui.specbotQueryStatus = "queued";
   setSpecbotQueryLoading(true);
   try {
     const exclusions = buildSpecbotExclusions();
-    const response = await apiPostWork("/api/clause-browser/specbot/query", {
+    state.ui.specbotResults = [];
+    persistSessionState();
+    renderSpecbotResults();
+    const response = await streamSpecbotQuery({
       query,
       settings: state.ui.specbotSettings,
       excludeSpecs: exclusions.excludeSpecs,
       excludeClauses: exclusions.excludeClauses,
     });
-    state.ui.specbotResults = filterSpecbotHitsByExclusions(response.data.hits || [], exclusions).sort(compareSpecbotHits);
+    state.ui.specbotResults = filterSpecbotHitsByExclusions(response.hits || [], exclusions).sort(compareSpecbotHits);
     persistSessionState();
     renderSpecbotResults();
     setMessage(`SpecBot query 완료: ${query}`, false);
@@ -1683,6 +1742,7 @@ async function runSpecbotQuery() {
       setMessage(error.message, true);
     }
   } finally {
+    state.ui.specbotQueryStatus = "";
     setSpecbotQueryLoading(false);
     endBusy();
   }
@@ -1894,10 +1954,12 @@ function setAllSpecbotDocuments(checked) {
 }
 
 function setSpecbotQueryLoading(isLoading) {
+  const queryStatus = String(state.ui.specbotQueryStatus || "").trim();
+  const label = !isLoading ? "수행" : queryStatus === "queued" ? "대기 중" : queryStatus === "started" ? "실행 중" : "수행 중";
   elements.runSpecbotQuery.disabled = isLoading;
   elements.specbotQuery.disabled = isLoading;
   elements.specbotSpinner.classList.toggle("hidden", !isLoading);
-  elements.runSpecbotLabel.textContent = isLoading ? "수행 중" : "수행";
+  elements.runSpecbotLabel.textContent = label;
 }
 
 function addRejectedSpecbotClause(specNo, clauseId) {
@@ -2086,6 +2148,237 @@ async function apiPostWork(url, body) {
   }
 }
 
+async function streamSpecbotQuery(body) {
+  const targetUrl = resolveWorkApiUrl("/api/clause-browser/specbot/query").replace(/\/query$/, "/query-stream");
+  const slotId = await reserveLocalWorkSlot();
+  activeLocalWorkSlots.add(slotId);
+  const { signal, release } = registerRequestController();
+  let response;
+  try {
+    response = await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+    throw normalizeRequestError(error);
+  }
+  if (!response.ok) {
+    const payload = await parseResponse(response);
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    release();
+    throw new Error("SpecBot query stream is unavailable.");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalPayload = { hits: [] };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let lineBreak = buffer.indexOf("\n");
+      while (lineBreak >= 0) {
+        const line = buffer.slice(0, lineBreak).trim();
+        buffer = buffer.slice(lineBreak + 1);
+        if (line) {
+          const event = JSON.parse(line);
+          finalPayload = applySpecbotStreamEvent(event, finalPayload);
+        }
+        lineBreak = buffer.indexOf("\n");
+      }
+    }
+    const trailing = buffer.trim();
+    if (trailing) {
+      finalPayload = applySpecbotStreamEvent(JSON.parse(trailing), finalPayload);
+    }
+  } catch (error) {
+    throw normalizeRequestError(error);
+  } finally {
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+  }
+  return finalPayload;
+}
+
+async function streamLlmAction(url, body) {
+  const slotId = await reserveLocalWorkSlot();
+  activeLocalWorkSlots.add(slotId);
+  const { signal, release } = registerRequestController();
+  const response = await fetch(resolveWorkApiUrl(`${url}-stream`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  }).catch((error) => {
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    releaseLocalWorkSlot(slotId);
+    throw normalizeRequestError(error);
+  });
+  if (!response.ok) {
+    const payload = await parseResponse(response);
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+    throw new Error("LLM action stream is unavailable.");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalPayload = {};
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      let lineBreak = buffer.indexOf("\n");
+      while (lineBreak >= 0) {
+        const line = buffer.slice(0, lineBreak).trim();
+        buffer = buffer.slice(lineBreak + 1);
+        if (line) {
+          finalPayload = applyLlmActionStreamEvent(JSON.parse(line), finalPayload);
+        }
+        lineBreak = buffer.indexOf("\n");
+      }
+    }
+    const trailing = buffer.trim();
+    if (trailing) {
+      finalPayload = applyLlmActionStreamEvent(JSON.parse(trailing), finalPayload);
+    }
+  } catch (error) {
+    throw normalizeRequestError(error);
+  } finally {
+    release();
+    activeLocalWorkSlots.delete(slotId);
+    await releaseLocalWorkSlot(slotId);
+  }
+  return finalPayload;
+}
+
+function applySpecbotStreamEvent(event, finalPayload) {
+  if (!event || typeof event !== "object") {
+    return finalPayload;
+  }
+  if (event.type === "status") {
+    if (event.status === "queued") {
+      state.ui.specbotQueryStatus = "queued";
+      setSpecbotQueryLoading(true);
+      const queuedPosition = Number(event.queuedPosition || 0);
+      setMessage(
+        queuedPosition > 0
+          ? `SpecBot query 대기 중: 대기열 ${queuedPosition}번째`
+          : "SpecBot query 대기 중입니다.",
+        false
+      );
+    } else if (event.status === "started") {
+      state.ui.specbotQueryStatus = "started";
+      setSpecbotQueryLoading(true);
+      setMessage("SpecBot query 실행 중입니다.", false);
+    }
+    return finalPayload;
+  }
+  if (event.type === "hit") {
+    const exclusions = buildSpecbotExclusions();
+    state.ui.specbotResults = mergeSpecbotHits(state.ui.specbotResults, [event.hit], exclusions);
+    persistSessionState();
+    renderSpecbotResults();
+    state.ui.specbotQueryStatus = "started";
+    setSpecbotQueryLoading(true);
+    setMessage(`SpecBot query 진행 중: ${event.hit?.specNo || ""} / ${event.hit?.clauseId || ""}`, false);
+    return {
+      ...finalPayload,
+      hits: mergeSpecbotHits(finalPayload.hits || [], [event.hit], exclusions),
+    };
+  }
+  if (event.type === "hits") {
+    const exclusions = buildSpecbotExclusions();
+    state.ui.specbotResults = mergeSpecbotHits(state.ui.specbotResults, event.hits || [], exclusions);
+    persistSessionState();
+    renderSpecbotResults();
+    state.ui.specbotQueryStatus = "started";
+    setSpecbotQueryLoading(true);
+    setMessage(`SpecBot query 진행 중: iteration ${event.iteration}`, false);
+    return {
+      ...finalPayload,
+      hits: mergeSpecbotHits(finalPayload.hits || [], event.hits || [], exclusions),
+    };
+  }
+  if (event.type === "done") {
+    return { ...finalPayload, ...event };
+  }
+  if (event.type === "error") {
+    throw new Error(formatErrorMessage(event.detail || `Request failed (${event.status || "error"})`));
+  }
+  return finalPayload;
+}
+
+function applyLlmActionStreamEvent(event, finalPayload) {
+  if (!event || typeof event !== "object") {
+    return finalPayload;
+  }
+  if (event.type === "status") {
+    state.ui.translationTask = {
+      ...(state.ui.translationTask || {}),
+      status: String(event.status || ""),
+      queuedPosition: Number(event.queuedPosition || 0),
+    };
+    renderTranslationStatus();
+    return finalPayload;
+  }
+  if (event.type === "done") {
+    state.ui.translationTask = {
+      ...(state.ui.translationTask || {}),
+      status: "done",
+      queuedPosition: 0,
+    };
+    renderTranslationStatus();
+    return event.result || finalPayload;
+  }
+  if (event.type === "error") {
+    throw new Error(formatErrorMessage(event.detail || `Request failed (${event.status || "error"})`));
+  }
+  return finalPayload;
+}
+
+function mergeSpecbotHits(existingHits, incomingHits, exclusions = buildSpecbotExclusions()) {
+  const merged = [...(existingHits || [])];
+  const seen = new Set(merged.map((item) => `${item.specNo}:${item.clauseId}`));
+  for (const hit of filterSpecbotHitsByExclusions(incomingHits || [], exclusions)) {
+    const key = `${hit.specNo}:${hit.clauseId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(hit);
+  }
+  return merged.sort(compareSpecbotHits);
+}
+
 function resolveWorkApiUrl(url) {
   const baseUrl = String(state.config?.queryApiUrl || "").trim();
   if (!baseUrl) {
@@ -2096,6 +2389,9 @@ function resolveWorkApiUrl(url) {
   }
   if (url === "/api/clause-browser/llm-actions") {
     return `${baseUrl}/llm-actions`;
+  }
+  if (url === "/api/clause-browser/llm-actions-stream") {
+    return `${baseUrl}/llm-actions-stream`;
   }
   return url;
 }

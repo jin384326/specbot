@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.clause_browser.services import (
@@ -108,24 +110,36 @@ class SharedTaskLimiter:
         self._workers.clear()
         self._started = False
 
-    async def run_async(self, fn, *args, should_cancel=None, **kwargs):
+    async def run_async(self, fn, *args, should_cancel=None, on_status_change=None, **kwargs):
         await self.start()
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
+        queued_position = 0
         job = _QueuedTask(
             fn=fn,
             args=args,
             kwargs=kwargs,
             future=future,
             should_cancel=should_cancel,
+            on_status_change=on_status_change,
         )
         async with self._lock:
             if self._accepted_tasks >= self._max_concurrent_tasks + self._max_queued_tasks:
                 raise LLMActionQueueFullError(
                     "The shared query/translation queue is full. Wait for current tasks to finish and try again."
                 )
+            queued_position = max(0, self._accepted_tasks - self._active_tasks)
             self._accepted_tasks += 1
             self._queue.put_nowait(job)
+        if on_status_change is not None:
+            on_status_change(
+                {
+                    "state": "queued",
+                    "queued_position": queued_position + 1,
+                    "active_tasks": self._active_tasks,
+                    "accepted_tasks": self._accepted_tasks,
+                }
+            )
 
         while True:
             if should_cancel and should_cancel():
@@ -143,7 +157,17 @@ class SharedTaskLimiter:
             job = await self._queue.get()
             async with self._lock:
                 self._active_tasks += 1
+                active_tasks = self._active_tasks
+                accepted_tasks = self._accepted_tasks
             try:
+                if job.on_status_change is not None:
+                    job.on_status_change(
+                        {
+                            "state": "started",
+                            "active_tasks": active_tasks,
+                            "accepted_tasks": accepted_tasks,
+                        }
+                    )
                 if job.cancelled or job.future.done() or (job.should_cancel and job.should_cancel()):
                     if not job.future.done():
                         job.future.set_exception(LLMActionCancelledError("Task cancelled by client."))
@@ -168,6 +192,7 @@ class _QueuedTask:
     kwargs: dict[str, Any]
     future: asyncio.Future
     should_cancel: Any = None
+    on_status_change: Any = None
     cancelled: bool = field(default=False)
 
 
@@ -193,6 +218,8 @@ class PersistentSpecbotQueryEngine:
         exclude_specs: list[str] | None = None,
         exclude_clauses: list[dict[str, Any]] | None = None,
         should_cancel=None,
+        on_iteration_complete=None,
+        on_relevant_result=None,
     ) -> dict[str, Any]:
         effective = self._merge_settings(overrides or {})
         registry = self._get_registry(str(effective["registry"]))
@@ -229,6 +256,8 @@ class PersistentSpecbotQueryEngine:
             iterations=int(effective["iterations"]),
             next_iteration_limit=int(effective["nextIterationLimit"]),
             should_cancel=should_cancel,
+            on_iteration_complete=on_iteration_complete,
+            on_relevant_result=on_relevant_result,
         )
         filtered_hits = self._apply_exclusions(
             self._extract_hits(result),
@@ -241,6 +270,48 @@ class PersistentSpecbotQueryEngine:
             "hits": filtered_hits,
             "rawResult": result,
         }
+
+    @staticmethod
+    def iteration_hits(
+        payload: dict[str, Any],
+        *,
+        exclude_specs: list[str] | None = None,
+        exclude_clauses: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        excluded_specs = {str(item).strip() for item in (exclude_specs or []) if str(item).strip()}
+        excluded_clause_pairs = {
+            (str(item.get("specNo") or item.get("spec_no") or "").strip(), str(item.get("clauseId") or item.get("clause_id") or "").strip())
+            for item in (exclude_clauses or [])
+            if str(item.get("specNo") or item.get("spec_no") or "").strip()
+            and str(item.get("clauseId") or item.get("clause_id") or "").strip()
+        }
+        for item in payload.get("results", []) or []:
+            judgement = item.get("judgement") or {}
+            if not judgement.get("is_relevant"):
+                continue
+            spec_no = str(item.get("spec_no") or "").strip()
+            clause_id = str(item.get("clause_id") or "").strip()
+            if not spec_no or not clause_id:
+                continue
+            if spec_no in excluded_specs or (spec_no, clause_id) in excluded_clause_pairs:
+                continue
+            pair = (spec_no, clause_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            text = str(item.get("text") or "").strip()
+            hits.append(
+                {
+                    "specNo": spec_no,
+                    "clauseId": clause_id,
+                    "parentClauseId": str(item.get("parent_clause_id") or "").strip(),
+                    "clausePath": [str(part) for part in item.get("clause_path") or []],
+                    "textPreview": text[:240],
+                }
+            )
+        return hits
 
     def _merge_settings(self, overrides: dict[str, Any]) -> dict[str, Any]:
         defaults = self._settings.defaults.to_dict()
@@ -392,6 +463,67 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
             cancel_event.set()
             watcher.cancel()
 
+    @app.post("/llm-actions-stream")
+    async def llm_actions_stream(request: Request, payload: LLMActionRequest) -> StreamingResponse:
+        cancel_event = threading.Event()
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def on_task_status_change(status_payload: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(
+                event_queue.put_nowait,
+                {
+                    "type": "status",
+                    "status": str(status_payload.get("state") or ""),
+                    "queuedPosition": int(status_payload.get("queued_position") or 0),
+                    "activeTasks": int(status_payload.get("active_tasks") or 0),
+                    "acceptedTasks": int(status_payload.get("accepted_tasks") or 0),
+                },
+            )
+
+        watcher = asyncio.create_task(watch_disconnect(request, cancel_event))
+
+        async def produce() -> None:
+            try:
+                result = await task_limiter.run_async(
+                    llm_service.run,
+                    action_type=payload.actionType,
+                    text=payload.text,
+                    source_language=payload.sourceLanguage,
+                    target_language=payload.targetLanguage,
+                    context=payload.context,
+                    on_status_change=on_task_status_change,
+                    should_cancel=cancel_event.is_set,
+                )
+                await event_queue.put({"type": "done", "result": result})
+            except LLMActionQueueFullError as exc:
+                await event_queue.put({"type": "error", "status": 429, "detail": str(exc)})
+            except LLMActionCancelledError as exc:
+                await event_queue.put({"type": "error", "status": 499, "detail": str(exc)})
+            except ValueError as exc:
+                await event_queue.put({"type": "error", "status": 400, "detail": str(exc)})
+            except Exception as exc:
+                await event_queue.put({"type": "error", "status": 502, "detail": str(exc)})
+            finally:
+                cancel_event.set()
+                await event_queue.put({"type": "close"})
+
+        producer = asyncio.create_task(produce())
+
+        async def stream():
+            try:
+                while True:
+                    event = await event_queue.get()
+                    if event.get("type") == "close":
+                        break
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            finally:
+                cancel_event.set()
+                watcher.cancel()
+                producer.cancel()
+
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
     @app.post("/query")
     async def query(request: Request, payload: SpecbotQueryRequest) -> dict[str, object]:
         cancel_event = threading.Event()
@@ -420,6 +552,108 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
             cancel_event.set()
             watcher.cancel()
 
+    @app.post("/query-stream")
+    async def query_stream(request: Request, payload: SpecbotQueryRequest) -> StreamingResponse:
+        cancel_event = threading.Event()
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        streamed_pairs: set[tuple[str, str]] = set()
+
+        def on_iteration_complete(iteration_payload: dict[str, Any]) -> None:
+            hits = engine.iteration_hits(
+                iteration_payload,
+                exclude_specs=payload.excludeSpecs,
+                exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
+            )
+            if not hits:
+                return
+            loop.call_soon_threadsafe(
+                event_queue.put_nowait,
+                {
+                    "type": "hits",
+                    "iteration": int(iteration_payload.get("iteration") or 0),
+                    "hits": hits,
+                },
+            )
+
+        def on_relevant_result(result_payload: dict[str, Any]) -> None:
+            hit = PersistentSpecbotQueryEngine.iteration_hits(
+                {"results": [result_payload]},
+                exclude_specs=payload.excludeSpecs,
+                exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
+            )
+            if not hit:
+                return
+            item = hit[0]
+            pair = (str(item.get("specNo") or "").strip(), str(item.get("clauseId") or "").strip())
+            if not pair[0] or not pair[1] or pair in streamed_pairs:
+                return
+            streamed_pairs.add(pair)
+            loop.call_soon_threadsafe(event_queue.put_nowait, {"type": "hit", "hit": item})
+
+        def on_task_status_change(status_payload: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(
+                event_queue.put_nowait,
+                {
+                    "type": "status",
+                    "status": str(status_payload.get("state") or ""),
+                    "queuedPosition": int(status_payload.get("queued_position") or 0),
+                    "activeTasks": int(status_payload.get("active_tasks") or 0),
+                    "acceptedTasks": int(status_payload.get("accepted_tasks") or 0),
+                },
+            )
+
+        watcher = asyncio.create_task(watch_disconnect(request, cancel_event))
+
+        async def produce() -> None:
+            try:
+                result = await task_limiter.run_async(
+                    engine.run,
+                    payload.query.strip(),
+                    payload.settings.model_dump(mode="json") if payload.settings else None,
+                    payload.excludeSpecs,
+                    [item.model_dump(mode="json") for item in payload.excludeClauses],
+                    cancel_event.is_set,
+                    on_status_change=on_task_status_change,
+                    on_iteration_complete=on_iteration_complete,
+                    on_relevant_result=on_relevant_result,
+                    should_cancel=cancel_event.is_set,
+                )
+                await event_queue.put(
+                    {
+                        "type": "done",
+                        "query": result.get("query", payload.query.strip()),
+                        "hits": result.get("hits", []),
+                    }
+                )
+            except LLMActionQueueFullError as exc:
+                await event_queue.put({"type": "error", "status": 429, "detail": str(exc)})
+            except (LLMActionCancelledError, RetrievalCancelledError) as exc:
+                await event_queue.put({"type": "error", "status": 499, "detail": str(exc)})
+            except ValueError as exc:
+                await event_queue.put({"type": "error", "status": 400, "detail": str(exc)})
+            except Exception as exc:
+                await event_queue.put({"type": "error", "status": 502, "detail": str(exc)})
+            finally:
+                cancel_event.set()
+                await event_queue.put({"type": "close"})
+
+        producer = asyncio.create_task(produce())
+
+        async def stream():
+            try:
+                while True:
+                    event = await event_queue.get()
+                    if event.get("type") == "close":
+                        break
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            finally:
+                cancel_event.set()
+                watcher.cancel()
+                producer.cancel()
+
+        return StreamingResponse(stream(), media_type="application/x-ndjson")
+
     return app
 
 
@@ -431,7 +665,7 @@ def load_settings() -> SpecbotQueryServerSettings:
         base_url=os.environ.get("SPECBOT_QUERY_BASE_URL", "http://localhost:8080").strip() or "http://localhost:8080",
         config_base_url=os.environ.get("SPECBOT_QUERY_CONFIG_BASE_URL", "http://localhost:19071").strip() or "http://localhost:19071",
         limit=int(os.environ.get("SPECBOT_QUERY_LIMIT", "4")),
-        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "1")),
+        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "2")),
         next_iteration_limit=int(os.environ.get("SPECBOT_QUERY_NEXT_ITERATION_LIMIT", "2")),
         summary=os.environ.get("SPECBOT_QUERY_SUMMARY", "short").strip() or "short",
         registry=os.environ.get("SPECBOT_QUERY_REGISTRY", "./artifacts/spec_query_registry.json").strip() or "./artifacts/spec_query_registry.json",

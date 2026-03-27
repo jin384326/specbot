@@ -333,7 +333,7 @@ class SpecbotQueryDefaults:
     base_url: str = "http://localhost:8080"
     config_base_url: str = "http://localhost:19071"
     limit: int = 4
-    iterations: int = 1
+    iterations: int = 2
     next_iteration_limit: int = 2
     followup_mode: str = "sentence-summary"
     summary: str = "short"
