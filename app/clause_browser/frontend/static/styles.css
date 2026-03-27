@@ -94,6 +94,14 @@ h2 {
   min-height: calc(100vh - 120px);
 }
 
+body[data-board-mode="view"] .layout {
+  grid-template-columns: minmax(250px, 320px) minmax(420px, 1fr);
+}
+
+body[data-board-mode="view"] .right-panel {
+  display: none;
+}
+
 .board-screen,
 .editor-screen {
   display: flex;
@@ -208,6 +216,16 @@ h2 {
   top: 16px;
   align-self: start;
   max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.right-panel .panel-section:first-child {
+  flex: 0 0 auto;
+}
+
+.right-panel .panel-section:last-child {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -361,6 +379,10 @@ button:disabled {
   gap: 10px;
   min-height: 0;
   overflow: auto;
+}
+
+.right-panel .result-list {
+  flex: 1 1 auto;
 }
 
 .tree-spec-group {

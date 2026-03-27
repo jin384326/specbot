@@ -15,7 +15,12 @@ const boardState = {
   heartbeatId: 0,
   mode: "list",
   deleteTarget: null,
+  isDraft: false,
+  isRestoringRoute: false,
 };
+
+const BOARD_ROUTE_PARAM = "board";
+const BOARD_POST_PARAM = "post";
 
 function editorId() {
   const existing = window.sessionStorage.getItem(EDITOR_ID_KEY);
@@ -74,6 +79,8 @@ function showBoardError(error) {
 
 function showBoardScreen() {
   boardState.mode = "list";
+  boardState.isDraft = false;
+  document.body.dataset.boardMode = "list";
   boardElements().boardScreen.classList.remove("hidden");
   boardElements().editorScreen.classList.add("hidden");
 }
@@ -240,59 +247,63 @@ function releaseCurrentLockOnUnload() {
 }
 
 async function createPost() {
-  const data = await request("/api/clause-browser/board/posts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title: "새 게시글",
-      editorId: editorId(),
-      editorLabel: editorLabel(),
-    }),
-  });
-  await openPostInEditor(data);
+  await openDraftPost();
 }
 
-async function openExistingPost(postId) {
+async function openExistingPost(postId, options = {}) {
   await request(`/api/clause-browser/board/posts/${postId}/lock/acquire`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ editorId: editorId(), editorLabel: editorLabel() }),
   });
   const data = await request(`/api/clause-browser/board/posts/${postId}`);
-  await openPostInEditor(data);
+  await openPostInEditor(data, options);
 }
 
-async function openExistingPostReadOnly(postId) {
+async function openExistingPostReadOnly(postId, options = {}) {
   const data = await request(`/api/clause-browser/board/posts/${postId}`);
-  await openPostInViewer(data);
+  await openPostInViewer(data, options);
 }
 
-async function openPostInEditor(post) {
+async function openDraftPost(options = {}) {
+  boardState.currentPostId = "";
+  boardState.currentLock = null;
+  boardState.isDraft = true;
+  boardElements().boardPostTitle.value = "새 게시글";
+  showEditorScreen();
+  applyEditorMode("edit");
+  stopHeartbeat();
+  await resetWorkspace();
+  navigateBoard("draft", { replace: options.replace === true });
+}
+
+async function openPostInEditor(post, options = {}) {
   boardState.currentPostId = post.postId;
   boardState.currentLock = post.lock || null;
+  boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
   showEditorScreen();
   applyEditorMode("edit");
   await resetWorkspace();
   await applyWorkspaceSnapshot(post.workspaceState || {});
   startHeartbeat();
+  navigateBoard("edit", { postId: post.postId, replace: options.replace === true });
 }
 
-async function openPostInViewer(post) {
+async function openPostInViewer(post, options = {}) {
   boardState.currentPostId = post.postId;
   boardState.currentLock = null;
+  boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
   showEditorScreen();
   applyEditorMode("view");
   stopHeartbeat();
   await resetWorkspace();
   await applyWorkspaceSnapshot(post.workspaceState || {});
+  navigateBoard("view", { postId: post.postId, replace: options.replace === true });
 }
 
 async function saveCurrentPost() {
-  if (!boardState.currentPostId) {
-    return;
-  }
   const payload = {
     editorId: editorId(),
     editorLabel: editorLabel(),
@@ -300,12 +311,23 @@ async function saveCurrentPost() {
     body: "",
     workspaceState: getWorkspaceSnapshot(),
   };
-  const data = await request(`/api/clause-browser/board/posts/${boardState.currentPostId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  boardState.currentLock = data.lock || null;
+  if (!boardState.currentPostId) {
+    const data = await request(`/api/clause-browser/board/posts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    boardState.currentPostId = data.postId || "";
+    boardState.currentLock = data.lock || null;
+    boardState.isDraft = false;
+  } else {
+    const data = await request(`/api/clause-browser/board/posts/${boardState.currentPostId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    boardState.currentLock = data.lock || null;
+  }
   setBoardMessage("게시글을 저장했습니다.", false);
   await closeEditor();
 }
@@ -344,7 +366,7 @@ async function deletePost(postId) {
 
 async function closeEditor() {
   stopHeartbeat();
-  if (boardState.currentPostId) {
+  if (boardState.currentPostId && boardState.currentLock) {
     try {
       await request(`/api/clause-browser/board/posts/${boardState.currentPostId}/lock/release`, {
         method: "POST",
@@ -357,8 +379,65 @@ async function closeEditor() {
   }
   boardState.currentPostId = "";
   boardState.currentLock = null;
+  boardState.isDraft = false;
   showBoardScreen();
+  navigateBoard("list");
   await refreshBoardPosts();
+}
+
+function buildBoardUrl(mode, postId = "") {
+  const url = new URL(window.location.href);
+  if (mode === "list") {
+    url.searchParams.delete(BOARD_ROUTE_PARAM);
+    url.searchParams.delete(BOARD_POST_PARAM);
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+  url.searchParams.set(BOARD_ROUTE_PARAM, mode);
+  if (postId) {
+    url.searchParams.set(BOARD_POST_PARAM, postId);
+  } else {
+    url.searchParams.delete(BOARD_POST_PARAM);
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function navigateBoard(mode, { postId = "", replace = false } = {}) {
+  if (boardState.isRestoringRoute) {
+    return;
+  }
+  const url = buildBoardUrl(mode, postId);
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method]({ boardMode: mode, postId }, "", url);
+}
+
+async function restoreBoardRoute() {
+  const url = new URL(window.location.href);
+  const mode = url.searchParams.get(BOARD_ROUTE_PARAM) || "list";
+  const postId = url.searchParams.get(BOARD_POST_PARAM) || "";
+  boardState.isRestoringRoute = true;
+  try {
+    const shouldReleaseCurrentLock =
+      Boolean(boardState.currentPostId && boardState.currentLock) &&
+      (mode !== "edit" || postId !== boardState.currentPostId);
+    if (shouldReleaseCurrentLock) {
+      await closeEditor();
+    }
+    if (mode === "draft") {
+      await openDraftPost({ replace: true });
+      return;
+    }
+    if (mode === "edit" && postId) {
+      await openExistingPost(postId, { replace: true });
+      return;
+    }
+    if (mode === "view" && postId) {
+      await openExistingPostReadOnly(postId, { replace: true });
+      return;
+    }
+    await closeEditor();
+  } finally {
+    boardState.isRestoringRoute = false;
+  }
 }
 
 function escapeHtml(value) {
@@ -382,6 +461,13 @@ export function bindBoardFeature() {
   const els = boardElements();
   window.addEventListener("pagehide", releaseCurrentLockOnUnload);
   window.addEventListener("beforeunload", releaseCurrentLockOnUnload);
+  window.addEventListener("popstate", async () => {
+    try {
+      await restoreBoardRoute();
+    } catch (error) {
+      showBoardError(error);
+    }
+  });
   document.querySelectorAll("[data-action='close-board-delete-modal']").forEach((element) => {
     element.addEventListener("click", () => closeDeleteModal());
   });
@@ -434,4 +520,5 @@ export function bindBoardFeature() {
 export async function initializeBoard() {
   showBoardScreen();
   await refreshBoardPosts();
+  await restoreBoardRoute();
 }
