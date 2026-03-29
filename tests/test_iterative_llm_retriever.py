@@ -444,10 +444,15 @@ def test_iterative_retriever_skips_duplicate_docs_and_reused_keywords() -> None:
     assert result["relevant_documents"] == [
         {
             "doc_id": "registration-shared-doc",
+            "doc_type": "clause_doc",
             "spec_no": "23501",
             "clause_id": "1",
             "parent_clause_id": "0",
             "clause_path": ["0", "1"],
+            "table_title": "",
+            "row_index": -1,
+            "row_header": "",
+            "row_cells": [],
             "texts": ["registration procedure in stage2"],
         }
     ]
@@ -469,10 +474,15 @@ def test_iterative_retriever_skips_same_text_with_different_doc_ids() -> None:
     assert result["relevant_documents"] == [
         {
             "doc_id": "registration-doc-a",
+            "doc_type": "clause_doc",
             "spec_no": "23501",
             "clause_id": "1",
             "parent_clause_id": "0",
             "clause_path": ["0", "1"],
+            "table_title": "",
+            "row_index": -1,
+            "row_header": "",
+            "row_cells": [],
             "texts": ["Same body content across different doc ids"],
         }
     ]
@@ -648,10 +658,15 @@ def test_extract_relevant_documents_merges_texts_for_same_spec_and_clause() -> N
     assert extracted == [
         {
             "doc_id": "doc-a",
+            "doc_type": "",
             "spec_no": "23501",
             "clause_id": "5.1",
             "parent_clause_id": "5",
             "clause_path": ["5", "5.1"],
+            "table_title": "",
+            "row_index": -1,
+            "row_header": "",
+            "row_cells": [],
             "texts": ["First text", "Second text"],
         }
     ]

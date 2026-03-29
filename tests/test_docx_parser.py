@@ -425,6 +425,51 @@ def test_spec_title_and_release_data_are_inferred_from_docx_and_path(tmp_path: P
     assert first_clause.stage_hint == "Stage 2"
 
 
+def test_spec_title_prefers_document_subject_over_disclaimer_text(tmp_path: Path) -> None:
+    source = tmp_path / "2024-09" / "Rel-18" / "29512-demo.docx"
+    source.parent.mkdir(parents=True)
+    doc = Document()
+    doc.core_properties.title = "3GPP TS 29.512"
+    doc.core_properties.subject = "5G System; Session Management Policy Control Service; Stage 3"
+    doc.add_paragraph("Foreword", style="Heading 1")
+    doc.add_paragraph("This Technical Specification has been produced by the 3rd Generation Partnership Project (3GPP).")
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    doc.add_paragraph("Body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="29512"))
+
+    first_clause = next(record for record in records if record.doc_type == "clause_doc")
+    assert first_clause.spec_title == "5G System; Session Management Policy Control Service; Stage 3"
+
+
+def test_spec_title_ignores_placeholder_subject_and_uses_cover_table_title(tmp_path: Path) -> None:
+    source = tmp_path / "2024-09" / "Rel-18" / "26522-demo.docx"
+    source.parent.mkdir(parents=True)
+    doc = Document()
+    doc.core_properties.title = "3GPP TS ab.cde"
+    doc.core_properties.subject = "<Title 1; Title 2> (Release 14 | 13 |12)"
+    cover = doc.add_table(rows=4, cols=1)
+    cover.cell(0, 0).text = "3GPP TS 26.522 V18.1.0 (2024-06)"
+    cover.cell(1, 0).text = "Technical Specification"
+    cover.cell(2, 0).text = (
+        "3rd Generation Partnership Project; "
+        "Technical Specification Group Services and System Aspects; "
+        "5G Real-time Media Transport Protocol Configurations (Release 18)"
+    )
+    cover.cell(3, 0).text = "The present document has been developed within the 3rd Generation Partnership Project (3GPP TM)."
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    doc.add_paragraph("Body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="26522"))
+
+    first_clause = next(record for record in records if record.doc_type == "clause_doc")
+    assert first_clause.spec_title == "5G Real-time Media Transport Protocol Configurations (Release 18)"
+
+
 def test_unknown_stage_is_marked_as_else(tmp_path: Path) -> None:
     source = tmp_path / "unknown-stage.docx"
     doc = Document()

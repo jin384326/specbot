@@ -729,12 +729,17 @@ class IterativeLLMRetriever:
             results.append(
                 {
                     "doc_id": doc.doc_id,
+                    "doc_type": doc.doc_type,
                     "spec_no": doc.spec_no,
                     "stage_hint": doc.stage_hint or item["stage_bucket"],
                     "clause_id": doc.clause_id,
                     "parent_clause_id": doc.parent_clause_id,
                     "clause_path": list(doc.clause_path),
                     "clause_title": doc.clause_title,
+                    "table_title": doc.table_title,
+                    "row_index": doc.row_index,
+                    "row_header": doc.row_header,
+                    "row_cells": list(doc.row_cells),
                     "search_term": item["iteration_search_term"],
                     "stage_bucket": item["stage_bucket"],
                     "score": item["score"],
@@ -876,10 +881,15 @@ class IterativeLLMRetriever:
                 texts = [text] if text else []
                 extracted_by_key[dedupe_key] = {
                     "doc_id": str(item.get("doc_id", "")),
+                    "doc_type": str(item.get("doc_type", "")),
                     "spec_no": spec_no,
                     "clause_id": clause_id,
                     "parent_clause_id": str(item.get("parent_clause_id", "")),
                     "clause_path": list(item.get("clause_path", [])),
+                    "table_title": str(item.get("table_title", "")),
+                    "row_index": int(item.get("row_index", -1) or -1),
+                    "row_header": str(item.get("row_header", "")),
+                    "row_cells": [str(value) for value in item.get("row_cells", [])],
                     "texts": texts,
                 }
                 continue

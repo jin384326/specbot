@@ -109,8 +109,23 @@ class DocxExportService:
         document.add_heading(cleaned_title, level=0)
         note_index = self._index_notes(notes)
         clause_count = 0
+        grouped_roots: dict[str, list[dict[str, Any]]] = {}
+        spec_titles: dict[str, str] = {}
+        ordered_specs: list[str] = []
         for root in roots:
-            clause_count += self._write_clause(document, root, depth=0, note_index=note_index)
+            spec_no = str(root.get("specNo") or "").strip() or "Unknown Spec"
+            if spec_no not in grouped_roots:
+                grouped_roots[spec_no] = []
+                ordered_specs.append(spec_no)
+                spec_titles[spec_no] = str(root.get("specTitle") or "").strip()
+            grouped_roots[spec_no].append(root)
+
+        for spec_no in ordered_specs:
+            spec_title = spec_titles.get(spec_no, "")
+            spec_heading = spec_no if not spec_title else f"{spec_no} {spec_title}"
+            document.add_heading(spec_heading, level=1)
+            for root in grouped_roots.get(spec_no, []):
+                clause_count += self._write_clause(document, root, depth=1, note_index=note_index)
         return cleaned_title, document, clause_count
 
     def _allocate_file_name(self, title: str) -> str:
@@ -189,13 +204,14 @@ class DocxExportService:
             table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
             table.style = "Table Grid"
             anchor_paragraphs: list[Paragraph] = []
+            row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
             for row_idx, row in enumerate(rows):
                 for col_idx, value in enumerate(row):
                     paragraph = table.cell(row_idx, col_idx).paragraphs[0]
                     paragraph.text = str(value or "")
                     anchor_paragraphs.append(paragraph)
-            for note in selection_notes:
-                self._attach_comment_to_paragraphs(anchor_paragraphs, note)
+                    row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
+            self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
             return
 
         row_count = len(cells)
@@ -204,6 +220,7 @@ class DocxExportService:
         table.style = "Table Grid"
         occupied: set[tuple[int, int]] = set()
         anchor_paragraphs: list[Paragraph] = []
+        row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
         for row_idx, row in enumerate(cells):
             col_idx = 0
             for cell_data in row:
@@ -215,6 +232,7 @@ class DocxExportService:
                 paragraph = base_cell.paragraphs[0]
                 paragraph.text = str(cell_data.get("text") or "")
                 anchor_paragraphs.append(paragraph)
+                row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
                 if colspan > 1:
                     base_cell = base_cell.merge(table.cell(row_idx, col_idx + colspan - 1))
                 if rowspan > 1:
@@ -223,8 +241,20 @@ class DocxExportService:
                     for col_offset in range(colspan):
                         occupied.add((row_idx + row_offset, col_idx + col_offset))
                 col_idx += colspan
+        self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+
+    def _attach_table_selection_notes(
+        self,
+        anchor_paragraphs: list[Paragraph],
+        row_anchor_paragraphs: dict[int, list[Paragraph]],
+        selection_notes: list[dict[str, Any]],
+    ) -> None:
         for note in selection_notes:
-            self._attach_comment_to_paragraphs(anchor_paragraphs, note)
+            row_index = int(note.get("rowIndex", -1) or -1)
+            if row_index >= 0 and row_index in row_anchor_paragraphs:
+                self._attach_comment_to_paragraphs(row_anchor_paragraphs[row_index], note)
+            else:
+                self._attach_comment_to_paragraphs(anchor_paragraphs, note)
 
     def _write_image(self, document: Document, block: dict[str, Any]) -> None:
         image_path = self._resolve_image_path(str(block.get("src") or ""))

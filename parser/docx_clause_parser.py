@@ -26,6 +26,20 @@ STAGE_PATTERN = re.compile(r"\b(Stage\s+\d+)\b", re.IGNORECASE)
 CLAUSE_HEADING_STYLE_PATTERN = re.compile(r"^(?:heading|head)\s*(\d+)?(?:\s+char)?$", re.IGNORECASE)
 SHORT_HEADING_STYLE_PATTERN = re.compile(r"^h(\d+)$", re.IGNORECASE)
 TOC_PAGE_SUFFIX_PATTERN = re.compile(r"^(?P<body>.*\S)\s+\d+$")
+TITLE_DISCLAIMER_PATTERNS = (
+    "this technical specification has been produced by the 3rd generation partnership project",
+    "the present document has been developed within the 3rd generation partnership project",
+    "the contents of the present document are subject to continuing work within the tsg",
+)
+TITLE_PLACEHOLDER_PATTERNS = (
+    "<title",
+    "title 1",
+    "title 2",
+)
+TITLE_PREFIX_PATTERNS = (
+    "3rd Generation Partnership Project;",
+    "Technical Specification Group Services and System Aspects;",
+)
 
 
 @dataclass
@@ -500,13 +514,37 @@ def collect_toc_headings(document: DocxDocument) -> list[TocHeading]:
 
 def infer_spec_title(document: DocxDocument) -> str:
     core_title = normalize_whitespace(document.core_properties.title or "")
+    core_subject = normalize_whitespace(document.core_properties.subject or "")
+    lowered_subject = core_subject.lower()
+    if (
+        core_subject
+        and not any(pattern in lowered_subject for pattern in TITLE_DISCLAIMER_PATTERNS)
+        and not any(pattern in lowered_subject for pattern in TITLE_PLACEHOLDER_PATTERNS)
+    ):
+        return core_subject
     if document.tables:
         for row in document.tables[0].rows:
             cells = [normalize_whitespace(cell.text) for cell in row.cells]
             row_text = next((cell for cell in cells if cell), "")
-            if not row_text or "3rd Generation Partnership Project" not in row_text:
+            lowered_row = row_text.lower()
+            if (
+                not row_text
+                or "3rd generation partnership project" not in lowered_row
+                or any(pattern in lowered_row for pattern in TITLE_DISCLAIMER_PATTERNS)
+            ):
                 continue
+            cleaned_row = row_text
+            for prefix in TITLE_PREFIX_PATTERNS:
+                if cleaned_row.startswith(prefix):
+                    cleaned_row = cleaned_row.removeprefix(prefix).strip()
             parts = [part.strip() for part in row_text.split(";") if part.strip()]
+            cleaned_parts = [part.strip() for part in cleaned_row.split(";") if part.strip()]
+            if len(cleaned_parts) >= 2:
+                if "stage" in cleaned_parts[-1].lower() or "release" in cleaned_parts[-1].lower():
+                    return "; ".join(cleaned_parts[-2:])
+                return "; ".join(cleaned_parts)
+            if cleaned_row:
+                return cleaned_row
             if len(parts) >= 2:
                 if "stage" in parts[-1].lower() or "release" in parts[-1].lower():
                     return "; ".join(parts[-2:])
@@ -523,6 +561,7 @@ def infer_spec_title(document: DocxDocument) -> str:
             and not style_name.lower().startswith("toc")
             and lowered not in {"contents", "table of contents", "foreword"}
             and style_name != "TT"
+            and not any(pattern in lowered for pattern in TITLE_DISCLAIMER_PATTERNS)
         ):
             return text
     return ""

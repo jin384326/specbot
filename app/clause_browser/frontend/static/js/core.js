@@ -23,6 +23,7 @@ const state = {
     specbotResults: [],
     specbotQueryStatus: "",
     notes: [],
+    highlights: [],
     busy: null,
     translationJob: null,
     translationTask: null,
@@ -32,6 +33,9 @@ const state = {
       clauseKey: "",
       clauseLabel: "",
       blockIndex: -1,
+      rowIndex: -1,
+      rowText: "",
+      hasSelection: false,
     },
     nodeMenu: {
       key: "",
@@ -807,47 +811,70 @@ function renderBlocks(node) {
 function renderTableBlock(node, block, index) {
   const cellRows = block.cells || [];
   const rows = block.rows || [];
-  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
-  const selectionNotesHtml = renderSelectionNotes(node.key, index);
-  const hasExpandedSelectionNotes = getSelectionNotesForBlock(node.key, index).some((note) => !note.collapsed);
+  const highlightedRowIndexes = getHighlightedRowIndexes(node.key, index, block);
+  const totalColumnCount = cellRows.length
+    ? Math.max(...cellRows.map((row) => row.reduce((total, cell) => total + Number(cell.colspan || 1), 0)))
+    : Math.max(...rows.map((row) => row.length));
   const tableBody =
     cellRows.length
       ? cellRows
-          .map(
-            (row) => `
-              <tr>
+          .map((row, rowIndex) => {
+            const rowText = normalizeRowText(row.map((cell) => normalizeTableDisplayText(cell.text || "")));
+            const highlighted = highlightedRowIndexes.has(rowIndex);
+            const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex).some((note) => !note.collapsed);
+            return `
+              <tr class="${highlighted || hasExpandedSelectionNotes ? "is-highlighted" : ""}">
                 ${row
-                  .map((cell) => {
+                  .map((cell, cellIndex) => {
                     const tag = cell.header ? "th" : "td";
                     const rowspan = Number(cell.rowspan || 1) > 1 ? ` rowspan="${Number(cell.rowspan || 1)}"` : "";
                     const colspan = Number(cell.colspan || 1) > 1 ? ` colspan="${Number(cell.colspan || 1)}"` : "";
-                    return `<${tag} class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}"${rowspan}${colspan}>${escapeHtml(
-                      cell.text || ""
-                    )}</${tag}>`;
+                    const isLastCell = cellIndex === row.length - 1;
+                    const rowToggleHtml = isLastCell ? renderSelectionNoteToggle(node.key, index, rowIndex, true) : "";
+                    const cellClass = highlighted || hasExpandedSelectionNotes ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
+                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-row-text="${escapeHtml(rowText)}"${rowspan}${colspan}>
+                      <div class="table-cell-inner">
+                        <span>${escapeHtml(normalizeTableDisplayText(cell.text || ""))}</span>
+                        ${rowToggleHtml}
+                      </div>
+                    </${tag}>`;
                   })
                   .join("")}
               </tr>
-            `
-          )
+              ${renderTableRowNoteRow(node.key, index, rowIndex, totalColumnCount)}
+            `;
+          })
           .join("")
       : rows
-          .map(
-            (row, rowIndex) => `
-              <tr>
+          .map((row, rowIndex) => {
+            const normalizedRow = row.map((cell) => normalizeTableDisplayText(cell));
+            const rowText = normalizeRowText(normalizedRow);
+            const highlighted = highlightedRowIndexes.has(rowIndex);
+            const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex).some((note) => !note.collapsed);
+            return `
+              <tr class="${highlighted || hasExpandedSelectionNotes ? "is-highlighted" : ""}">
                 ${row
-                  .map((cell) =>
-                    rowIndex === 0
-                      ? `<th class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(cell || "")}</th>`
-                      : `<td class="tree-text" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(cell || "")}</td>`
-                  )
+                  .map((cell, cellIndex) => {
+                    const tag = rowIndex === 0 ? "th" : "td";
+                    const isLastCell = cellIndex === row.length - 1;
+                    const rowToggleHtml = isLastCell ? renderSelectionNoteToggle(node.key, index, rowIndex, true) : "";
+                    const cellClass = highlighted || hasExpandedSelectionNotes ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
+                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-row-text="${escapeHtml(rowText)}">
+                      <div class="table-cell-inner">
+                        <span>${escapeHtml(normalizeTableDisplayText(cell || ""))}</span>
+                        ${rowToggleHtml}
+                      </div>
+                    </${tag}>`;
+                  })
                   .join("")}
               </tr>
-            `
-          )
+              ${renderTableRowNoteRow(node.key, index, rowIndex, totalColumnCount)}
+            `;
+          })
           .join("");
 
   return `
-    <div class="table-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""}">
+    <div class="table-block ${hasBlockHighlight(node.key, index) ? "is-highlighted" : ""}">
       <div class="docx-table-wrap" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
         <table class="docx-table">
           <tbody>
@@ -855,24 +882,34 @@ function renderTableBlock(node, block, index) {
           </tbody>
         </table>
       </div>
-      <div class="table-note-row">
-        ${selectionToggleHtml}
-      </div>
-      ${selectionNotesHtml}
     </div>
+  `;
+}
+
+function renderTableRowNoteRow(clauseKey, blockIndex, rowIndex, colspan) {
+  const notesHtml = renderSelectionNotes(clauseKey, blockIndex, rowIndex);
+  if (!notesHtml) {
+    return "";
+  }
+  return `
+    <tr class="table-note-detail-row">
+      <td colspan="${colspan}">
+        ${notesHtml}
+      </td>
+    </tr>
   `;
 }
 
 function renderParagraphBlock(node, block, index) {
   const paragraphClass = getParagraphClass(block.text || "", block);
   const paragraphStyle = getParagraphInlineStyle(block);
-  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index);
-  const selectionNotesHtml = renderSelectionNotes(node.key, index);
-  const hasExpandedSelectionNotes = getSelectionNotesForBlock(node.key, index).some((note) => !note.collapsed);
+  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index, -1);
+  const selectionNotesHtml = renderSelectionNotes(node.key, index, -1);
+  const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, -1).some((note) => !note.collapsed);
   return `
-    <div class="paragraph-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""}">
+    <div class="paragraph-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""} ${hasBlockHighlight(node.key, index) ? "is-highlighted" : ""}">
       <div class="paragraph-note-row">
-        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">${escapeHtml(block.text || "")}</p>
+        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="-1" data-row-text="${escapeHtml(String(block.text || "").trim())}">${escapeHtml(block.text || "")}</p>
         ${selectionToggleHtml}
       </div>
       ${selectionNotesHtml}
@@ -978,28 +1015,30 @@ function renderClauseNoteToggle(clauseKey) {
   `;
 }
 
-function renderSelectionNoteToggle(clauseKey, blockIndex) {
-  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, compact = false) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
   if (!notes.length) {
     return "";
   }
   const expanded = notes.some((note) => !note.collapsed);
+  const label = compact ? "📝" : `📝 ${notes.length}`;
   return `
     <button
-      class="selection-note-toggle ${expanded ? "expanded" : ""}"
+      class="selection-note-toggle ${compact ? "compact" : ""} ${expanded ? "expanded" : ""}"
       title="선택 메모 ${notes.length}개"
       aria-label="선택 메모 ${notes.length}개"
       data-action="toggle-selection-notes"
       data-clause-key="${escapeHtml(clauseKey)}"
       data-block-index="${blockIndex}"
+      data-row-index="${rowIndex}"
     >
-      📝 ${notes.length}
+      ${label}
     </button>
   `;
 }
 
-function renderSelectionNotes(clauseKey, blockIndex) {
-  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
   if (!notes.length) {
     return "";
   }
@@ -1041,6 +1080,113 @@ function renderSelectionNotes(clauseKey, blockIndex) {
   `;
 }
 
+function normalizeRowText(parts) {
+  return String((parts || []).map((item) => String(item || "").trim()).filter(Boolean).join(" | "))
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeTableDisplayText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeHighlightText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function buildRowVariants(parts) {
+  const normalizedParts = (parts || []).map((item) => normalizeTableDisplayText(item)).filter(Boolean);
+  const variants = new Set();
+  if (!normalizedParts.length) {
+    return variants;
+  }
+  variants.add(normalizeHighlightText(normalizedParts.join(" | ")));
+  variants.add(normalizeHighlightText(normalizedParts.join("; ")));
+  if (normalizedParts.length > 1) {
+    variants.add(normalizeHighlightText(normalizedParts.slice(1).join(" | ")));
+    variants.add(normalizeHighlightText(normalizedParts.slice(1).join("; ")));
+  }
+  return variants;
+}
+
+function buildHighlightRowVariants(value) {
+  const normalized = normalizeHighlightText(value);
+  const variants = new Set();
+  if (!normalized) {
+    return variants;
+  }
+  variants.add(normalized);
+  const pipeParts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
+  if (pipeParts.length) {
+    variants.add(normalizeHighlightText(pipeParts.join(" | ")));
+    variants.add(normalizeHighlightText(pipeParts.join("; ")));
+    if (pipeParts.length > 1) {
+      variants.add(normalizeHighlightText(pipeParts.slice(1).join(" | ")));
+      variants.add(normalizeHighlightText(pipeParts.slice(1).join("; ")));
+    }
+  }
+  const semicolonParts = normalized.split(";").map((item) => item.trim()).filter(Boolean);
+  if (semicolonParts.length) {
+    variants.add(normalizeHighlightText(semicolonParts.join(" | ")));
+    variants.add(normalizeHighlightText(semicolonParts.join("; ")));
+    if (semicolonParts.length > 1) {
+      variants.add(normalizeHighlightText(semicolonParts.slice(1).join(" | ")));
+      variants.add(normalizeHighlightText(semicolonParts.slice(1).join("; ")));
+    }
+  }
+  return variants;
+}
+
+function getHighlightsForBlock(clauseKey, blockIndex) {
+  return (state.ui.highlights || []).filter(
+    (item) =>
+      item.clauseKey === clauseKey &&
+      Number(item.blockIndex) === Number(blockIndex)
+  );
+}
+
+function hasBlockHighlight(clauseKey, blockIndex) {
+  return getHighlightsForBlock(clauseKey, blockIndex).some((item) => Number(item.rowIndex ?? -1) < 0);
+}
+
+function getHighlightedRowIndexes(clauseKey, blockIndex, block) {
+  const localEntries = getHighlightsForBlock(clauseKey, blockIndex);
+  const globalRowEntries = (state.ui.highlights || []).filter(
+    (item) =>
+      item.clauseKey === clauseKey &&
+      Number(item.blockIndex) < 0 &&
+      Number(item.rowIndex ?? -1) >= 0
+  );
+  const entries = [...localEntries, ...globalRowEntries];
+  const indexes = new Set(entries.map((item) => Number(item.rowIndex ?? -1)).filter((value) => value >= 0));
+  const rowTexts = new Set();
+  entries.forEach((item) => {
+    buildHighlightRowVariants(item.rowText).forEach((variant) => rowTexts.add(variant));
+  });
+  if (!rowTexts.size) {
+    return indexes;
+  }
+  const rows = Array.isArray(block.cells) && block.cells.length
+    ? block.cells.map((row) => row.map((cell) => normalizeTableDisplayText(cell.text || "")))
+    : (block.rows || []).map((row) => row.map((cell) => normalizeTableDisplayText(cell)));
+  rows.forEach((row, rowIndex) => {
+    const variants = buildRowVariants(row);
+    if ([...variants].some((variant) => rowTexts.has(variant))) {
+      indexes.add(rowIndex);
+    }
+  });
+  localEntries.forEach((item) => {
+    const rowIndex = Number(item.rowIndex ?? -1);
+    if (rowIndex >= 0) {
+      indexes.add(rowIndex);
+    }
+  });
+  return indexes;
+}
+
 function bindTreeEvents() {
   elements.treeContainer.querySelectorAll("[data-action='toggle-node']").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1080,6 +1226,7 @@ function bindTreeEvents() {
         return;
       }
       pruneNotesForNodeKey(key);
+      pruneHighlightsForNodeKey(key);
       state.loadedRoots = removeNodeFromForest(state.loadedRoots, key);
       if (state.ui.focusedKey === key) {
         state.ui.focusedKey = "";
@@ -1121,16 +1268,16 @@ function bindTreeEvents() {
       }
       const selection = window.getSelection();
       const selectedText = selection ? selection.toString().trim() : "";
-      if (!selectedText) {
-        return;
-      }
       event.preventDefault();
       hideNodeMenu();
       updateSelectionState(
         selectedText,
         paragraph.dataset.clauseKey || "",
         getLabelForKey(paragraph.dataset.clauseKey || ""),
-        Number(paragraph.dataset.blockIndex || -1)
+        Number(paragraph.dataset.blockIndex || -1),
+        Number(paragraph.dataset.rowIndex || -1),
+        paragraph.dataset.rowText || "",
+        Boolean(selectedText)
       );
       showSelectionMenu(event.clientX, event.clientY);
     });
@@ -1150,7 +1297,11 @@ function bindTreeEvents() {
 
   elements.treeContainer.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
     button.addEventListener("click", () => {
-      toggleSelectionNotes(button.dataset.clauseKey || "", Number(button.dataset.blockIndex || -1));
+      toggleSelectionNotes(
+        button.dataset.clauseKey || "",
+        Number(button.dataset.blockIndex || -1),
+        Number(button.dataset.rowIndex || -1)
+      );
     });
   });
 
@@ -1499,12 +1650,16 @@ function handleSelectionChange() {
   updateSelectionState(
     text,
     anchorElement.dataset.clauseKey || "",
-    getLabelForKey(anchorElement.dataset.clauseKey || "")
+    getLabelForKey(anchorElement.dataset.clauseKey || ""),
+    Number(anchorElement.dataset.blockIndex || -1),
+    Number(anchorElement.dataset.rowIndex || -1),
+    anchorElement.dataset.rowText || "",
+    true
   );
 }
 
-function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1) {
-  state.ui.selection = { text, clauseKey, clauseLabel, blockIndex };
+function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, rowIndex = -1, rowText = "", hasSelection = false) {
+  state.ui.selection = { text, clauseKey, clauseLabel, blockIndex, rowIndex, rowText, hasSelection };
 }
 
 function getLabelForKey(key) {
@@ -1513,6 +1668,11 @@ function getLabelForKey(key) {
 }
 
 function showSelectionMenu(x, y) {
+  const hasSelection = Boolean(state.ui.selection?.hasSelection && state.ui.selection?.text);
+  const translateButton = elements.selectionMenu.querySelector("[data-action='translate-selection']");
+  if (translateButton) {
+    translateButton.disabled = !hasSelection;
+  }
   elements.selectionMenu.style.left = `${x}px`;
   elements.selectionMenu.style.top = `${y}px`;
   elements.selectionMenu.classList.remove("hidden");
@@ -1542,6 +1702,8 @@ async function runSelectionAction(targetLanguage = "ko") {
       type: "selection",
       clauseKey: state.ui.selection.clauseKey,
       blockIndex: state.ui.selection.blockIndex,
+      rowIndex: state.ui.selection.rowIndex,
+      rowText: state.ui.selection.rowText,
       sourceText: text,
       clauseLabel: state.ui.selection.clauseLabel,
       targetLanguage,
@@ -1703,7 +1865,7 @@ function getClauseSourceText(node) {
   return blockText || String(node.clauseTitle || "").trim();
 }
 
-async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceText, clauseLabel, targetLanguage }) {
+async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, rowText = "", sourceText, clauseLabel, targetLanguage }) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
     state.ui.translationTask = {
@@ -1724,6 +1886,8 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, sourceTe
       type,
       clauseKey,
       blockIndex,
+      rowIndex,
+      rowText,
       clauseLabel,
       sourceText,
       translation: response.outputText || response.data?.outputText || "",
@@ -1748,9 +1912,13 @@ function getNotesForClause(clauseKey) {
   return (state.ui.notes || []).filter((note) => note.clauseKey === clauseKey);
 }
 
-function getSelectionNotesForBlock(clauseKey, blockIndex) {
+function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1) {
   return (state.ui.notes || []).filter(
-    (note) => note.type === "selection" && note.clauseKey === clauseKey && Number(note.blockIndex) === Number(blockIndex)
+    (note) =>
+      note.type === "selection" &&
+      note.clauseKey === clauseKey &&
+      Number(note.blockIndex) === Number(blockIndex) &&
+      Number(note.rowIndex ?? -1) === Number(rowIndex)
   );
 }
 
@@ -1801,8 +1969,8 @@ function toggleClauseNotes(clauseKey) {
   renderLoadedTree();
 }
 
-function toggleSelectionNotes(clauseKey, blockIndex) {
-  const notes = getSelectionNotesForBlock(clauseKey, blockIndex);
+function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
   if (!notes.length) {
     return;
   }
@@ -1841,6 +2009,15 @@ function pruneNotesForNodeKey(nodeKey) {
   state.ui.notes = (state.ui.notes || []).filter((note) => !subtreeKeys.has(note.clauseKey));
 }
 
+function pruneHighlightsForNodeKey(nodeKey) {
+  const node = findNodeByKey(nodeKey);
+  if (!node) {
+    return;
+  }
+  const subtreeKeys = new Set(collectNodeKeys(node));
+  state.ui.highlights = (state.ui.highlights || []).filter((item) => !subtreeKeys.has(item.clauseKey));
+}
+
 function collectNodeKeys(node) {
   return [node.key, ...(node.children || []).flatMap((child) => collectNodeKeys(child))];
 }
@@ -1851,6 +2028,76 @@ function inferSourceLanguage(text) {
 
 function inferTargetLanguage(text) {
   return inferSourceLanguage(text) === "ko" ? "en" : "ko";
+}
+
+function getCurrentSelectionHighlightEntry() {
+  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
+  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
+  const rowIndex = Number(state.ui.selection?.rowIndex ?? -1);
+  const rowText = String(state.ui.selection?.rowText || "").trim();
+  if (!clauseKey || blockIndex < 0) {
+    return null;
+  }
+  return {
+    id: `manual:${clauseKey}:${blockIndex}:${rowIndex}:${normalizeHighlightText(rowText) || "block"}`,
+    type: "manual",
+    clauseKey,
+    blockIndex,
+    rowIndex,
+    rowText,
+  };
+}
+
+function toggleSelectionHighlight() {
+  const entry = getCurrentSelectionHighlightEntry();
+  if (!entry) {
+    setMessage("Highlight할 문단이나 표 행을 먼저 선택하세요.", true);
+    return;
+  }
+  const exists = (state.ui.highlights || []).some((item) => item.id === entry.id);
+  state.ui.highlights = exists
+    ? (state.ui.highlights || []).filter((item) => item.id !== entry.id)
+    : [entry, ...(state.ui.highlights || [])];
+  persistSessionState();
+  renderLoadedTree();
+  setMessage(exists ? "Highlight를 해제했습니다." : "Highlight를 추가했습니다.", false);
+}
+
+function addManualSelectionNote() {
+  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
+  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
+  if (!clauseKey || blockIndex < 0) {
+    setMessage("메모를 추가할 문단이나 표 행을 먼저 선택하세요.", true);
+    return;
+  }
+  const sourceText = String(
+    state.ui.selection?.hasSelection && state.ui.selection?.text
+      ? state.ui.selection.text
+      : state.ui.selection?.rowText || ""
+  ).trim();
+  const translation = window.prompt("메모 내용을 입력하세요.", "");
+  if (translation === null) {
+    return;
+  }
+  if (!String(translation).trim()) {
+    setMessage("메모 내용이 비어 있습니다.", true);
+    return;
+  }
+  upsertNote({
+    id: `manual-note:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    type: "selection",
+    clauseKey,
+    blockIndex,
+    rowIndex: Number(state.ui.selection?.rowIndex ?? -1),
+    rowText: String(state.ui.selection?.rowText || ""),
+    clauseLabel: String(state.ui.selection?.clauseLabel || ""),
+    sourceText,
+    translation: String(translation).trim(),
+    sourceLanguage: inferSourceLanguage(sourceText),
+    targetLanguage: "memo",
+    collapsed: false,
+  });
+  setMessage("수동 메모를 추가했습니다.", false);
 }
 
 function renderSpecbotResults() {
@@ -1891,7 +2138,15 @@ function renderSpecbotResults() {
     .join("");
   elements.specbotResultList.querySelectorAll("[data-action='load-specbot-hit']").forEach((button) => {
     button.addEventListener("click", async () => {
+      const hit = state.ui.specbotResults.find(
+        (item) => String(item.specNo || "") === String(button.dataset.specNo || "")
+          && String(item.clauseId || "") === String(button.dataset.clauseId || "")
+      );
       await loadClauseFromSpec(button.dataset.specNo, button.dataset.clauseId);
+      if (hit) {
+        persistSessionState();
+        renderLoadedTree();
+      }
       removeSpecbotResult(button.dataset.specNo, button.dataset.clauseId);
     });
   });
@@ -2679,17 +2934,14 @@ function applyLlmActionStreamEvent(event, finalPayload) {
 }
 
 function mergeSpecbotHits(existingHits, incomingHits, exclusions = buildSpecbotExclusions()) {
-  const merged = [...(existingHits || [])];
-  const seen = new Set(merged.map((item) => `${item.specNo}:${item.clauseId}`));
+  const merged = new Map(((existingHits || []).map((item) => [`${item.specNo}:${item.clauseId}`, item])));
   for (const hit of filterSpecbotHitsByExclusions(incomingHits || [], exclusions)) {
     const key = `${hit.specNo}:${hit.clauseId}`;
-    if (seen.has(key)) {
-      continue;
+    if (!merged.has(key)) {
+      merged.set(key, hit);
     }
-    seen.add(key);
-    merged.push(hit);
   }
-  return merged.sort(compareSpecbotHits);
+  return [...merged.values()].sort(compareSpecbotHits);
 }
 
 function resolveWorkApiUrl(url) {
@@ -2943,6 +3195,7 @@ function getWorkspaceSnapshot() {
     boardScope: state.ui.boardScope,
     specbotResults: state.ui.specbotResults,
     notes: state.ui.notes || [],
+    highlights: state.ui.highlights || [],
   };
 }
 
@@ -2965,6 +3218,7 @@ function restoreSessionState() {
     state.ui.clauseQuery = payload.clauseQuery || "";
     state.ui.specbotQueryText = payload.specbotQueryText || "";
     state.ui.notes = Array.isArray(payload.notes) ? payload.notes : [];
+    state.ui.highlights = Array.isArray(payload.highlights) ? payload.highlights : [];
     if (payload.specbotSettings && typeof payload.specbotSettings === "object") {
       state.ui.specbotSettings = {
         ...payload.specbotSettings,
@@ -2994,6 +3248,7 @@ async function applyWorkspaceSnapshot(payload) {
   state.ui.clauseQuery = payload?.clauseQuery || "";
   state.ui.specbotQueryText = payload?.specbotQueryText || "";
   state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  state.ui.highlights = Array.isArray(payload?.highlights) ? payload.highlights : [];
   state.ui.specbotResults = Array.isArray(payload?.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
   state.ui.boardScope = {
     releaseData: String(payload?.boardScope?.releaseData || "").trim(),
@@ -3036,6 +3291,7 @@ async function resetWorkspace() {
     clauseQuery: "",
     specbotQueryText: "",
     notes: [],
+    highlights: [],
     specbotResults: [],
     specbotSettings: state.ui.specbotSettings,
     boardScope: state.ui.boardScope,
@@ -3067,6 +3323,8 @@ export {
   openNoticeModal,
   clearMessage,
   runSelectionAction,
+  toggleSelectionHighlight,
+  addManualSelectionNote,
   getWorkspaceSnapshot,
   applyWorkspaceSnapshot,
   resetWorkspace,
