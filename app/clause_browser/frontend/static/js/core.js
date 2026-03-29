@@ -55,6 +55,8 @@ const LOCAL_WORK_LOCK_TTL_MS = 2000;
 const LOCAL_WORK_STATE_KEY = "specbot-work-slots-v1";
 const LOCAL_WORK_LOCK_KEY = "specbot-work-slots-lock-v1";
 const LOCAL_WORK_TAB_ID = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const SESSION_PERSIST_DEBOUNCE_MS = 120;
+let sessionPersistTimer = 0;
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -137,8 +139,14 @@ function bindGlobalEvents() {
       closeClauseNoteModal();
     }
   });
-  window.addEventListener("pagehide", abortActiveRequests);
-  window.addEventListener("beforeunload", abortActiveRequests);
+  window.addEventListener("pagehide", () => {
+    flushPersistSessionState();
+    abortActiveRequests();
+  });
+  window.addEventListener("beforeunload", () => {
+    flushPersistSessionState();
+    abortActiveRequests();
+  });
 }
 
 async function loadConfig() {
@@ -1198,11 +1206,19 @@ function mergeLoadedRoot(roots, subtree) {
 
 function focusNode(key) {
   hideNodeMenu();
+  const node = findNodeByKey(key);
+  if (node?.specNo) {
+    const collapsedLoadedSpecs = new Set(state.ui.collapsedLoadedSpecs || []);
+    collapsedLoadedSpecs.delete(node.specNo);
+    state.ui.collapsedLoadedSpecs = collapsedLoadedSpecs;
+  }
+  expandNodePath(key);
   state.ui.focusedKey = key;
   state.ui.viewportKey = key;
   persistSessionState();
   renderLoadedTree();
-  renderSelectedClauseList();
+  updateSelectedClauseActiveState();
+  ensureSelectedClauseVisible();
   window.setTimeout(() => {
     const element = document.getElementById(`node-${escapeKey(key)}`);
     element?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1269,7 +1285,16 @@ function renderSelectedClauseList() {
       focusNode(button.dataset.nodeKey);
     });
   });
+  updateSelectedClauseActiveState();
   ensureSelectedClauseVisible();
+}
+
+function updateSelectedClauseActiveState() {
+  elements.selectedClauseList.querySelectorAll(".selected-clause-row").forEach((row) => {
+    const key = row.dataset.selectedKey || "";
+    const isActive = key === state.ui.viewportKey || key === state.ui.focusedKey;
+    row.classList.toggle("active", isActive);
+  });
 }
 
 function renderSelectedClauseCard(node, depth) {
@@ -1420,7 +1445,7 @@ function syncViewportSelection() {
   if (!nodes.length) {
     if (state.ui.viewportKey) {
       state.ui.viewportKey = "";
-      renderSelectedClauseList();
+      updateSelectedClauseActiveState();
     }
     return;
   }
@@ -1442,7 +1467,8 @@ function syncViewportSelection() {
   if (bestKey && bestKey !== state.ui.viewportKey) {
     state.ui.viewportKey = bestKey;
     persistSessionState();
-    renderSelectedClauseList();
+    updateSelectedClauseActiveState();
+    ensureSelectedClauseVisible();
   }
 }
 
@@ -2855,6 +2881,20 @@ function wait(ms) {
 }
 
 function persistSessionState() {
+  if (sessionPersistTimer) {
+    window.clearTimeout(sessionPersistTimer);
+  }
+  sessionPersistTimer = window.setTimeout(() => {
+    sessionPersistTimer = 0;
+    flushPersistSessionState();
+  }, SESSION_PERSIST_DEBOUNCE_MS);
+}
+
+function flushPersistSessionState() {
+  if (sessionPersistTimer) {
+    window.clearTimeout(sessionPersistTimer);
+    sessionPersistTimer = 0;
+  }
   const payload = getWorkspaceSnapshot();
   try {
     window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
