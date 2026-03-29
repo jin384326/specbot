@@ -60,6 +60,8 @@ def build_vespa_query(
     hits: int = 10,
     release_filters: list[str] | None = None,
     release_data_filters: list[str] | None = None,
+    exclude_specs: list[str] | None = None,
+    exclude_clause_pairs: list[tuple[str, str]] | None = None,
 ) -> VespaQueryRequest:
     text_terms = normalized_query.features.get("tokens", [])[:6]
     phrase_terms = [term for term in normalized_query.candidate_anchors if len(term.split()) >= 4][:2]
@@ -136,6 +138,16 @@ def build_vespa_query(
         where_clause = where_clause + " and (" + build_contains_expression("release", release_filters) + ")"
     if release_data_filters:
         where_clause = where_clause + " and (" + build_contains_expression("release_data", release_data_filters) + ")"
+    if exclude_specs:
+        where_clause = where_clause + " and !(" + build_contains_expression("spec_no", exclude_specs) + ")"
+    if exclude_clause_pairs:
+        clause_pair_terms = [
+            f'({build_contains_expression("spec_no", [spec_no])} and {build_contains_expression("clause_id", [clause_id])})'
+            for spec_no, clause_id in exclude_clause_pairs
+            if spec_no and clause_id
+        ]
+        if clause_pair_terms:
+            where_clause = where_clause + " and !(" + " or ".join(clause_pair_terms) + ")"
 
     additional_params: dict[str, Any] = {"query": normalized_query.normalized_query}
     if normalized_query.query_vector:

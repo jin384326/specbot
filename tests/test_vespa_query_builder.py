@@ -48,3 +48,15 @@ def test_vespa_query_builder_keeps_long_phrase_for_title_fields() -> None:
     request = build_vespa_query(normalized, hits=5)
     assert 'clause_title contains "End to End Redundant Paths"' in request.yql
     assert 'entity_name contains "End to End Redundant Paths"' in request.yql
+
+
+def test_vespa_query_builder_applies_exclude_spec_and_clause_filters() -> None:
+    normalized = normalize_query("PDU session establishment")
+    request = build_vespa_query(
+        normalized,
+        hits=5,
+        exclude_specs=["23501"],
+        exclude_clause_pairs=[("23502", "4.2.2.2")],
+    )
+    assert 'and !(spec_no contains "23501")' in request.yql
+    assert 'and !((spec_no contains "23502" and clause_id contains "4.2.2.2"))' in request.yql

@@ -84,6 +84,8 @@ class StageSearchBackend(Protocol):
         spec_filters: list[str] | None = None,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
     ) -> list[MultiHopSearchHit]:
         ...
 
@@ -421,6 +423,8 @@ class IterativeLLMRetriever:
         next_iteration_limit: int = 2,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         on_iteration_complete: Callable[[dict[str, Any]], None] | None = None,
         on_relevant_result: Callable[[dict[str, Any]], None] | None = None,
@@ -464,6 +468,8 @@ class IterativeLLMRetriever:
                     iteration_limit,
                     release_filters=release_filters,
                     release_data_filters=release_data_filters,
+                    exclude_specs=exclude_specs,
+                    exclude_clause_pairs=exclude_clause_pairs,
                     should_cancel=should_cancel,
                 ),
                 *self._resolve_clause_targets(
@@ -471,6 +477,8 @@ class IterativeLLMRetriever:
                     iteration_limit,
                     release_filters=release_filters,
                     release_data_filters=release_data_filters,
+                    exclude_specs=exclude_specs,
+                    exclude_clause_pairs=exclude_clause_pairs,
                     should_cancel=should_cancel,
                 ),
             ]
@@ -643,6 +651,8 @@ class IterativeLLMRetriever:
         limit: int,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         aggregated: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -664,6 +674,10 @@ class IterativeLLMRetriever:
                     search_kwargs["release_filters"] = release_filters
                 if "release_data_filters" in search_signature.parameters:
                     search_kwargs["release_data_filters"] = release_data_filters
+                if "exclude_specs" in search_signature.parameters:
+                    search_kwargs["exclude_specs"] = exclude_specs
+                if "exclude_clause_pairs" in search_signature.parameters:
+                    search_kwargs["exclude_clause_pairs"] = exclude_clause_pairs
                 hits = self.backend.search([search_term], **search_kwargs)
                 logger.debug(
                     "Search complete search_term=%r stage_bucket=%s hit_count=%d doc_ids=%s",
@@ -809,6 +823,8 @@ class IterativeLLMRetriever:
         limit: int,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         if not clause_targets:
@@ -826,6 +842,10 @@ class IterativeLLMRetriever:
                 lookup_kwargs["release_filters"] = release_filters
             if "release_data_filters" in lookup_signature.parameters:
                 lookup_kwargs["release_data_filters"] = release_data_filters
+            if "exclude_specs" in lookup_signature.parameters:
+                lookup_kwargs["exclude_specs"] = exclude_specs
+            if "exclude_clause_pairs" in lookup_signature.parameters:
+                lookup_kwargs["exclude_clause_pairs"] = exclude_clause_pairs
             hits = lookup_clause(target["spec_no"], target["clause_id"], **lookup_kwargs)
             logger.debug("Resolved clause target spec_no=%s clause_id=%s hit_count=%d", target["spec_no"], target["clause_id"], len(hits))
             for hit in hits:

@@ -156,10 +156,22 @@ function getBoardScope() {
 }
 
 function setBoardScope(scope = {}) {
-  state.ui.boardScope = {
+  const nextScope = {
     releaseData: String(scope.releaseData || "").trim(),
     release: String(scope.release || "").trim(),
   };
+  const previousScope = getBoardScope();
+  const scopeChanged =
+    previousScope.releaseData !== nextScope.releaseData || previousScope.release !== nextScope.release;
+  state.ui.boardScope = nextScope;
+  if (scopeChanged) {
+    state.documents = [];
+    state.activeSpecNo = "";
+    state.clauseCatalogBySpec = {};
+    if (elements.activeDocumentLabel) {
+      elements.activeDocumentLabel.textContent = "문서를 선택하세요";
+    }
+  }
   persistSessionState();
 }
 
@@ -186,7 +198,8 @@ async function refreshDocuments(options = {}) {
   }
 }
 
-function openPicker() {
+async function openPicker() {
+  await refreshDocuments({ silent: true, guard: false });
   state.ui.isPickerOpen = true;
   persistSessionState();
   elements.pickerModal.classList.remove("hidden");

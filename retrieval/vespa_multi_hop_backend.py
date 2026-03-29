@@ -95,6 +95,8 @@ class VespaMultiHopBackend:
         spec_filters: list[str] | None = None,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
     ) -> list[MultiHopSearchHit]:
         query_text = next((term.strip() for term in terms if term and term.strip()), "")
         if not query_text:
@@ -118,6 +120,8 @@ class VespaMultiHopBackend:
                 hits=min(limit, self.max_hits_per_call),
                 release_filters=release_filters,
                 release_data_filters=release_data_filters,
+                exclude_specs=exclude_specs,
+                exclude_clause_pairs=exclude_clause_pairs,
             )
             request.ranking = self.ranking
             request.additional_params["presentation.summary"] = self.summary
@@ -166,6 +170,8 @@ class VespaMultiHopBackend:
         stage_filters: list[str] | None = None,
         release_filters: list[str] | None = None,
         release_data_filters: list[str] | None = None,
+        exclude_specs: list[str] | None = None,
+        exclude_clause_pairs: list[tuple[str, str]] | None = None,
     ) -> list[MultiHopSearchHit]:
         filters = [
             build_contains_expression("spec_no", [spec_no]),
@@ -178,6 +184,16 @@ class VespaMultiHopBackend:
             filters.append(build_contains_expression("release", release_filters))
         if release_data_filters:
             filters.append(build_contains_expression("release_data", release_data_filters))
+        if exclude_specs:
+            filters.append("!(" + build_contains_expression("spec_no", exclude_specs) + ")")
+        if exclude_clause_pairs:
+            clause_pair_terms = [
+                f'({build_contains_expression("spec_no", [excluded_spec])} and {build_contains_expression("clause_id", [excluded_clause])})'
+                for excluded_spec, excluded_clause in exclude_clause_pairs
+                if excluded_spec and excluded_clause
+            ]
+            if clause_pair_terms:
+                filters.append("!(" + " or ".join(clause_pair_terms) + ")")
         request = VespaQueryRequest(
             yql="select * from sources * where " + " and ".join(f"({clause})" for clause in filters if clause != "false"),
             hits=min(limit, self.max_hits_per_call),

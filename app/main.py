@@ -62,6 +62,20 @@ def build_release_filter_lists(args: argparse.Namespace) -> tuple[list[str] | No
     return (release_filters or None, release_data_filters or None)
 
 
+def build_exclude_clause_pairs(args: argparse.Namespace) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in getattr(args, "exclude_clauses", []) or []:
+        raw = str(item).strip()
+        if not raw or ":" not in raw:
+            continue
+        spec_no, clause_id = raw.split(":", maxsplit=1)
+        normalized_spec = spec_no.strip()
+        normalized_clause = clause_id.strip()
+        if normalized_spec and normalized_clause:
+            pairs.append((normalized_spec, normalized_clause))
+    return pairs
+
+
 def is_excluded_hit(spec_no: str, clause_id: str, excluded_specs: set[str], excluded_clause_pairs: set[tuple[str, str]]) -> bool:
     normalized_spec = str(spec_no).strip()
     normalized_clause = str(clause_id).strip()
@@ -271,6 +285,7 @@ def cmd_feed_vespa_http(args: argparse.Namespace) -> None:
 def cmd_query_vespa_http(args: argparse.Namespace) -> None:
     excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
     release_filters, release_data_filters = build_release_filter_lists(args)
+    query_exclude_clause_pairs = build_exclude_clause_pairs(args)
     registry = QueryFeatureRegistry.from_json(args.registry)
     query_vector = None
     if args.embed_model:
@@ -288,6 +303,8 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
         hits=args.limit,
         release_filters=release_filters,
         release_data_filters=release_data_filters,
+        exclude_specs=list(excluded_specs),
+        exclude_clause_pairs=query_exclude_clause_pairs,
     )
     request.ranking = args.ranking
     request.additional_params["presentation.summary"] = args.summary
@@ -316,6 +333,7 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
 def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
     excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
     release_filters, release_data_filters = build_release_filter_lists(args)
+    query_exclude_clause_pairs = build_exclude_clause_pairs(args)
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     registry = QueryFeatureRegistry.from_json(args.registry)
@@ -363,6 +381,8 @@ def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
         next_iteration_limit=args.next_iteration_limit,
         release_filters=release_filters,
         release_data_filters=release_data_filters,
+        exclude_specs=list(excluded_specs),
+        exclude_clause_pairs=query_exclude_clause_pairs,
     )
     result = filter_iterative_result(result, excluded_specs, excluded_clause_pairs)
     print(json.dumps(result, ensure_ascii=True, indent=2))

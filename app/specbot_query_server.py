@@ -292,6 +292,16 @@ class PersistentSpecbotQueryEngine:
             next_iteration_limit=int(effective["nextIterationLimit"]),
             release_filters=[release] if release else None,
             release_data_filters=[release_data] if release_data else None,
+            exclude_specs=[str(item).strip() for item in (exclude_specs or []) if str(item).strip()],
+            exclude_clause_pairs=[
+                (
+                    str(item.get("specNo") or item.get("spec_no") or "").strip(),
+                    str(item.get("clauseId") or item.get("clause_id") or "").strip(),
+                )
+                for item in (exclude_clauses or [])
+                if str(item.get("specNo") or item.get("spec_no") or "").strip()
+                and str(item.get("clauseId") or item.get("clause_id") or "").strip()
+            ],
             should_cancel=should_cancel,
             on_iteration_complete=on_iteration_complete,
             on_relevant_result=on_relevant_result,
