@@ -1,8 +1,12 @@
 import {
   applyWorkspaceSnapshot,
+  clearMessage,
+  state,
+  getBoardScope,
   getWorkspaceSnapshot,
   openNoticeModal,
   resetWorkspace,
+  setBoardScope,
 } from "../core.js";
 
 const EDITOR_ID_KEY = "specbot-board-editor-id-v1";
@@ -15,6 +19,10 @@ const boardState = {
   heartbeatId: 0,
   mode: "list",
   deleteTarget: null,
+  createScopeDraft: {
+    releaseData: "",
+    release: "",
+  },
   isDraft: false,
   isRestoringRoute: false,
 };
@@ -51,9 +59,15 @@ function boardElements() {
     boardListCount: document.getElementById("board-list-count"),
     boardMessageBar: document.getElementById("board-message-bar"),
     boardPostList: document.getElementById("board-post-list"),
+    boardCreateModal: document.getElementById("board-create-modal"),
+    boardCreateReleaseData: document.getElementById("board-create-release-data"),
+    boardCreateRelease: document.getElementById("board-create-release"),
+    boardCreateConfirm: document.getElementById("board-create-confirm"),
     boardBackToList: document.getElementById("board-back-to-list"),
     boardSavePost: document.getElementById("board-save-post"),
     boardPostTitle: document.getElementById("board-post-title"),
+    boardReleaseData: document.getElementById("board-release-data"),
+    boardRelease: document.getElementById("board-release"),
     openPickerButton: document.getElementById("open-picker-button"),
     exportButton: document.getElementById("export-button"),
     boardDeleteModal: document.getElementById("board-delete-modal"),
@@ -99,9 +113,97 @@ function applyEditorMode(mode) {
   els.boardSavePost.classList.toggle("hidden", !isEdit);
   els.exportButton.classList.toggle("hidden", !isView);
   els.boardPostTitle.readOnly = !isEdit;
+  const scopeLocked = true;
+  els.boardReleaseData.disabled = scopeLocked;
+  els.boardRelease.disabled = scopeLocked;
   if (els.openPickerButton) {
     els.openPickerButton.classList.toggle("hidden", isView);
   }
+}
+
+function availableReleaseScopes() {
+  return Array.isArray(state.config?.releaseScopes) ? state.config.releaseScopes : [];
+}
+
+function buildScopeOptionState(scope = getBoardScope()) {
+  const scopes = availableReleaseScopes();
+  const releaseDataValues = [...new Set(scopes.map((item) => String(item.releaseData || "").trim()).filter(Boolean))].sort();
+  const selectedReleaseData = String(scope.releaseData || releaseDataValues[0] || "").trim();
+  const releaseValues = [
+    ...new Set(
+      scopes
+        .filter((item) => String(item.releaseData || "").trim() === selectedReleaseData)
+        .map((item) => String(item.release || "").trim())
+        .filter(Boolean)
+    ),
+  ].sort();
+  const selectedRelease = String(scope.release || releaseValues[0] || "").trim();
+  return {
+    releaseDataValues,
+    selectedReleaseData,
+    releaseValues,
+    selectedRelease,
+  };
+}
+
+function renderScopeSelects(releaseDataEl, releaseEl, scope = getBoardScope(), { persist = false } = {}) {
+  const { releaseDataValues, selectedReleaseData, releaseValues, selectedRelease } = buildScopeOptionState(scope);
+  releaseDataEl.innerHTML = releaseDataValues
+    .map((value) => `<option value="${escapeHtml(value)}" ${value === selectedReleaseData ? "selected" : ""}>${escapeHtml(value)}</option>`)
+    .join("");
+  releaseEl.innerHTML = releaseValues
+    .map((value) => `<option value="${escapeHtml(value)}" ${value === selectedRelease ? "selected" : ""}>${escapeHtml(value)}</option>`)
+    .join("");
+  if (persist) {
+    setBoardScope({ releaseData: selectedReleaseData, release: selectedRelease });
+  }
+  return { releaseData: selectedReleaseData, release: selectedRelease };
+}
+
+function renderBoardScopeOptions(scope = getBoardScope()) {
+  const { boardReleaseData, boardRelease } = boardElements();
+  renderScopeSelects(boardReleaseData, boardRelease, scope, { persist: true });
+}
+
+function openCreateModal() {
+  const els = boardElements();
+  boardState.createScopeDraft = renderScopeSelects(
+    els.boardCreateReleaseData,
+    els.boardCreateRelease,
+    getBoardScope(),
+    { persist: false }
+  );
+  els.boardCreateModal.classList.remove("hidden");
+  els.boardCreateModal.setAttribute("aria-hidden", "false");
+}
+
+function closeCreateModal() {
+  const { boardCreateModal } = boardElements();
+  boardCreateModal.classList.add("hidden");
+  boardCreateModal.setAttribute("aria-hidden", "true");
+}
+
+function updateCreateScopeDraft() {
+  const els = boardElements();
+  boardState.createScopeDraft = renderScopeSelects(
+    els.boardCreateReleaseData,
+    els.boardCreateRelease,
+    {
+      releaseData: els.boardCreateReleaseData.value,
+      release: els.boardCreateRelease.value,
+    },
+    { persist: false }
+  );
+}
+
+async function confirmCreatePost() {
+  const scope = boardState.createScopeDraft;
+  if (!scope.releaseData || !scope.release) {
+    throw new Error("게시글의 Spec Date와 Release를 선택하세요.");
+  }
+  setBoardScope(scope);
+  closeCreateModal();
+  await openDraftPost();
 }
 
 async function request(url, options = {}) {
@@ -134,6 +236,7 @@ function renderBoardPosts(items) {
             <div class="board-post-title">${escapeHtml(item.title || "Untitled post")}</div>
             <div class="board-post-meta">
               <span>${escapeHtml(item.updatedAt || "")}</span>
+              <span>${escapeHtml([item.releaseData, item.release].filter(Boolean).join(" / "))}</span>
               <span>${escapeHtml(lockText)}</span>
             </div>
           </div>
@@ -247,7 +350,7 @@ function releaseCurrentLockOnUnload() {
 }
 
 async function createPost() {
-  await openDraftPost();
+  openCreateModal();
 }
 
 async function openExistingPost(postId, options = {}) {
@@ -266,10 +369,12 @@ async function openExistingPostReadOnly(postId, options = {}) {
 }
 
 async function openDraftPost(options = {}) {
+  clearMessage();
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = true;
   boardElements().boardPostTitle.value = "새 게시글";
+  renderBoardScopeOptions(getBoardScope());
   showEditorScreen();
   applyEditorMode("edit");
   stopHeartbeat();
@@ -278,37 +383,53 @@ async function openDraftPost(options = {}) {
 }
 
 async function openPostInEditor(post, options = {}) {
+  clearMessage();
   boardState.currentPostId = post.postId;
   boardState.currentLock = post.lock || null;
   boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
+  renderBoardScopeOptions({ releaseData: post.releaseData, release: post.release });
   showEditorScreen();
   applyEditorMode("edit");
   await resetWorkspace();
-  await applyWorkspaceSnapshot(post.workspaceState || {});
+  await applyWorkspaceSnapshot({
+    ...(post.workspaceState || {}),
+    boardScope: { releaseData: post.releaseData, release: post.release },
+  });
   startHeartbeat();
   navigateBoard("edit", { postId: post.postId, replace: options.replace === true });
 }
 
 async function openPostInViewer(post, options = {}) {
+  clearMessage();
   boardState.currentPostId = post.postId;
   boardState.currentLock = null;
   boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
+  renderBoardScopeOptions({ releaseData: post.releaseData, release: post.release });
   showEditorScreen();
   applyEditorMode("view");
   stopHeartbeat();
   await resetWorkspace();
-  await applyWorkspaceSnapshot(post.workspaceState || {});
+  await applyWorkspaceSnapshot({
+    ...(post.workspaceState || {}),
+    boardScope: { releaseData: post.releaseData, release: post.release },
+  });
   navigateBoard("view", { postId: post.postId, replace: options.replace === true });
 }
 
 async function saveCurrentPost() {
+  const scope = getBoardScope();
+  if (!scope.releaseData || !scope.release) {
+    throw new Error("게시글의 Spec Date와 Release를 선택하세요.");
+  }
   const payload = {
     editorId: editorId(),
     editorLabel: editorLabel(),
     title: boardElements().boardPostTitle.value.trim() || "Untitled post",
     body: "",
+    releaseData: scope.releaseData,
+    release: scope.release,
     workspaceState: getWorkspaceSnapshot(),
   };
   if (!boardState.currentPostId) {
@@ -365,6 +486,7 @@ async function deletePost(postId) {
 }
 
 async function closeEditor() {
+  clearMessage();
   stopHeartbeat();
   if (boardState.currentPostId && boardState.currentLock) {
     try {
@@ -471,6 +593,9 @@ export function bindBoardFeature() {
   document.querySelectorAll("[data-action='close-board-delete-modal']").forEach((element) => {
     element.addEventListener("click", () => closeDeleteModal());
   });
+  document.querySelectorAll("[data-action='close-board-create-modal']").forEach((element) => {
+    element.addEventListener("click", () => closeCreateModal());
+  });
   els.boardCreatePost.addEventListener("click", async () => {
     try {
       await createPost();
@@ -505,6 +630,13 @@ export function bindBoardFeature() {
       showBoardError(error);
     }
   });
+  els.boardCreateConfirm.addEventListener("click", async () => {
+    try {
+      await confirmCreatePost();
+    } catch (error) {
+      showBoardError(error);
+    }
+  });
   els.boardSearch.addEventListener(
     "input",
     debounce(async () => {
@@ -515,9 +647,19 @@ export function bindBoardFeature() {
       }
     }, 180)
   );
+  els.boardCreateReleaseData.addEventListener("change", () => {
+    updateCreateScopeDraft();
+  });
+  els.boardCreateRelease.addEventListener("change", () => {
+    boardState.createScopeDraft = {
+      releaseData: els.boardCreateReleaseData.value,
+      release: els.boardCreateRelease.value,
+    };
+  });
 }
 
 export async function initializeBoard() {
+  renderBoardScopeOptions();
   showBoardScreen();
   await refreshBoardPosts();
   await restoreBoardRoute();

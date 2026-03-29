@@ -15,6 +15,10 @@ class BoardLockPayload(BaseModel):
 
 class BoardCreatePayload(BoardLockPayload):
     title: str = Field(default="새 게시글", min_length=1, max_length=200)
+    body: str = Field(default="", max_length=20000)
+    releaseData: str = Field(min_length=1, max_length=32)
+    release: str = Field(min_length=1, max_length=32)
+    workspaceState: dict[str, Any] = Field(default_factory=dict)
 
 
 class BoardUpdatePayload(BoardLockPayload):
@@ -41,7 +45,13 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
 
     @router.post("/posts")
     def create_post(payload: BoardCreatePayload) -> dict[str, Any]:
-        post = repository.create_post(title=payload.title, workspace_state={})
+        post = repository.create_post(
+            title=payload.title,
+            body=payload.body,
+            release_data=payload.releaseData,
+            release=payload.release,
+            workspace_state=payload.workspaceState,
+        )
         lock = locks.acquire(post_id=post.post_id, editor_id=payload.editorId, editor_label=payload.editorLabel)
         return {"success": True, "data": {**post.to_dict(), "lock": lock.to_dict()}}
 

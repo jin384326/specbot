@@ -93,6 +93,8 @@ class VespaMultiHopBackend:
         limit: int = 20,
         stage_filters: list[str] | None = None,
         spec_filters: list[str] | None = None,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
     ) -> list[MultiHopSearchHit]:
         query_text = next((term.strip() for term in terms if term and term.strip()), "")
         if not query_text:
@@ -111,7 +113,12 @@ class VespaMultiHopBackend:
                 normalized.inferred_specs = []
                 normalized.features["hinted_specs"] = list(spec_filters)
                 normalized.features["inferred_specs"] = []
-            request = build_vespa_query(normalized, hits=min(limit, self.max_hits_per_call))
+            request = build_vespa_query(
+                normalized,
+                hits=min(limit, self.max_hits_per_call),
+                release_filters=release_filters,
+                release_data_filters=release_data_filters,
+            )
             request.ranking = self.ranking
             request.additional_params["presentation.summary"] = self.summary
             request.additional_params["ranking.features.query(anchor_boost)"] = self.anchor_boost
@@ -157,6 +164,8 @@ class VespaMultiHopBackend:
         clause_id: str,
         limit: int = 20,
         stage_filters: list[str] | None = None,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
     ) -> list[MultiHopSearchHit]:
         filters = [
             build_contains_expression("spec_no", [spec_no]),
@@ -165,6 +174,10 @@ class VespaMultiHopBackend:
         ]
         if stage_filters:
             filters.append(build_contains_expression("stage_hint", stage_filters))
+        if release_filters:
+            filters.append(build_contains_expression("release", release_filters))
+        if release_data_filters:
+            filters.append(build_contains_expression("release_data", release_data_filters))
         request = VespaQueryRequest(
             yql="select * from sources * where " + " and ".join(f"({clause})" for clause in filters if clause != "false"),
             hits=min(limit, self.max_hits_per_call),

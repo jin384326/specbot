@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SPECS_DIR="${SPECS_DIR:-$ROOT_DIR/Specs/2025-12/Rel-18}"
+SPECS_DIR="${SPECS_DIR:-$ROOT_DIR/Specs}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$ROOT_DIR/artifacts}"
 VESPA_DIR="${VESPA_DIR:-$ROOT_DIR/vespa}"
 VESPA_APP_DIR="${VESPA_APP_DIR:-$VESPA_DIR/schema}"
@@ -18,6 +18,8 @@ NAMESPACE="${NAMESPACE:-spec-finder}"
 CORPUS_PATH="${CORPUS_PATH:-$ARTIFACTS_DIR/spec_finder_corpus_all.jsonl}"
 ENRICHED_PATH="${ENRICHED_PATH:-$ARTIFACTS_DIR/spec_finder_enriched_all.jsonl}"
 REGISTRY_PATH="${REGISTRY_PATH:-$ARTIFACTS_DIR/spec_query_registry.json}"
+REGISTRIES_DIR="${REGISTRIES_DIR:-$ARTIFACTS_DIR/spec_query_registries}"
+ENRICHED_OVERLAY_PATH="${ENRICHED_OVERLAY_PATH:-$ARTIFACTS_DIR/spec_finder_enriched_overlay.jsonl}"
 EMBEDDED_PATH="${EMBEDDED_PATH:-$ARTIFACTS_DIR/spec_finder_embedded_all.jsonl}"
 VESPA_FEED_PATH="${VESPA_FEED_PATH:-$ARTIFACTS_DIR/spec_finder_vespa_embedded_all.jsonl}"
 
@@ -25,6 +27,7 @@ BATCH_SIZE="${BATCH_SIZE:-16}"
 FEED_MAX_WORKERS="${FEED_MAX_WORKERS:-8}"
 START_VESPA="${START_VESPA:-0}"
 FROM_EMBEDDINGS="${FROM_EMBEDDINGS:-0}"
+WIPE_VESPA="${WIPE_VESPA:-0}"
 
 print_command() {
   printf '+'
@@ -56,13 +59,14 @@ Options:
   --feed-max-workers N    Concurrent Vespa feed workers
   --from-embeddings       Start from export-vespa using existing embedded artifact
   --start-vespa           Run docker compose up -d in vespa/
+  --wipe-vespa            Delete local Vespa data volumes before redeploy/feed
   -h, --help              Show this help
 
 Environment overrides:
   SPECS_DIR ARTIFACTS_DIR VESPA_DIR VESPA_APP_DIR MODEL_DIR DEVICE
   BASE_URL CONFIG_BASE_URL SCHEMA NAMESPACE
-  CORPUS_PATH ENRICHED_PATH REGISTRY_PATH EMBEDDED_PATH VESPA_FEED_PATH
-  BATCH_SIZE FEED_MAX_WORKERS START_VESPA FROM_EMBEDDINGS
+  CORPUS_PATH ENRICHED_PATH REGISTRY_PATH REGISTRIES_DIR ENRICHED_OVERLAY_PATH EMBEDDED_PATH VESPA_FEED_PATH
+  BATCH_SIZE FEED_MAX_WORKERS START_VESPA FROM_EMBEDDINGS WIPE_VESPA
 EOF
 }
 
@@ -108,6 +112,10 @@ while [[ $# -gt 0 ]]; do
       START_VESPA=1
       shift
       ;;
+    --wipe-vespa)
+      WIPE_VESPA=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -131,6 +139,13 @@ echo "  base_url=$BASE_URL"
 echo "  config_base_url=$CONFIG_BASE_URL"
 echo "  feed_max_workers=$FEED_MAX_WORKERS"
 echo "  from_embeddings=$FROM_EMBEDDINGS"
+echo "  wipe_vespa=$WIPE_VESPA"
+
+if [[ "$WIPE_VESPA" == "1" ]]; then
+  echo "Wiping local Vespa data volumes"
+  run_cmd docker compose -f "$VESPA_DIR/docker-compose.yml" down -v
+  START_VESPA=1
+fi
 
 if [[ "$START_VESPA" == "1" ]]; then
   echo "Starting Vespa containers"
@@ -149,10 +164,13 @@ if [[ "$FROM_EMBEDDINGS" != "1" ]]; then
     --input "$CORPUS_PATH" \
     --output "$ENRICHED_PATH"
 
-  echo "3/8 build-query-registry"
-  run_cmd python3 -m app.main build-query-registry \
-    --input "$ENRICHED_PATH" \
-    --output "$REGISTRY_PATH"
+  rm -f "$ENRICHED_OVERLAY_PATH"
+
+  echo "3/8 build-query-registries"
+  run_cmd python3 -m app.release_registry_builder \
+    --inputs "$ENRICHED_PATH" \
+    --global-output "$REGISTRY_PATH" \
+    --output-root "$REGISTRIES_DIR"
 
   echo "4/8 build-embeddings"
   run_cmd python3 -m app.main build-embeddings \

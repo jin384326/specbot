@@ -614,7 +614,7 @@ class SpecbotQueryDefaults:
     base_url: str = "http://localhost:8080"
     config_base_url: str = "http://localhost:19071"
     limit: int = 4
-    iterations: int = 2
+    iterations: int = 1
     next_iteration_limit: int = 2
     followup_mode: str = "sentence-summary"
     summary: str = "short"
@@ -795,10 +795,14 @@ class SpecbotQueryHttpService:
         settings: dict[str, Any] | None = None,
         exclude_specs: list[str] | None = None,
         exclude_clauses: list[dict[str, Any]] | None = None,
+        release_data: str | None = None,
+        release: str | None = None,
     ) -> dict[str, Any]:
         payload = json.dumps(
             {
                 "query": query,
+                "releaseData": release_data,
+                "release": release,
                 "settings": settings or self._defaults.to_dict(),
                 "excludeSpecs": exclude_specs or [],
                 "excludeClauses": exclude_clauses or [],
@@ -831,12 +835,16 @@ class SpecbotQueryHttpService:
         settings: dict[str, Any] | None = None,
         exclude_specs: list[str] | None = None,
         exclude_clauses: list[dict[str, Any]] | None = None,
+        release_data: str | None = None,
+        release: str | None = None,
         should_cancel=None,
     ) -> dict[str, Any]:
         import httpx
 
         payload = {
             "query": query,
+            "releaseData": release_data,
+            "release": release,
             "settings": settings or self._defaults.to_dict(),
             "excludeSpecs": exclude_specs or [],
             "excludeClauses": exclude_clauses or [],

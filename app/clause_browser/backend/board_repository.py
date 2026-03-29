@@ -34,7 +34,15 @@ class BoardPostRepository:
                 return post
         raise KeyError(f"Unknown post: {post_id}")
 
-    def create_post(self, *, title: str, body: str = "", workspace_state: dict[str, Any] | None = None) -> BoardPost:
+    def create_post(
+        self,
+        *,
+        title: str,
+        body: str = "",
+        release_data: str,
+        release: str,
+        workspace_state: dict[str, Any] | None = None,
+    ) -> BoardPost:
         with self._lock:
             posts = self._load_posts_unlocked()
             now = utc_now_iso()
@@ -42,6 +50,8 @@ class BoardPostRepository:
                 post_id=uuid.uuid4().hex[:12],
                 title=title.strip() or "Untitled post",
                 body=body.strip(),
+                release_data=release_data.strip(),
+                release=release.strip(),
                 workspace_state=dict(workspace_state or {}),
                 created_at=now,
                 updated_at=now,
@@ -100,6 +110,8 @@ class BoardPostRepository:
                 post_id=str(item.get("postId") or ""),
                 title=str(item.get("title") or ""),
                 body=str(item.get("body") or ""),
+                release_data=str(item.get("releaseData") or ""),
+                release=str(item.get("release") or ""),
                 workspace_state=dict(item.get("workspaceState") or {}),
                 created_at=str(item.get("createdAt") or ""),
                 updated_at=str(item.get("updatedAt") or ""),

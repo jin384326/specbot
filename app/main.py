@@ -56,6 +56,12 @@ def build_exclusion_sets(args: argparse.Namespace) -> tuple[set[str], set[tuple[
     return excluded_specs, excluded_clause_pairs
 
 
+def build_release_filter_lists(args: argparse.Namespace) -> tuple[list[str] | None, list[str] | None]:
+    release_filters = [str(item).strip() for item in getattr(args, "release_filters", []) or [] if str(item).strip()]
+    release_data_filters = [str(item).strip() for item in getattr(args, "release_data_filters", []) or [] if str(item).strip()]
+    return (release_filters or None, release_data_filters or None)
+
+
 def is_excluded_hit(spec_no: str, clause_id: str, excluded_specs: set[str], excluded_clause_pairs: set[tuple[str, str]]) -> bool:
     normalized_spec = str(spec_no).strip()
     normalized_clause = str(clause_id).strip()
@@ -101,7 +107,9 @@ def cmd_build_corpus(args: argparse.Namespace) -> None:
         args.output,
         metadata_by_source=metadata,
         append=not args.overwrite,
-        parser=DocxClauseParser(prefix_direct_child_title_from_empty_parent=True),
+        parser=DocxClauseParser(
+            prefix_direct_child_title_from_empty_parent=True,
+        ),
     )
     print(f"Wrote {count} corpus records to {args.output}")
 
@@ -262,6 +270,7 @@ def cmd_feed_vespa_http(args: argparse.Namespace) -> None:
 
 def cmd_query_vespa_http(args: argparse.Namespace) -> None:
     excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
+    release_filters, release_data_filters = build_release_filter_lists(args)
     registry = QueryFeatureRegistry.from_json(args.registry)
     query_vector = None
     if args.embed_model:
@@ -274,7 +283,12 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
             max_length=args.max_length,
         ).embed_texts([args.query], prompt_name="query")[0]
     normalized = normalize_query(args.query, registry=registry, query_vector=query_vector, stage_filters=args.stage_filter)
-    request = build_vespa_query(normalized, hits=args.limit)
+    request = build_vespa_query(
+        normalized,
+        hits=args.limit,
+        release_filters=release_filters,
+        release_data_filters=release_data_filters,
+    )
     request.ranking = args.ranking
     request.additional_params["presentation.summary"] = args.summary
     request.additional_params["ranking.features.query(anchor_boost)"] = args.anchor_boost
@@ -301,6 +315,7 @@ def cmd_query_vespa_http(args: argparse.Namespace) -> None:
 
 def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
     excluded_specs, excluded_clause_pairs = build_exclusion_sets(args)
+    release_filters, release_data_filters = build_release_filter_lists(args)
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     registry = QueryFeatureRegistry.from_json(args.registry)
@@ -346,6 +361,8 @@ def cmd_iterative_query_vespa_http(args: argparse.Namespace) -> None:
         limit=args.limit,
         iterations=args.iterations,
         next_iteration_limit=args.next_iteration_limit,
+        release_filters=release_filters,
+        release_data_filters=release_data_filters,
     )
     result = filter_iterative_result(result, excluded_specs, excluded_clause_pairs)
     print(json.dumps(result, ensure_ascii=True, indent=2))
@@ -570,7 +587,9 @@ def cmd_build_full_corpus_pipeline(args: argparse.Namespace) -> None:
             corpus_output,
             metadata_by_source=metadata,
             append=False,
-            parser=DocxClauseParser(prefix_direct_child_title_from_empty_parent=True),
+            parser=DocxClauseParser(
+                prefix_direct_child_title_from_empty_parent=True,
+            ),
         )
     }
     summary["enrich_corpus"] = {"count": enrich_corpus(corpus_output, enriched_output, taxonomy_path=args.taxonomy)}
@@ -739,6 +758,8 @@ def build_parser() -> argparse.ArgumentParser:
     query_http_cmd.add_argument("--max-length", type=int, default=2048, help="Max token length for supported models")
     query_http_cmd.add_argument("--no-4bit", action="store_true", help="Disable 4-bit loading for supported models")
     query_http_cmd.add_argument("--stage-filter", action="append", choices=["stage2", "stage3", "else"], help="Restrict search to a stage bucket")
+    query_http_cmd.add_argument("--release", dest="release_filters", action="append", default=[], help="Restrict search to one or more releases, e.g. Rel-18")
+    query_http_cmd.add_argument("--release-data", dest="release_data_filters", action="append", default=[], help="Restrict search to one or more release dates, e.g. 2024-12")
     query_http_cmd.add_argument("--exclude-spec", dest="exclude_specs", action="append", default=[], help="Exclude an entire spec, e.g. 23502")
     query_http_cmd.add_argument(
         "--exclude-clause",
@@ -786,6 +807,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="How the LLM generates next-hop retrieval queries",
     )
     iterative_query_cmd.add_argument("--debug", action="store_true", help="Enable debug logging for each retrieval step")
+    iterative_query_cmd.add_argument("--release", dest="release_filters", action="append", default=[], help="Restrict search to one or more releases, e.g. Rel-18")
+    iterative_query_cmd.add_argument("--release-data", dest="release_data_filters", action="append", default=[], help="Restrict search to one or more release dates, e.g. 2024-12")
     iterative_query_cmd.add_argument("--exclude-spec", dest="exclude_specs", action="append", default=[], help="Exclude an entire spec, e.g. 23502")
     iterative_query_cmd.add_argument(
         "--exclude-clause",

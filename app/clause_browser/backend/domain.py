@@ -8,6 +8,8 @@ class ClauseRecord:
     key: str
     spec_no: str
     spec_title: str
+    release: str
+    release_data: str
     clause_id: str
     clause_title: str
     text: str
@@ -59,6 +61,8 @@ class DocumentSummary:
     spec_no: str
     spec_title: str
     source_file: str
+    release: str
+    release_data: str
     clause_count: int
     top_level_clause_count: int
 
@@ -67,6 +71,8 @@ class DocumentSummary:
             "specNo": self.spec_no,
             "specTitle": self.spec_title,
             "sourceFile": self.source_file,
+            "release": self.release,
+            "releaseData": self.release_data,
             "clauseCount": self.clause_count,
             "topLevelClauseCount": self.top_level_clause_count,
         }

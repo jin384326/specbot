@@ -57,6 +57,7 @@ class LLMActionRequest(BaseModel):
 class ClauseBrowserConfig:
     languages: list[dict[str, str]]
     actions: list[dict[str, str]]
+    release_scopes: list[dict[str, str]]
     duplicate_policy: str = "focus-existing"
     specbot_defaults: dict[str, Any] | None = None
     query_api_url: str | None = None
@@ -66,7 +67,7 @@ class SpecbotSettingsPayload(BaseModel):
     baseUrl: str = Field(min_length=1, max_length=200)
     configBaseUrl: str = Field(default="", max_length=200)
     limit: int = Field(default=4, ge=1, le=20)
-    iterations: int = Field(default=2, ge=1, le=10)
+    iterations: int = Field(default=1, ge=0, le=10)
     nextIterationLimit: int = Field(default=2, ge=1, le=20)
     summary: str = Field(default="short", min_length=1, max_length=50)
     registry: str = Field(min_length=1, max_length=500)
@@ -83,6 +84,8 @@ class ClauseExclusionPayload(BaseModel):
 
 class SpecbotQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    releaseData: str | None = Field(default=None, max_length=32)
+    release: str | None = Field(default=None, max_length=32)
     settings: SpecbotSettingsPayload | None = None
     excludeSpecs: list[str] = Field(default_factory=list)
     excludeClauses: list[ClauseExclusionPayload] = Field(default_factory=list)
@@ -105,6 +108,7 @@ def create_router(
             {
                 "languages": config.languages,
                 "actions": config.actions,
+                "releaseScopes": config.release_scopes,
                 "duplicatePolicy": config.duplicate_policy,
                 "corpusPath": str(repository.corpus_path),
                 "specbotDefaults": config.specbot_defaults or {},
@@ -113,33 +117,75 @@ def create_router(
         )
 
     @router.get("/documents")
-    def list_documents(query: str = "", clauseQuery: str = "", limit: int = 50) -> dict[str, Any]:
+    def list_documents(
+        query: str = "",
+        clauseQuery: str = "",
+        limit: int = 50,
+        releaseData: str = "",
+        release: str = "",
+    ) -> dict[str, Any]:
         return success(
             {
                 "items": [
                     item.to_dict()
-                    for item in repository.list_documents(query=query, clause_query=clauseQuery, limit=limit)
+                    for item in repository.list_documents(
+                        query=query,
+                        clause_query=clauseQuery,
+                        limit=limit,
+                        release_data=releaseData,
+                        release=release,
+                    )
                 ]
             }
         )
 
     @router.get("/documents/{spec_no}/clauses")
-    def list_clauses(spec_no: str, query: str = "", limit: int = 100, includeAll: bool = False) -> dict[str, Any]:
+    def list_clauses(
+        spec_no: str,
+        query: str = "",
+        limit: int = 100,
+        includeAll: bool = False,
+        releaseData: str = "",
+        release: str = "",
+    ) -> dict[str, Any]:
         try:
-            items = repository.list_clauses(spec_no=spec_no, query=query, limit=limit, include_all=includeAll)
+            items = repository.list_clauses(
+                spec_no=spec_no,
+                query=query,
+                limit=limit,
+                include_all=includeAll,
+                release_data=releaseData,
+                release=release,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return success({"items": [item.to_dict() for item in items]})
 
     @router.get("/documents/{spec_no}/clauses/{clause_id:path}/subtree")
-    def get_subtree(spec_no: str, clause_id: str) -> dict[str, Any]:
+    def get_subtree(spec_no: str, clause_id: str, releaseData: str = "", release: str = "") -> dict[str, Any]:
         try:
             if rich_document_service is not None:
                 try:
-                    return success(rich_document_service.get_subtree(spec_no=spec_no, clause_id=clause_id).to_dict())
+                    return success(
+                        rich_document_service.get_subtree(spec_no=spec_no, clause_id=clause_id).to_dict()
+                    )
                 except Exception:
-                    return success(repository.get_subtree(spec_no=spec_no, clause_id=clause_id).to_dict())
-            return success(repository.get_subtree(spec_no=spec_no, clause_id=clause_id).to_dict())
+                    return success(
+                        repository.get_subtree(
+                            spec_no=spec_no,
+                            clause_id=clause_id,
+                            release_data=releaseData,
+                            release=release,
+                        ).to_dict()
+                    )
+            return success(
+                repository.get_subtree(
+                    spec_no=spec_no,
+                    clause_id=clause_id,
+                    release_data=releaseData,
+                    release=release,
+                ).to_dict()
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -251,6 +297,8 @@ def create_router(
             if hasattr(specbot_service, "run_async"):
                 result = await specbot_service.run_async(
                     query=payload.query,
+                    release_data=payload.releaseData,
+                    release=payload.release,
                     settings=payload.settings.model_dump(mode="json") if payload.settings else None,
                     exclude_specs=payload.excludeSpecs,
                     exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
@@ -259,6 +307,8 @@ def create_router(
             else:
                 result = specbot_service.run(
                     query=payload.query,
+                    release_data=payload.releaseData,
+                    release=payload.release,
                     settings=payload.settings.model_dump(mode="json") if payload.settings else None,
                     exclude_specs=payload.excludeSpecs,
                     exclude_clauses=[item.model_dump(mode="json") for item in payload.excludeClauses],
@@ -278,7 +328,12 @@ def create_router(
         valid_hits = [
             hit
             for hit in hits
-            if repository.has_clause(str(hit.get("specNo") or "").strip(), str(hit.get("clauseId") or "").strip())
+            if repository.has_clause(
+                str(hit.get("specNo") or "").strip(),
+                str(hit.get("clauseId") or "").strip(),
+                release_data=payload.releaseData or "",
+                release=payload.release or "",
+            )
         ]
         filtered_count = len(hits) - len(valid_hits)
         return success({**result, "hits": valid_hits, "filteredInvalidHits": filtered_count})

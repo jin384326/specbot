@@ -16,6 +16,10 @@ const state = {
     clauseQuery: "",
     specbotQueryText: "",
     specbotSettings: {},
+    boardScope: {
+      releaseData: "",
+      release: "",
+    },
     specbotResults: [],
     specbotQueryStatus: "",
     notes: [],
@@ -55,9 +59,10 @@ const LOCAL_WORK_TAB_ID = typeof crypto !== "undefined" && crypto.randomUUID ? c
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
   elements.specbotQuery = document.getElementById("specbot-query");
-  elements.runSpecbotQuery = document.getElementById("run-specbot-query");
+  elements.specbotDepthOptions = [...document.querySelectorAll("input[name='specbot-depth']")];
   elements.specbotSpinner = document.getElementById("specbot-spinner");
   elements.runSpecbotLabel = document.getElementById("run-specbot-label");
+  elements.specbotQueryStatus = document.getElementById("specbot-query-status");
   elements.openSpecbotSettings = document.getElementById("open-specbot-settings");
   elements.specbotResultList = document.getElementById("specbot-result-list");
   elements.clearSpecbotResults = document.getElementById("clear-specbot-results");
@@ -143,14 +148,34 @@ async function loadConfig() {
   applySpecbotSettingsToForm();
 }
 
+function getBoardScope() {
+  return {
+    releaseData: String(state.ui.boardScope?.releaseData || "").trim(),
+    release: String(state.ui.boardScope?.release || "").trim(),
+  };
+}
+
+function setBoardScope(scope = {}) {
+  state.ui.boardScope = {
+    releaseData: String(scope.releaseData || "").trim(),
+    release: String(scope.release || "").trim(),
+  };
+  persistSessionState();
+}
+
 async function refreshDocuments(options = {}) {
   if (!beginBusy("문서 검색 중입니다.", { ...options, allowDuringSpecbotQuery: true })) {
     return;
   }
   const query = encodeURIComponent(elements.documentSearch.value.trim());
   const clauseQuery = encodeURIComponent((elements.clauseSearch?.value || "").trim());
+  const scope = getBoardScope();
+  const releaseData = encodeURIComponent(scope.releaseData);
+  const release = encodeURIComponent(scope.release);
   try {
-    const response = await apiGet(`/api/clause-browser/documents?query=${query}&clauseQuery=${clauseQuery}`);
+    const response = await apiGet(
+      `/api/clause-browser/documents?query=${query}&clauseQuery=${clauseQuery}&releaseData=${releaseData}&release=${release}`
+    );
     state.documents = response.data.items;
     renderDocuments();
     if (state.ui.isSpecbotSettingsOpen) {
@@ -287,7 +312,7 @@ function applySpecbotSettingsToForm() {
   elements.settingBaseUrl.value = settings.baseUrl || "";
   elements.settingConfigBaseUrl.value = settings.configBaseUrl || "";
   elements.settingLimit.value = settings.limit ?? 4;
-  elements.settingIterations.value = settings.iterations ?? 2;
+  elements.settingIterations.value = settings.iterations ?? 1;
   elements.settingNextIterationLimit.value = settings.nextIterationLimit ?? 2;
   elements.settingFollowupMode.value = settings.followupMode || "sentence-summary";
   elements.settingSummary.value = settings.summary || "short";
@@ -300,15 +325,17 @@ function applySpecbotSettingsToForm() {
   elements.settingExcludeClauses.value = Array.isArray(settings.excludeClauses)
     ? settings.excludeClauses.map((item) => `${item.specNo}:${item.clauseId}`).join("\n")
     : "";
+  applySpecbotDepthSelection(getSpecbotDepthFromSettings(settings));
 }
 
 function saveSpecbotSettings() {
   const rejectedClauses = getRejectedSpecbotClauses();
+  const queryDepth = getSelectedSpecbotDepth();
   state.ui.specbotSettings = {
     baseUrl: elements.settingBaseUrl.value.trim(),
     configBaseUrl: elements.settingConfigBaseUrl.value.trim(),
     limit: Number(elements.settingLimit.value),
-    iterations: Number(elements.settingIterations.value),
+    iterations: getIterationsForDepth(queryDepth),
     nextIterationLimit: Number(elements.settingNextIterationLimit.value),
     followupMode: elements.settingFollowupMode.value,
     summary: elements.settingSummary.value.trim(),
@@ -321,6 +348,7 @@ function saveSpecbotSettings() {
     excludeSpecs: parseSpecbotExcludeSpecs(elements.settingExcludeSpecs.value),
     excludeClauses: parseSpecbotExcludeClauses(elements.settingExcludeClauses.value),
     rejectedClauses,
+    queryDepth,
   };
   pruneSpecbotResultsByCurrentExclusions();
   persistSessionState();
@@ -388,8 +416,11 @@ async function ensureClauseCatalog(specNo) {
     return state.clauseCatalogBySpec[specNo];
   }
 
+  const scope = getBoardScope();
+  const releaseData = encodeURIComponent(scope.releaseData);
+  const release = encodeURIComponent(scope.release);
   const response = await apiGet(
-    `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses?includeAll=true&limit=5000`
+    `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses?includeAll=true&limit=5000&releaseData=${releaseData}&release=${release}`
   );
   const items = response.data.items;
   const byId = {};
@@ -535,8 +566,11 @@ async function loadClauseWithSpec(specNo, clauseId) {
   }
 
   try {
+    const scope = getBoardScope();
+    const releaseData = encodeURIComponent(scope.releaseData);
+    const release = encodeURIComponent(scope.release);
     const response = await apiGet(
-      `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses/${encodeURIComponent(clauseId)}/subtree`
+      `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses/${encodeURIComponent(clauseId)}/subtree?releaseData=${releaseData}&release=${release}`
     );
     const subtree = response.data;
     expandAll(subtree);
@@ -1158,7 +1192,7 @@ function focusNode(key) {
   renderSelectedClauseList();
   window.setTimeout(() => {
     const element = document.getElementById(`node-${escapeKey(key)}`);
-    element?.scrollIntoView({ behavior: "smooth", block: "center" });
+    element?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, 0);
 }
 
@@ -1854,12 +1888,24 @@ async function runSpecbotQuery() {
   setSpecbotQueryLoading(true);
   try {
     const exclusions = buildSpecbotExclusions();
+    const queryDepth = getSelectedSpecbotDepth();
     state.ui.specbotResults = [];
+    state.ui.specbotSettings = {
+      ...state.ui.specbotSettings,
+      iterations: getIterationsForDepth(queryDepth),
+      queryDepth,
+    };
     persistSessionState();
     renderSpecbotResults();
     const response = await streamSpecbotQuery({
       query,
-      settings: state.ui.specbotSettings,
+      releaseData: getBoardScope().releaseData,
+      release: getBoardScope().release,
+      settings: {
+        ...state.ui.specbotSettings,
+        iterations: getIterationsForDepth(queryDepth),
+        queryDepth,
+      },
       excludeSpecs: exclusions.excludeSpecs,
       excludeClauses: exclusions.excludeClauses,
     });
@@ -2085,11 +2131,47 @@ function setAllSpecbotDocuments(checked) {
 
 function setSpecbotQueryLoading(isLoading) {
   const queryStatus = String(state.ui.specbotQueryStatus || "").trim();
-  const label = !isLoading ? "수행" : queryStatus === "queued" ? "대기 중" : queryStatus === "started" ? "실행 중" : "수행 중";
-  elements.runSpecbotQuery.disabled = isLoading;
+  const label = !isLoading ? "" : queryStatus === "queued" ? "대기 중" : queryStatus === "started" ? "실행 중" : "수행 중";
   elements.specbotQuery.disabled = isLoading;
   elements.specbotSpinner.classList.toggle("hidden", !isLoading);
   elements.runSpecbotLabel.textContent = label;
+  elements.specbotQueryStatus.classList.toggle("hidden", !isLoading);
+}
+
+function getIterationsForDepth(depth) {
+  if (depth === "short") {
+    return 0;
+  }
+  if (depth === "long") {
+    return 2;
+  }
+  return 1;
+}
+
+function getSpecbotDepthFromSettings(settings = {}) {
+  if (settings.queryDepth === "short" || settings.queryDepth === "medium" || settings.queryDepth === "long") {
+    return settings.queryDepth;
+  }
+  const iterations = Number(settings.iterations);
+  if (iterations <= 0) {
+    return "short";
+  }
+  if (iterations >= 2) {
+    return "long";
+  }
+  return "medium";
+}
+
+function applySpecbotDepthSelection(depth) {
+  const normalizedDepth = depth === "short" || depth === "long" ? depth : "medium";
+  (elements.specbotDepthOptions || []).forEach((input) => {
+    input.checked = input.value === normalizedDepth;
+  });
+}
+
+function getSelectedSpecbotDepth() {
+  const selected = (elements.specbotDepthOptions || []).find((input) => input.checked);
+  return selected?.value === "short" || selected?.value === "long" ? selected.value : "medium";
 }
 
 function addRejectedSpecbotClause(specNo, clauseId) {
@@ -2244,7 +2326,6 @@ function updateBusyUi() {
     elements.exportButton.disabled = isBusy;
   }
   elements.openSpecbotSettings.disabled = isBusy;
-  elements.runSpecbotQuery.disabled = isBusy;
   elements.specbotQuery.disabled = isBusy;
 }
 
@@ -2252,6 +2333,13 @@ function setMessage(text, isError) {
   const message = formatErrorMessage(text);
   state.ui.message = { text: message, isError };
   elements.messageBar.innerHTML = message ? `<div class="message ${isError ? "error" : ""}">${escapeHtml(message)}</div>` : "";
+}
+
+function clearMessage() {
+  state.ui.message = null;
+  if (elements.messageBar) {
+    elements.messageBar.innerHTML = "";
+  }
 }
 
 async function apiGet(url) {
@@ -2774,6 +2862,7 @@ function getWorkspaceSnapshot() {
     clauseQuery: state.ui.clauseQuery,
     specbotQueryText: state.ui.specbotQueryText || "",
     specbotSettings: state.ui.specbotSettings,
+    boardScope: state.ui.boardScope,
     specbotResults: state.ui.specbotResults,
     notes: state.ui.notes || [],
   };
@@ -2804,6 +2893,12 @@ function restoreSessionState() {
         rejectedClauses: getNormalizedRejectedClauses(payload.specbotSettings.rejectedClauses),
       };
     }
+    if (payload.boardScope && typeof payload.boardScope === "object") {
+      state.ui.boardScope = {
+        releaseData: String(payload.boardScope.releaseData || "").trim(),
+        release: String(payload.boardScope.release || "").trim(),
+      };
+    }
     state.ui.specbotResults = Array.isArray(payload.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
   } catch (_error) {
     // Ignore malformed saved state.
@@ -2822,6 +2917,10 @@ async function applyWorkspaceSnapshot(payload) {
   state.ui.specbotQueryText = payload?.specbotQueryText || "";
   state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
   state.ui.specbotResults = Array.isArray(payload?.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
+  state.ui.boardScope = {
+    releaseData: String(payload?.boardScope?.releaseData || "").trim(),
+    release: String(payload?.boardScope?.release || "").trim(),
+  };
   if (payload?.specbotSettings && typeof payload.specbotSettings === "object") {
     state.ui.specbotSettings = {
       ...payload.specbotSettings,
@@ -2861,6 +2960,7 @@ async function resetWorkspace() {
     notes: [],
     specbotResults: [],
     specbotSettings: state.ui.specbotSettings,
+    boardScope: state.ui.boardScope,
   });
 }
 
@@ -2870,6 +2970,8 @@ export {
   bindElements,
   bindGlobalEvents,
   loadConfig,
+  getBoardScope,
+  setBoardScope,
   refreshDocuments,
   restoreSessionState,
   ensureClauseCatalog,
@@ -2885,6 +2987,7 @@ export {
   clearRejectedSpecbotClauses,
   exportDocx,
   openNoticeModal,
+  clearMessage,
   runSelectionAction,
   getWorkspaceSnapshot,
   applyWorkspaceSnapshot,

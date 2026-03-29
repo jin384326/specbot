@@ -32,6 +32,16 @@ CLAUSE_SPEC_PATTERN = re.compile(
 logger = logging.getLogger(__name__)
 
 
+def _safe_prompt_preview(messages: list[tuple[str, str]], limit: int = 2000) -> str:
+    parts: list[str] = []
+    for role, content in messages:
+        text = str(content)
+        if len(text) > limit:
+            text = f"{text[:limit]}...(truncated)"
+        parts.append(f"[{role}]\n{text}")
+    return "\n\n".join(parts)
+
+
 class RetrievalCancelledError(RuntimeError):
     """Raised when an iterative retrieval request is cancelled by the client."""
 
@@ -72,6 +82,8 @@ class StageSearchBackend(Protocol):
         limit: int = 20,
         stage_filters: list[str] | None = None,
         spec_filters: list[str] | None = None,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
     ) -> list[MultiHopSearchHit]:
         ...
 
@@ -205,6 +217,26 @@ class ChatOpenAIRelevanceJudge:
         self._keyword_llm = self._llm.with_structured_output(KeywordExtraction, method="json_schema")
         self._summary_llm = self._llm.with_structured_output(SummaryDecision, method="json_schema")
 
+    def _log_structured_output_failure(
+        self,
+        *,
+        label: str,
+        prompt_messages: list[tuple[str, str]],
+        exc: Exception,
+    ) -> None:
+        logger.exception(
+            "Structured output failed label=%s error=%s prompt=%s",
+            label,
+            exc,
+            _safe_prompt_preview(prompt_messages),
+        )
+        try:
+            raw_response = self._llm.invoke(prompt_messages)
+            raw_content = getattr(raw_response, "content", raw_response)
+            logger.error("Structured output raw response label=%s raw=%r", label, raw_content)
+        except Exception as raw_exc:
+            logger.exception("Structured output raw response capture failed label=%s error=%s", label, raw_exc)
+
     def judge_relevance(self, query_text: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self._judge_relevance(query_text, candidates, should_cancel=None, on_relevance_decision=None)
 
@@ -245,6 +277,11 @@ class ChatOpenAIRelevanceJudge:
             try:
                 response = self._relevance_llm.invoke(prompt_messages)
             except Exception as exc:
+                self._log_structured_output_failure(
+                    label=f"relevance:{candidate.get('doc_id', '')}",
+                    prompt_messages=prompt_messages,
+                    exc=exc,
+                )
                 raise RuntimeError(
                     f"ChatOpenAI relevance judgement failed for query '{query_text}' and doc '{candidate.get('doc_id', '')}': {exc}"
                 ) from exc
@@ -318,6 +355,11 @@ class ChatOpenAIRelevanceJudge:
             try:
                 response = self._followup_llm().invoke(prompt_messages)
             except Exception as exc:
+                self._log_structured_output_failure(
+                    label=f"followup:{candidate.get('doc_id', '')}:{self.extraction_mode}",
+                    prompt_messages=prompt_messages,
+                    exc=exc,
+                )
                 raise RuntimeError(
                     f"ChatOpenAI keyword extraction failed for query '{query_text}' and doc '{candidate.get('doc_id', '')}': {exc}"
                 ) from exc
@@ -377,6 +419,8 @@ class IterativeLLMRetriever:
         limit: int = 4,
         iterations: int = 1,
         next_iteration_limit: int = 2,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         on_iteration_complete: Callable[[dict[str, Any]], None] | None = None,
         on_relevant_result: Callable[[dict[str, Any]], None] | None = None,
@@ -414,8 +458,21 @@ class IterativeLLMRetriever:
                 iteration_limit,
             )
             hits = [
-                *self._search_iteration(search_terms, active_stages, iteration_limit, should_cancel=should_cancel),
-                *self._resolve_clause_targets(pending_clause_targets, iteration_limit, should_cancel=should_cancel),
+                *self._search_iteration(
+                    search_terms,
+                    active_stages,
+                    iteration_limit,
+                    release_filters=release_filters,
+                    release_data_filters=release_data_filters,
+                    should_cancel=should_cancel,
+                ),
+                *self._resolve_clause_targets(
+                    pending_clause_targets,
+                    iteration_limit,
+                    release_filters=release_filters,
+                    release_data_filters=release_data_filters,
+                    should_cancel=should_cancel,
+                ),
             ]
             pending_clause_targets = []
             if not hits:
@@ -584,6 +641,8 @@ class IterativeLLMRetriever:
         search_terms: list[str],
         stage_buckets: list[str],
         limit: int,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         aggregated: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -596,7 +655,16 @@ class IterativeLLMRetriever:
                     stage_bucket,
                     limit,
                 )
-                hits = self.backend.search([search_term], limit=limit, stage_filters=[stage_bucket])
+                search_kwargs: dict[str, Any] = {
+                    "limit": limit,
+                    "stage_filters": [stage_bucket],
+                }
+                search_signature = inspect.signature(self.backend.search)
+                if "release_filters" in search_signature.parameters:
+                    search_kwargs["release_filters"] = release_filters
+                if "release_data_filters" in search_signature.parameters:
+                    search_kwargs["release_data_filters"] = release_data_filters
+                hits = self.backend.search([search_term], **search_kwargs)
                 logger.debug(
                     "Search complete search_term=%r stage_bucket=%s hit_count=%d doc_ids=%s",
                     search_term,
@@ -739,6 +807,8 @@ class IterativeLLMRetriever:
         self,
         clause_targets: list[dict[str, str]],
         limit: int,
+        release_filters: list[str] | None = None,
+        release_data_filters: list[str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> list[dict[str, Any]]:
         if not clause_targets:
@@ -750,7 +820,13 @@ class IterativeLLMRetriever:
         resolved: list[dict[str, Any]] = []
         for target in clause_targets:
             self._check_cancelled(should_cancel)
-            hits = lookup_clause(target["spec_no"], target["clause_id"], limit=limit)
+            lookup_kwargs: dict[str, Any] = {"limit": limit}
+            lookup_signature = inspect.signature(lookup_clause)
+            if "release_filters" in lookup_signature.parameters:
+                lookup_kwargs["release_filters"] = release_filters
+            if "release_data_filters" in lookup_signature.parameters:
+                lookup_kwargs["release_data_filters"] = release_data_filters
+            hits = lookup_clause(target["spec_no"], target["clause_id"], **lookup_kwargs)
             logger.debug("Resolved clause target spec_no=%s clause_id=%s hit_count=%d", target["spec_no"], target["clause_id"], len(hits))
             for hit in hits:
                 resolved.append(

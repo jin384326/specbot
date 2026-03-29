@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +48,9 @@ class ClauseBrowserSettings:
 
 
 def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=None, llm_service=None) -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     active_settings = settings or load_settings()
-    repository = ClauseRepository(active_settings.corpus_path)
+    repository = ClauseRepository(active_settings.corpus_path, load_workers=1)
     board_repository = BoardPostRepository(active_settings.board_storage_path)
     board_locks = BoardLockManager(ttl_seconds=active_settings.board_lock_ttl_seconds)
     export_service = DocxExportService(
@@ -82,6 +84,7 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
             config=ClauseBrowserConfig(
                 languages=[{"code": code, "label": label} for code, label in active_settings.languages],
                 actions=active_llm_service.available_actions(),
+                release_scopes=repository.list_release_scopes(),
                 specbot_defaults=active_specbot_service.defaults.to_dict(),
                 query_api_url=active_settings.specbot_query_api_url,
             ),
@@ -100,7 +103,10 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
 
     @app.get("/health", include_in_schema=False)
     def health() -> dict[str, object]:
-        return {"ok": True, "corpusPath": str(active_settings.corpus_path)}
+        return {
+            "ok": True,
+            "corpusPath": str(active_settings.corpus_path),
+        }
 
     return app
 

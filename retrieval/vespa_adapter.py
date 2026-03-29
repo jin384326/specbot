@@ -55,7 +55,12 @@ def expand_spec_hint_terms(spec_terms: list[str]) -> list[str]:
     return expanded
 
 
-def build_vespa_query(normalized_query: NormalizedQuery, hits: int = 10) -> VespaQueryRequest:
+def build_vespa_query(
+    normalized_query: NormalizedQuery,
+    hits: int = 10,
+    release_filters: list[str] | None = None,
+    release_data_filters: list[str] | None = None,
+) -> VespaQueryRequest:
     text_terms = normalized_query.features.get("tokens", [])[:6]
     phrase_terms = [term for term in normalized_query.candidate_anchors if len(term.split()) >= 4][:2]
     if not phrase_terms and len(normalized_query.normalized_query.split()) >= 4:
@@ -127,6 +132,10 @@ def build_vespa_query(normalized_query: NormalizedQuery, hits: int = 10) -> Vesp
         where_clause = where_clause + " and (" + build_contains_expression("spec_no", spec_terms) + ")"
     if stage_filters:
         where_clause = where_clause + " and (" + build_contains_expression("stage_hint", stage_filters) + ")"
+    if release_filters:
+        where_clause = where_clause + " and (" + build_contains_expression("release", release_filters) + ")"
+    if release_data_filters:
+        where_clause = where_clause + " and (" + build_contains_expression("release_data", release_data_filters) + ")"
 
     additional_params: dict[str, Any] = {"query": normalized_query.normalized_query}
     if normalized_query.query_vector:

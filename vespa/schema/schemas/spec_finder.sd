@@ -22,10 +22,14 @@ schema spec_finder {
         }
         field release type string {
             indexing: summary | attribute
+            attribute: fast-search
+            rank: filter
             match: exact
         }
         field release_data type string {
             indexing: summary | attribute
+            attribute: fast-search
+            rank: filter
             match: exact
         }
         field series type string {

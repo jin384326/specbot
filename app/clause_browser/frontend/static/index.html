@@ -36,9 +36,45 @@
         </section>
       </section>
 
+      <div id="board-create-modal" class="modal-shell hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-action="close-board-create-modal"></div>
+        <div class="modal-card compact-modal-card">
+          <header class="modal-header">
+            <div>
+              <p class="eyebrow">Specbot Board</p>
+              <h2>게시글 작성</h2>
+            </div>
+            <button class="ghost" data-action="close-board-create-modal">닫기</button>
+          </header>
+          <div class="compact-modal-body">
+            <label class="field">
+              <span>Spec Date</span>
+              <select id="board-create-release-data"></select>
+            </label>
+            <label class="field">
+              <span>Release</span>
+              <select id="board-create-release"></select>
+            </label>
+          </div>
+          <div class="compact-modal-actions">
+            <button class="ghost" data-action="close-board-create-modal">취소</button>
+            <button id="board-create-confirm" class="primary">확인</button>
+          </div>
+        </div>
+      </div>
+
       <section id="editor-screen" class="editor-screen hidden">
         <header class="topbar editor-screen-topbar">
-          <div class="editor-topbar-spacer" aria-hidden="true"></div>
+          <div class="editor-scope-row editor-scope-row-inline">
+            <label class="field">
+              <span>Spec Date</span>
+              <select id="board-release-data"></select>
+            </label>
+            <label class="field">
+              <span>Release</span>
+              <select id="board-release"></select>
+            </label>
+          </div>
           <div class="topbar-actions">
             <button id="board-back-to-list" class="ghost">목록</button>
             <button id="export-button" class="ghost hidden">export</button>
@@ -81,16 +117,38 @@
 
           <aside class="panel right-panel">
             <section class="panel-section">
-              <label class="field">
+              <div class="section-heading specbot-query-heading">
                 <span>SpecBot Query</span>
+                <button
+                  id="open-specbot-settings"
+                  class="ghost icon-button"
+                  type="button"
+                  title="설정"
+                  aria-label="설정"
+                >⚙</button>
+              </div>
+              <label class="field">
                 <input id="specbot-query" type="search" placeholder="예: End to End Redundant Paths" />
               </label>
+              <div class="specbot-depth-group" role="radiogroup" aria-label="Query depth">
+                <label class="specbot-depth-option">
+                  <input type="radio" name="specbot-depth" value="short" />
+                  <span>short</span>
+                </label>
+                <label class="specbot-depth-option">
+                  <input type="radio" name="specbot-depth" value="medium" checked />
+                  <span>medium</span>
+                </label>
+                <label class="specbot-depth-option">
+                  <input type="radio" name="specbot-depth" value="long" />
+                  <span>long</span>
+                </label>
+              </div>
               <div class="topbar-actions right-panel-actions">
-                <button id="run-specbot-query">
+                <div id="specbot-query-status" class="specbot-query-status hidden" aria-live="polite">
                   <span id="specbot-spinner" class="spinner hidden" aria-hidden="true"></span>
-                  <span id="run-specbot-label">수행</span>
-                </button>
-                <button id="open-specbot-settings" class="ghost">설정</button>
+                  <span id="run-specbot-label"></span>
+                </div>
               </div>
             </section>
             <section class="panel-section">

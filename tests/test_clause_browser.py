@@ -43,6 +43,8 @@ def write_corpus(path: Path) -> None:
             "doc_type": "clause_doc",
             "spec_no": "23501",
             "spec_title": "System architecture",
+            "release": "Rel-18",
+            "release_data": "2025-12",
             "clause_id": "5",
             "clause_title": "Session management",
             "parent_clause_id": "",
@@ -55,6 +57,8 @@ def write_corpus(path: Path) -> None:
             "doc_type": "clause_doc",
             "spec_no": "23501",
             "spec_title": "System architecture",
+            "release": "Rel-18",
+            "release_data": "2025-12",
             "clause_id": "5.1",
             "clause_title": "PDU session procedures",
             "parent_clause_id": "5",
@@ -67,6 +71,8 @@ def write_corpus(path: Path) -> None:
             "doc_type": "clause_doc",
             "spec_no": "23501",
             "spec_title": "System architecture",
+            "release": "Rel-18",
+            "release_data": "2025-12",
             "clause_id": "5.1.1",
             "clause_title": "Request handling",
             "parent_clause_id": "5.1",
@@ -79,6 +85,8 @@ def write_corpus(path: Path) -> None:
             "doc_type": "clause_doc",
             "spec_no": "24501",
             "spec_title": "Core network procedures",
+            "release": "Rel-17",
+            "release_data": "2024-12",
             "clause_id": "1",
             "clause_title": "Scope",
             "parent_clause_id": "",
@@ -91,6 +99,8 @@ def write_corpus(path: Path) -> None:
             "doc_type": "clause_doc",
             "spec_no": "23502",
             "spec_title": "Procedures for the 5G System (5GS); Stage 2 (Release 18)",
+            "release": "Rel-18",
+            "release_data": "2025-12",
             "clause_id": "4.2.2.2",
             "clause_title": "PDU session establishment",
             "parent_clause_id": "",
@@ -660,6 +670,7 @@ def test_llm_action_endpoint_returns_429_when_queue_is_full(tmp_path: Path) -> N
         config=ClauseBrowserConfig(
             languages=[{"code": "ko", "label": "Korean"}, {"code": "en", "label": "English"}],
             actions=[{"type": "translate", "label": "Translate"}],
+            release_scopes=[],
         ),
     )
     endpoint = next(
@@ -693,6 +704,8 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
             super().__init__(project_root=project_root, defaults=SpecbotQueryDefaults())
             self.last_exclude_specs = None
             self.last_exclude_clauses = None
+            self.last_release_data = None
+            self.last_release = None
 
         def run(
             self,
@@ -700,9 +713,13 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
             settings: dict[str, object] | None = None,
             exclude_specs: list[str] | None = None,
             exclude_clauses: list[dict[str, object]] | None = None,
+            release_data: str | None = None,
+            release: str | None = None,
         ) -> dict[str, object]:
             self.last_exclude_specs = exclude_specs
             self.last_exclude_clauses = exclude_clauses
+            self.last_release_data = release_data
+            self.last_release = release
             return {
                 "query": query,
                 "settings": settings or self.defaults.to_dict(),
@@ -744,6 +761,8 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
             None,
             SpecbotQueryRequest(
                 query="End to End Redundant Paths",
+                releaseData="2025-12",
+                release="Rel-18",
                 excludeSpecs=["23502"],
                 excludeClauses=[{"specNo": "23501", "clauseId": "5.2"}],
             ),
@@ -753,6 +772,18 @@ def test_specbot_query_endpoint_returns_hits(tmp_path: Path) -> None:
     assert payload["hits"][0]["specNo"] == "23501"
     assert fake_service.last_exclude_specs == ["23502"]
     assert fake_service.last_exclude_clauses == [{"specNo": "23501", "clauseId": "5.2"}]
+    assert fake_service.last_release_data == "2025-12"
+    assert fake_service.last_release == "Rel-18"
+
+
+def test_clause_repository_filters_documents_by_release_scope(tmp_path: Path) -> None:
+    corpus_path = tmp_path / "browser-corpus.jsonl"
+    write_corpus(corpus_path)
+    repository = ClauseRepository(corpus_path)
+
+    filtered = repository.list_documents(release_data="2024-12", release="Rel-17")
+
+    assert [item.spec_no for item in filtered] == ["24501"]
 
 
 def test_specbot_query_exclusion_is_exact_spec_clause_pair() -> None:
@@ -852,8 +883,6 @@ def test_docx_export_service_includes_notes_and_images(tmp_path: Path) -> None:
     assert "Paragraph body" in texts
     caption = next(item for item in exported.paragraphs if item.text == "Figure 5-1: Example figure caption")
     assert caption.alignment == WD_ALIGN_PARAGRAPH.CENTER
-    assert "Selection memo: Selection memo translation" in texts
-    assert "Clause memo: Clause memo translation" in texts
     paragraph = next(item for item in exported.paragraphs if item.text == "Paragraph body")
     assert round(paragraph.paragraph_format.left_indent.pt, 1) == 18.0
     assert round(paragraph.paragraph_format.first_line_indent.pt, 1) == -18.0

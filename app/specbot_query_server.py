@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import json
@@ -27,11 +28,14 @@ from retrieval.vespa_multi_hop_backend import VespaMultiHopBackend
 from vespa.http_adapter import VespaEndpoint
 
 
+logger = logging.getLogger(__name__)
+
+
 class SpecbotSettingsPayload(BaseModel):
     baseUrl: str = Field(min_length=1, max_length=200)
     configBaseUrl: str = Field(default="", max_length=200)
     limit: int = Field(default=4, ge=1, le=20)
-    iterations: int = Field(default=2, ge=1, le=10)
+    iterations: int = Field(default=1, ge=0, le=10)
     nextIterationLimit: int = Field(default=2, ge=1, le=20)
     followupMode: str = Field(default="sentence-summary", pattern="^(keyword|sentence-summary)$")
     summary: str = Field(default="short", min_length=1, max_length=50)
@@ -49,6 +53,8 @@ class ClauseExclusionPayload(BaseModel):
 
 class SpecbotQueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=500)
+    releaseData: str | None = Field(default=None, max_length=32)
+    release: str | None = Field(default=None, max_length=32)
     settings: SpecbotSettingsPayload | None = None
     excludeSpecs: list[str] = Field(default_factory=list)
     excludeClauses: list[ClauseExclusionPayload] = Field(default_factory=list)
@@ -217,11 +223,29 @@ class PersistentSpecbotQueryEngine:
         overrides: dict[str, Any] | None = None,
         exclude_specs: list[str] | None = None,
         exclude_clauses: list[dict[str, Any]] | None = None,
+        release_data: str | None = None,
+        release: str | None = None,
         should_cancel=None,
         on_iteration_complete=None,
         on_relevant_result=None,
     ) -> dict[str, Any]:
         effective = self._merge_settings(overrides or {})
+        requested_iterations = max(0, int(effective["iterations"]))
+        total_iterations = requested_iterations + 1
+        logger.info(
+            "SpecBot query run start query=%r iterations=%s total_iterations=%s next_iteration_limit=%s followup_mode=%s summary=%s query_depth=%s release_data=%s release=%s exclude_specs=%d exclude_clauses=%d",
+            query,
+            requested_iterations,
+            total_iterations,
+            effective.get("nextIterationLimit"),
+            effective.get("followupMode"),
+            effective.get("summary"),
+            effective.get("queryDepth"),
+            release_data or "",
+            release or "",
+            len(exclude_specs or []),
+            len(exclude_clauses or []),
+        )
         registry = self._get_registry(str(effective["registry"]))
         embedding_provider = self._get_embedding_provider(
             local_model_dir=str(effective["localModelDir"]),
@@ -250,11 +274,24 @@ class PersistentSpecbotQueryEngine:
         )
         retriever = IterativeLLMRetriever(backend=backend, evaluator=self._judge)
         self._judge.extraction_mode = str(effective.get("followupMode") or "sentence-summary")
+        scoped_registry = self._resolve_scoped_registry(
+            registry_path=str(effective["registry"]),
+            release_data=release_data,
+            release=release,
+        )
+        if scoped_registry is not None:
+            registry = self._get_registry(str(scoped_registry))
+            backend.registry = registry
+            logger.info("SpecBot query using scoped registry path=%s", scoped_registry)
+        else:
+            logger.info("SpecBot query using global registry path=%s", effective["registry"])
         result = retriever.run(
             query,
             limit=int(effective["limit"]),
-            iterations=int(effective["iterations"]),
+            iterations=total_iterations,
             next_iteration_limit=int(effective["nextIterationLimit"]),
+            release_filters=[release] if release else None,
+            release_data_filters=[release_data] if release_data else None,
             should_cancel=should_cancel,
             on_iteration_complete=on_iteration_complete,
             on_relevant_result=on_relevant_result,
@@ -263,6 +300,12 @@ class PersistentSpecbotQueryEngine:
             self._extract_hits(result),
             exclude_specs=exclude_specs or [],
             exclude_clauses=exclude_clauses or [],
+        )
+        logger.info(
+            "SpecBot query run complete query=%r relevant_documents=%d filtered_hits=%d",
+            query,
+            len(result.get("relevant_documents", []) or []),
+            len(filtered_hits),
         )
         return {
             "query": query,
@@ -319,6 +362,27 @@ class PersistentSpecbotQueryEngine:
         merged["registry"] = str(self._resolve_path(str(merged["registry"])))
         merged["localModelDir"] = str(self._resolve_path(str(merged["localModelDir"])))
         return merged
+
+    def _resolve_scoped_registry(self, *, registry_path: str, release_data: str | None, release: str | None) -> Path | None:
+        if not release_data or not release:
+            return None
+        registry_file = Path(registry_path)
+        candidates: list[Path] = [
+            self._settings.project_root / "artifacts" / "spec_query_registries" / release_data / release / "spec_query_registry.json",
+            registry_file.parent / "spec_query_registries" / release_data / release / "spec_query_registry.json",
+            registry_file.parent.parent / release_data / release / "spec_query_registry.json",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        logger.info(
+            "SpecBot query scoped registry not found release_data=%s release=%s registry_path=%s tried=%s",
+            release_data,
+            release,
+            registry_path,
+            [str(path) for path in candidates],
+        )
+        return None
 
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
@@ -392,6 +456,7 @@ class PersistentSpecbotQueryEngine:
 
 
 def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     active_settings = settings or load_settings()
     engine = PersistentSpecbotQueryEngine(active_settings)
     llm_service = LLMActionService(
@@ -535,6 +600,8 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
                 payload.settings.model_dump(mode="json") if payload.settings else None,
                 payload.excludeSpecs,
                 [item.model_dump(mode="json") for item in payload.excludeClauses],
+                payload.releaseData,
+                payload.release,
                 cancel_event.is_set,
                 should_cancel=cancel_event.is_set,
             )
@@ -613,6 +680,8 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
                     payload.settings.model_dump(mode="json") if payload.settings else None,
                     payload.excludeSpecs,
                     [item.model_dump(mode="json") for item in payload.excludeClauses],
+                    payload.releaseData,
+                    payload.release,
                     cancel_event.is_set,
                     on_status_change=on_task_status_change,
                     on_iteration_complete=on_iteration_complete,
@@ -665,7 +734,7 @@ def load_settings() -> SpecbotQueryServerSettings:
         base_url=os.environ.get("SPECBOT_QUERY_BASE_URL", "http://localhost:8080").strip() or "http://localhost:8080",
         config_base_url=os.environ.get("SPECBOT_QUERY_CONFIG_BASE_URL", "http://localhost:19071").strip() or "http://localhost:19071",
         limit=int(os.environ.get("SPECBOT_QUERY_LIMIT", "4")),
-        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "2")),
+        iterations=int(os.environ.get("SPECBOT_QUERY_ITERATIONS", "1")),
         next_iteration_limit=int(os.environ.get("SPECBOT_QUERY_NEXT_ITERATION_LIMIT", "2")),
         summary=os.environ.get("SPECBOT_QUERY_SUMMARY", "short").strip() or "short",
         registry=os.environ.get("SPECBOT_QUERY_REGISTRY", "./artifacts/spec_query_registry.json").strip() or "./artifacts/spec_query_registry.json",

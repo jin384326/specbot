@@ -14,6 +14,8 @@ class BoardPost:
     post_id: str
     title: str
     body: str
+    release_data: str
+    release: str
     workspace_state: dict[str, Any]
     created_at: str
     updated_at: str
@@ -23,6 +25,8 @@ class BoardPost:
             "postId": self.post_id,
             "title": self.title,
             "body": self.body,
+            "releaseData": self.release_data,
+            "release": self.release,
             "workspaceState": self.workspace_state,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,

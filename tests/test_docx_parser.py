@@ -61,6 +61,21 @@ def test_clause_heading_parsing(tmp_path: Path) -> None:
     assert clause_docs[1].clause_title == "Architecture"
 
 
+def test_doc_ids_include_release_scope(tmp_path: Path) -> None:
+    source = tmp_path / "2024-12" / "Rel-18" / "23501-test.docx"
+    source.parent.mkdir(parents=True)
+    build_sample_doc(source)
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501", release_data="2024-12", release="Rel-18"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    assert clause_docs[0].doc_id == "2024-12:Rel-18:23501:clause:1"
+    assert clause_docs[1].doc_id == "2024-12:Rel-18:23501:clause:2"
+    passage_docs = [record for record in records if record.doc_type == "passage_doc"]
+    if passage_docs:
+        assert passage_docs[0].doc_id.startswith("2024-12:Rel-18:23501:clause:")
+
+
 def test_table_matrix_and_linearized_text(tmp_path: Path) -> None:
     source = tmp_path / "table.docx"
     build_sample_doc(source)
@@ -242,6 +257,31 @@ def test_parser_treats_h6_style_as_heading_but_not_b1(tmp_path: Path) -> None:
     clause_ids = [record.clause_id for record in records if record.doc_type == "clause_doc"]
     assert "4.11.0a.2.1" in clause_ids
     assert "8a" not in clause_ids
+
+
+def test_parser_skips_front_matter_but_keeps_fallback_headings_after_first_real_clause(tmp_path: Path) -> None:
+    source = tmp_path / "front-matter-and-fallback.docx"
+    doc = Document()
+    doc.styles.add_style("TT", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("Contents", style="TT")
+    doc.add_paragraph("Foreword", style="Heading 1")
+    doc.add_paragraph("Front matter body.")
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    doc.add_paragraph("Scope body.")
+    doc.add_paragraph("Unnumbered operational considerations", style="Heading 2")
+    doc.add_paragraph("Fallback heading body.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="29512"))
+
+    clause_docs = [record for record in records if record.doc_type == "clause_doc"]
+    clause_ids = [record.clause_id for record in clause_docs]
+    assert "front_matter_1" not in clause_ids
+    assert "heading_1" not in clause_ids
+    assert clause_ids[0] == "1"
+    fallback = next(record for record in clause_docs if record.clause_id.startswith("heading_"))
+    assert fallback.clause_title == "Unnumbered operational considerations"
 
 
 def test_parser_restores_relative_heading_numbers_from_parent_prefix(tmp_path: Path) -> None:

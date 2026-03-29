@@ -9,7 +9,6 @@ import {
 } from "../core.js";
 
 export function bindSpecbotFeature() {
-  elements.runSpecbotQuery.addEventListener("click", () => runSpecbotQuery());
   elements.clearSpecbotResults.addEventListener("click", clearSpecbotResults);
   elements.specbotQuery.addEventListener("keydown", async (event) => {
     if (event.key === "Enter") {

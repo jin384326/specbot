@@ -73,6 +73,7 @@ class RichDocxClauseParser:
         active_clause: RenderClauseNode | None = None
         clause_counter = 0
         paragraph_counter = 0
+        seen_structured_clause = False
 
         for block in iter_block_items(document):
             if isinstance(block, Paragraph):
@@ -95,6 +96,8 @@ class RichDocxClauseParser:
                     heading = None
 
                 if heading_level is not None or heading is not None:
+                    if not seen_structured_clause and heading is None:
+                        continue
                     clause_counter += 1
                     paragraph_counter += 1
                     clause_id, clause_title, level = self._resolve_heading(text, heading_level, heading, clause_counter)
@@ -118,6 +121,8 @@ class RichDocxClauseParser:
                         parent.children.append(node)
                     clause_stack.append(node)
                     active_clause = node
+                    if not clause_id.startswith("heading_") and not clause_id.startswith("front_matter_"):
+                        seen_structured_clause = True
                     continue
 
                 if active_clause is None:

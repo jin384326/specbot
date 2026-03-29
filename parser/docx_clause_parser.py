@@ -516,7 +516,14 @@ def infer_spec_title(document: DocxDocument) -> str:
         return core_title
     for paragraph in document.paragraphs:
         text = normalize_whitespace(paragraph.text)
-        if text and not paragraph.style.name.lower().startswith("toc"):
+        style_name = paragraph.style.name if paragraph.style else ""
+        lowered = text.lower()
+        if (
+            text
+            and not style_name.lower().startswith("toc")
+            and lowered not in {"contents", "table of contents", "foreword"}
+            and style_name != "TT"
+        ):
             return text
     return ""
 
@@ -541,11 +548,13 @@ class DocxClauseParser:
         passage_paragraph_limit: int = 4,
         min_passage_chars: int = 350,
         prefix_direct_child_title_from_empty_parent: bool = False,
+        include_fallback_headings: bool = True,
     ) -> None:
         self.passage_char_limit = passage_char_limit
         self.passage_paragraph_limit = passage_paragraph_limit
         self.min_passage_chars = min_passage_chars
         self.prefix_direct_child_title_from_empty_parent = prefix_direct_child_title_from_empty_parent
+        self.include_fallback_headings = include_fallback_headings
 
     def parse(self, docx_path: str | Path, metadata: SpecMetadata | dict[str, Any] | None = None) -> list[DocRecord]:
         path = Path(docx_path)
@@ -560,6 +569,7 @@ class DocxClauseParser:
         table_counter = 0
         clause_counter = 0
         last_text_title = ""
+        seen_structured_clause = False
 
         for block in iter_block_items(document):
             if isinstance(block, Paragraph):
@@ -581,6 +591,8 @@ class DocxClauseParser:
                 if not should_treat_paragraph_as_heading(style_name, text, heading_level, heading):
                     heading = None
                 if heading_level is not None or heading is not None:
+                    if not seen_structured_clause and heading is None:
+                        continue
                     if active_clause is not None:
                         records.extend(self._emit_clause_records(active_clause, spec_metadata))
                     clause_counter += 1
@@ -615,10 +627,14 @@ class DocxClauseParser:
                     )
                     clause_stack.append(active_clause)
                     last_text_title = clause_title
+                    if not clause_id.startswith("heading_") and not clause_id.startswith("front_matter_"):
+                        seen_structured_clause = True
                     continue
 
                 paragraph_counter += 1
                 if active_clause is None:
+                    if not seen_structured_clause:
+                        continue
                     fallback_clause_counter += 1
                     fallback_id = f"front_matter_{fallback_clause_counter}"
                     active_clause = ClauseBuffer(
@@ -640,7 +656,7 @@ class DocxClauseParser:
                 if not matrix:
                     continue
                 table_counter += 1
-                table_id = f"{spec_metadata.spec_no or path.stem}:table:{table_counter}"
+                table_id = f"{self._doc_scope_prefix(spec_metadata)}:table:{table_counter}"
                 table_title = last_text_title or (active_clause.clause_title if active_clause else f"Table {table_counter}")
                 if (active_clause and active_clause.excluded) or "change history" in normalize_whitespace(table_title).lower():
                     continue
@@ -829,8 +845,20 @@ class DocxClauseParser:
             "version_tag": metadata.version_tag,
         }
 
+    @staticmethod
+    def _doc_scope_prefix(metadata: SpecMetadata) -> str:
+        spec_no = metadata.spec_no or Path(metadata.source_file).stem
+        release_data = (metadata.release_data or "").strip()
+        release = (metadata.release or "").strip()
+        parts = [part for part in [release_data, release, spec_no] if part]
+        return ":".join(parts) if parts else spec_no
+
     def _emit_clause_records(self, clause: ClauseBuffer, metadata: SpecMetadata) -> list[DocRecord]:
         if clause.excluded:
+            return []
+        if not self.include_fallback_headings and (
+            clause.clause_id.startswith("front_matter_") or clause.clause_id.startswith("heading_")
+        ):
             return []
         paragraphs, paragraph_indices = dedupe_consecutive_duplicate_paragraphs(
             clause.paragraphs,
@@ -839,7 +867,7 @@ class DocxClauseParser:
         text = "\n".join(paragraphs).strip()
         if not text:
             return []
-        clause_id_prefix = metadata.spec_no or Path(metadata.source_file).stem
+        clause_id_prefix = self._doc_scope_prefix(metadata)
         common_fields = self._common_fields(metadata, clause, Path(metadata.source_file), clause.order_in_source)
         clause_doc = ClauseDoc(
             **common_fields,
