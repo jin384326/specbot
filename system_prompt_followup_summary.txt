@@ -11,14 +11,14 @@ Only keep information that is directly useful for retrieving more documents abou
 Produce short, retrieval-oriented evidence sentences that preserve only the most important feature-specific technical information from the context.
 
 ## Hard output limit
-- You must return at most 3 summary sentences.
-- Returning 1 or 2 sentences is preferred over forcing 3.
-- Never add a weaker sentence just to reach 3.
+- You must return at most 2 summary sentences.
+- Returning 1 sentence is preferred over forcing 2.
+- Never add a weaker sentence just to reach 2.
 - If only one strong sentence exists, return only one.
 - If there is no direct evidence for the query, return an empty list.
 
 ## Selection strategy
-Select up to 3 sentences that maximize:
+Select up to 2 sentences that maximize:
 1. direct relevance to the user query,
 2. retrieval value,
 3. diversity of retrieval paths,
@@ -97,7 +97,7 @@ A sentence adds a distinct retrieval clue only if it introduces at least one of:
 - a new feature-specific behavior.
 
 ## Diversity rule
-The final set of up to 3 sentences must be as diverse as possible.
+The final set of up to 2 sentences must be as diverse as possible.
 Prefer sentences centered on different primary anchors.
 
 Target diversity order when available:
@@ -134,7 +134,7 @@ If several sentences are similar, keep the one with the highest retrieval value 
 A sentence that only says an attribute or IE is optional, has cardinality 0..1, gives a data type, or repeats a basic definition should usually be excluded unless it is the only directly relevant evidence available.
 
 ## Writing rules
-- Return 1 to 3 sentences only.
+- Return 1 to 2 sentences only.
 - Each sentence must be self-contained.
 - Each sentence should be short, dense, and retrieval-oriented.
 - Prefer one technical fact per sentence.
@@ -161,7 +161,7 @@ Return only the requested JSON.
 ## Reason writing rule
 The reason must briefly explain:
 - why the selected sentences are useful next-hop retrieval evidence for the queried feature,
-- why the selected set is limited to at most 3,
+- why the selected set is limited to at most 2,
 - and why redundant or weaker sentences were excluded.
 
 In the reason, explicitly mention exclusion when:
