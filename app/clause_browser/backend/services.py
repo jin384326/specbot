@@ -16,6 +16,7 @@ from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Inches
 from docx.shared import Pt
 from docx.text.paragraph import Paragraph
@@ -386,9 +387,28 @@ class DocxExportService:
             return
         try:
             document = runs[0]._parent.part.document
-            document.add_comment(runs, text=translation, author="SpecBot", initials="SB")
+            comment = document.add_comment(runs, text=translation, author="SpecBot", initials="SB")
+            DocxExportService._apply_comment_fonts(comment)
         except Exception:
             return
+
+    @staticmethod
+    def _apply_comment_fonts(comment: Any) -> None:
+        preferred_font = "Malgun Gothic"
+        for paragraph in getattr(comment, "paragraphs", []):
+            for run in getattr(paragraph, "runs", []):
+                if not str(getattr(run, "text", "") or "").strip():
+                    continue
+                try:
+                    run.font.name = preferred_font
+                    r_pr = run._element.get_or_add_rPr()
+                    r_fonts = r_pr.get_or_add_rFonts()
+                    r_fonts.set(qn("w:ascii"), preferred_font)
+                    r_fonts.set(qn("w:hAnsi"), preferred_font)
+                    r_fonts.set(qn("w:eastAsia"), preferred_font)
+                    r_fonts.set(qn("w:cs"), preferred_font)
+                except Exception:
+                    continue
 
 
 class LLMActionService:

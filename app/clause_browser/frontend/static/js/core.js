@@ -56,7 +56,9 @@ const LOCAL_WORK_STATE_KEY = "specbot-work-slots-v1";
 const LOCAL_WORK_LOCK_KEY = "specbot-work-slots-lock-v1";
 const LOCAL_WORK_TAB_ID = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const SESSION_PERSIST_DEBOUNCE_MS = 120;
+const TRANSIENT_STATUS_HIDE_DELAY_MS = 2000;
 let sessionPersistTimer = 0;
+let messageHideTimer = 0;
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -115,6 +117,12 @@ function bindElements() {
   elements.settingExcludeSpecs = document.getElementById("setting-exclude-specs");
   elements.settingExcludeClauses = document.getElementById("setting-exclude-clauses");
   elements.saveSpecbotSettings = document.getElementById("save-specbot-settings");
+
+  [elements.specbotQueryStatus, elements.translationStatus, elements.messageBar].forEach((element) => {
+    if (element && element.parentElement !== document.body) {
+      document.body.appendChild(element);
+    }
+  });
 }
 
 function bindGlobalEvents() {
@@ -1601,7 +1609,7 @@ async function runClauseTranslation(clauseKey) {
     window.setTimeout(() => {
       state.ui.translationJob = null;
       renderTranslationStatus();
-    }, 1200);
+    }, TRANSIENT_STATUS_HIDE_DELAY_MS);
     endBusy();
   }
 }
@@ -2371,13 +2379,30 @@ function updateBusyUi() {
 function setMessage(text, isError) {
   const message = formatErrorMessage(text);
   state.ui.message = { text: message, isError };
+  if (messageHideTimer) {
+    window.clearTimeout(messageHideTimer);
+    messageHideTimer = 0;
+  }
   elements.messageBar.innerHTML = message ? `<div class="message ${isError ? "error" : ""}">${escapeHtml(message)}</div>` : "";
+  elements.messageBar.classList.toggle("has-message", Boolean(message));
+  if (message && !isError) {
+    messageHideTimer = window.setTimeout(() => {
+      if (state.ui.message?.text === message && !state.ui.message?.isError) {
+        clearMessage();
+      }
+    }, TRANSIENT_STATUS_HIDE_DELAY_MS);
+  }
 }
 
 function clearMessage() {
   state.ui.message = null;
+  if (messageHideTimer) {
+    window.clearTimeout(messageHideTimer);
+    messageHideTimer = 0;
+  }
   if (elements.messageBar) {
     elements.messageBar.innerHTML = "";
+    elements.messageBar.classList.remove("has-message");
   }
 }
 
