@@ -460,6 +460,14 @@ def table_to_markdown(matrix: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def table_row_to_markdown(header: list[str], row: list[str]) -> str:
+    matrix: list[list[str]] = []
+    if header:
+        matrix.append(header)
+    matrix.append(row)
+    return table_to_markdown(matrix)
+
+
 def table_to_linearized_text(matrix: list[list[str]], table_title: str = "") -> str:
     parts: list[str] = []
     if table_title:
@@ -474,6 +482,13 @@ def table_to_linearized_text(matrix: list[list[str]], table_title: str = "") -> 
     if len(matrix) == 1:
         parts.append("header: " + "; ".join(cell for cell in header if cell))
     return "\n".join(parts)
+
+
+def row_header_value(header: list[str], row: list[str]) -> str:
+    compact_row = dedupe_duplicate_cell_texts_preserve_order(row)
+    if len(compact_row) <= 1:
+        return ""
+    return row[0] if row else ""
 
 
 def referenced_specs_from_text(text: str) -> list[str]:
@@ -716,9 +731,15 @@ class DocxClauseParser:
                 )
                 records.append(table_doc)
                 for row_index, row in enumerate(matrix[1:], start=1):
-                    row_header = row[0] if row else ""
+                    row_header = row_header_value(header, row)
                     row_cells_compact = dedupe_duplicate_cell_texts_preserve_order(row)
-                    row_text = "; ".join(f"{label}: {cell}" for label, cell in linearized_row_pairs(header, row))
+                    row_pairs = linearized_row_pairs(header, row)
+                    if not row_header and len(row_cells_compact) == 1:
+                        row_text = row_cells_compact[0]
+                    elif row_pairs:
+                        row_text = "; ".join(f"{label}: {cell}" for label, cell in row_pairs)
+                    else:
+                        row_text = "; ".join(cell for cell in row_cells_compact if cell)
                     row_doc = TableRowDoc(
                         **common_fields,
                         doc_id=f"{table_id}:row:{row_index}",
@@ -726,7 +747,7 @@ class DocxClauseParser:
                         table_id=table_id,
                         table_title=table_title,
                         table_raw=matrix,
-                        table_markdown=table_doc.table_markdown,
+                        table_markdown=table_row_to_markdown(header, row),
                         row_index=row_index,
                         row_header=row_header,
                         row_cells=row_cells_compact,

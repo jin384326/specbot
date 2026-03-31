@@ -17,6 +17,7 @@ from parser.docx_clause_parser import (
     remove_redundant_brackets_matching_outside,
     split_relative_clause_heading,
     split_clause_heading,
+    table_row_to_markdown,
     table_to_linearized_text,
 )
 
@@ -85,6 +86,103 @@ def test_table_matrix_and_linearized_text(tmp_path: Path) -> None:
     linearized = table_to_linearized_text(matrix, "Architecture")
     assert "row 1: Parameter: SSC mode; Value: 1" in linearized
     assert "Table Architecture" in linearized
+
+
+def test_table_row_markdown_contains_header_and_single_row_only() -> None:
+    header = ["Parameter", "Value"]
+    row = ["SSC mode", "1"]
+    markdown = table_row_to_markdown(header, row)
+
+    assert "| Parameter | Value |" in markdown
+    assert "| SSC mode | 1 |" in markdown
+    assert "Always-on PDU" not in markdown
+
+
+def test_clause_doc_text_keeps_body_only_when_table_exists_in_same_clause(tmp_path: Path) -> None:
+    source = tmp_path / "mixed-body-table.docx"
+    doc = Document()
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    doc.add_paragraph("Body text before table.")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Mode"
+    table.cell(1, 1).text = "SSC1"
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_doc = next(record for record in records if record.doc_type == "clause_doc")
+    table_doc = next(record for record in records if record.doc_type == "table_doc")
+
+    assert clause_doc.text == "Body text before table."
+    assert "Table Scope" in table_doc.text
+
+
+def test_parser_skips_clause_doc_for_table_only_clause(tmp_path: Path) -> None:
+    source = tmp_path / "table-only-clause.docx"
+    doc = Document()
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Mode"
+    table.cell(1, 1).text = "SSC1"
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    table_doc = next(record for record in records if record.doc_type == "table_doc")
+    row_doc = next(record for record in records if record.doc_type == "table_row_doc")
+
+    assert all(record.doc_type != "clause_doc" for record in records)
+    assert table_doc.clause_id == "1"
+    assert row_doc.clause_id == "1"
+
+
+def test_parser_does_not_emit_table_doc_for_body_only_clause(tmp_path: Path) -> None:
+    source = tmp_path / "body-only-clause.docx"
+    doc = Document()
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    doc.add_paragraph("Body text only.")
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    clause_doc = next(record for record in records if record.doc_type == "clause_doc")
+
+    assert clause_doc.text == "Body text only."
+    assert all(record.doc_type != "table_doc" for record in records)
+    assert all(record.doc_type != "table_row_doc" for record in records)
+
+
+def test_table_row_doc_treats_single_cell_note_row_as_body_not_header(tmp_path: Path) -> None:
+    source = tmp_path / "note-row-table.docx"
+    doc = Document()
+    doc.add_paragraph("1 Scope", style="Heading 1")
+    table = doc.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Mode"
+    table.cell(1, 1).text = "SSC1"
+    table.cell(2, 0).text = "NOTE 1: Example note"
+    table.cell(2, 0).merge(table.cell(2, 1))
+    doc.save(source)
+
+    parser = DocxClauseParser()
+    records = parser.parse(source, SpecMetadata(spec_no="23501"))
+
+    row_docs = [record for record in records if record.doc_type == "table_row_doc"]
+    note_row = row_docs[-1]
+
+    assert note_row.row_header == ""
+    assert note_row.row_cells == ["NOTE 1: Example note"]
+    assert note_row.text == "NOTE 1: Example note"
+    assert "| NOTE 1: Example note |" in note_row.table_markdown
+    assert "SSC1" not in note_row.table_markdown
 
 
 def test_dedupe_duplicate_brackets_in_cell() -> None:

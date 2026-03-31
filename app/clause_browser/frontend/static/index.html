@@ -86,6 +86,10 @@
 
         <main class="layout">
           <aside class="panel left-panel">
+            <section class="panel-section left-panel-toolbar">
+              <button id="open-picker-button" class="primary left-panel-picker-button">문서 탐색</button>
+              <div id="loaded-summary" class="pill">0 clauses</div>
+            </section>
             <section class="panel-section selected-panel">
               <div class="section-heading">
                 <h2>선택한 절</h2>
@@ -100,10 +104,6 @@
               <span>게시글 제목</span>
               <input id="board-post-title" type="text" placeholder="게시글 제목" />
             </label>
-            <div class="panel-header editor-toolbar">
-              <button id="open-picker-button" class="primary">문서 탐색</button>
-              <div id="loaded-summary" class="pill">0 clauses</div>
-            </div>
             <div class="panel-header">
               <div>
                 <h2>현재 로드된 절</h2>

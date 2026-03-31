@@ -11,11 +11,13 @@ from io import BytesIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from dataclasses import dataclass
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches
 from docx.shared import Pt
@@ -26,6 +28,8 @@ INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WHITESPACE_RUN = re.compile(r"\s+")
 TRANSLATION_CHUNK_LIMIT = 12000
 CAPTION_PARAGRAPH = re.compile(r"^(Figure|Table)\s+[A-Za-z0-9.\-]+(?:\s*[:.\-]\s*|\s{2,})")
+DOCX_HIGHLIGHT_COLOR = "yellow"
+DOCX_SHADE_FILL = "FFF59D"
 
 
 @dataclass(frozen=True)
@@ -61,8 +65,19 @@ class DocxExportService:
         self._media_root = self._project_root / "artifacts" / "clause_browser_media"
         self._export_dir.mkdir(parents=True, exist_ok=True)
 
-    def export(self, title: str, roots: list[dict[str, Any]], notes: list[dict[str, Any]] | None = None) -> ExportResult:
-        cleaned_title, document, clause_count = self._build_document(title=title, roots=roots, notes=notes or [])
+    def export(
+        self,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]] | None = None,
+        highlights: list[dict[str, Any]] | None = None,
+    ) -> ExportResult:
+        cleaned_title, document, clause_count = self._build_document(
+            title=title,
+            roots=roots,
+            notes=notes or [],
+            highlights=highlights or [],
+        )
 
         file_name = self._allocate_file_name(cleaned_title)
         absolute_path = self._export_dir / file_name
@@ -85,8 +100,14 @@ class DocxExportService:
         title: str,
         roots: list[dict[str, Any]],
         notes: list[dict[str, Any]] | None = None,
+        highlights: list[dict[str, Any]] | None = None,
     ) -> tuple[str, bytes]:
-        cleaned_title, document, _clause_count = self._build_document(title=title, roots=roots, notes=notes or [])
+        cleaned_title, document, _clause_count = self._build_document(
+            title=title,
+            roots=roots,
+            notes=notes or [],
+            highlights=highlights or [],
+        )
         file_name = f"{sanitize_file_stem(cleaned_title)}.docx"
         buffer = BytesIO()
         document.save(buffer)
@@ -98,6 +119,7 @@ class DocxExportService:
         title: str,
         roots: list[dict[str, Any]],
         notes: list[dict[str, Any]],
+        highlights: list[dict[str, Any]],
     ) -> tuple[str, Document, int]:
         cleaned_title = title.strip()
         if not cleaned_title:
@@ -108,24 +130,29 @@ class DocxExportService:
         document = Document()
         document.add_heading(cleaned_title, level=0)
         note_index = self._index_notes(notes)
+        highlight_index = self._index_highlights(highlights)
         clause_count = 0
         grouped_roots: dict[str, list[dict[str, Any]]] = {}
         spec_titles: dict[str, str] = {}
-        ordered_specs: list[str] = []
         for root in roots:
             spec_no = str(root.get("specNo") or "").strip() or "Unknown Spec"
             if spec_no not in grouped_roots:
                 grouped_roots[spec_no] = []
-                ordered_specs.append(spec_no)
                 spec_titles[spec_no] = str(root.get("specTitle") or "").strip()
-            grouped_roots[spec_no].append(root)
+            grouped_roots[spec_no].append(self._sort_clause_tree(root))
 
-        for spec_no in ordered_specs:
+        for spec_no in sorted(grouped_roots.keys(), key=cmp_to_key(self._compare_mixed_token)):
             spec_title = spec_titles.get(spec_no, "")
             spec_heading = spec_no if not spec_title else f"{spec_no} {spec_title}"
             document.add_heading(spec_heading, level=1)
-            for root in grouped_roots.get(spec_no, []):
-                clause_count += self._write_clause(document, root, depth=1, note_index=note_index)
+            for root in sorted(grouped_roots.get(spec_no, []), key=cmp_to_key(self._compare_clause_nodes)):
+                clause_count += self._write_clause(
+                    document,
+                    root,
+                    depth=1,
+                    note_index=note_index,
+                    highlight_index=highlight_index,
+                )
         return cleaned_title, document, clause_count
 
     def _allocate_file_name(self, title: str) -> str:
@@ -143,6 +170,7 @@ class DocxExportService:
         clause: dict[str, Any],
         depth: int,
         note_index: dict[str, Any],
+        highlight_index: dict[tuple[str, int], list[dict[str, Any]]],
     ) -> int:
         clause_id = str(clause.get("clauseId") or "").strip()
         clause_title = str(clause.get("clauseTitle") or "").strip()
@@ -153,7 +181,14 @@ class DocxExportService:
         blocks = list(clause.get("blocks") or [])
         if blocks:
             for block_index, block in enumerate(blocks):
-                self._write_block(document, block, clause_key=clause_key, block_index=block_index, note_index=note_index)
+                self._write_block(
+                    document,
+                    block,
+                    clause_key=clause_key,
+                    block_index=block_index,
+                    note_index=note_index,
+                    highlight_index=highlight_index,
+                )
         else:
             body = str(clause.get("text") or "").strip()
             if body:
@@ -169,8 +204,13 @@ class DocxExportService:
 
         total = 1
         for child in clause.get("children") or []:
-            total += self._write_clause(document, child, depth + 1, note_index=note_index)
+            total += self._write_clause(document, child, depth + 1, note_index=note_index, highlight_index=highlight_index)
         return total
+
+    def _sort_clause_tree(self, clause: dict[str, Any]) -> dict[str, Any]:
+        children = [self._sort_clause_tree(child) for child in clause.get("children") or []]
+        sorted_children = sorted(children, key=cmp_to_key(self._compare_clause_nodes))
+        return {**clause, "children": sorted_children}
 
     def _write_block(
         self,
@@ -180,22 +220,35 @@ class DocxExportService:
         clause_key: str,
         block_index: int,
         note_index: dict[str, Any],
+        highlight_index: dict[tuple[str, int], list[dict[str, Any]]],
     ) -> None:
         block_type = str(block.get("type") or "")
         selection_notes = note_index.get("selection", {}).get((clause_key, block_index), [])
+        block_highlights = highlight_index.get((clause_key, block_index), [])
         if block_type == "paragraph":
             text = str(block.get("text") or "").strip()
             if text:
                 paragraph = self._add_paragraph_with_notes(document, text, selection_notes)
+                if any(
+                    int(item.get("rowIndex", -1)) < 0 and int(item.get("cellIndex", -1)) < 0
+                    for item in block_highlights
+                ):
+                    self._apply_paragraph_highlight(paragraph)
                 self._apply_paragraph_format(paragraph, block.get("format") or {})
                 if self._is_caption_paragraph(text, block.get("format") or {}):
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         elif block_type == "table":
-            self._write_table(document, block, selection_notes)
+            self._write_table(document, block, selection_notes, block_highlights)
         elif block_type == "image":
             self._write_image(document, block)
 
-    def _write_table(self, document: Document, block: dict[str, Any], selection_notes: list[dict[str, Any]]) -> None:
+    def _write_table(
+        self,
+        document: Document,
+        block: dict[str, Any],
+        selection_notes: list[dict[str, Any]],
+        block_highlights: list[dict[str, Any]],
+    ) -> None:
         cells = list(block.get("cells") or [])
         if not cells:
             rows = list(block.get("rows") or [])
@@ -205,12 +258,18 @@ class DocxExportService:
             table.style = "Table Grid"
             anchor_paragraphs: list[Paragraph] = []
             row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
+            row_cells: dict[int, list[Any]] = {}
+            logical_cells: dict[tuple[int, int], Any] = {}
             for row_idx, row in enumerate(rows):
                 for col_idx, value in enumerate(row):
-                    paragraph = table.cell(row_idx, col_idx).paragraphs[0]
+                    cell = table.cell(row_idx, col_idx)
+                    paragraph = cell.paragraphs[0]
                     paragraph.text = str(value or "")
                     anchor_paragraphs.append(paragraph)
                     row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
+                    row_cells.setdefault(row_idx, []).append(cell)
+                    logical_cells[(row_idx, col_idx)] = cell
+            self._apply_table_highlights(row_cells, logical_cells, block_highlights)
             self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
             return
 
@@ -221,9 +280,11 @@ class DocxExportService:
         occupied: set[tuple[int, int]] = set()
         anchor_paragraphs: list[Paragraph] = []
         row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
+        row_cells: dict[int, list[Any]] = {}
+        logical_cells: dict[tuple[int, int], Any] = {}
         for row_idx, row in enumerate(cells):
             col_idx = 0
-            for cell_data in row:
+            for logical_idx, cell_data in enumerate(row):
                 while (row_idx, col_idx) in occupied:
                     col_idx += 1
                 rowspan = max(1, int(cell_data.get("rowspan") or 1))
@@ -233,6 +294,8 @@ class DocxExportService:
                 paragraph.text = str(cell_data.get("text") or "")
                 anchor_paragraphs.append(paragraph)
                 row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
+                row_cells.setdefault(row_idx, []).append(base_cell)
+                logical_cells[(row_idx, logical_idx)] = base_cell
                 if colspan > 1:
                     base_cell = base_cell.merge(table.cell(row_idx, col_idx + colspan - 1))
                 if rowspan > 1:
@@ -241,7 +304,27 @@ class DocxExportService:
                     for col_offset in range(colspan):
                         occupied.add((row_idx + row_offset, col_idx + col_offset))
                 col_idx += colspan
+        self._apply_table_highlights(row_cells, logical_cells, block_highlights)
         self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+
+    def _apply_table_highlights(
+        self,
+        row_cells: dict[int, list[Any]],
+        logical_cells: dict[tuple[int, int], Any],
+        block_highlights: list[dict[str, Any]],
+    ) -> None:
+        for item in block_highlights:
+            row_index = int(item.get("rowIndex", -1))
+            cell_index = int(item.get("cellIndex", -1))
+            if row_index < 0:
+                continue
+            if cell_index >= 0:
+                cell = logical_cells.get((row_index, cell_index))
+                if cell is not None:
+                    self._apply_cell_highlight(cell)
+                continue
+            for cell in row_cells.get(row_index, []):
+                self._apply_cell_highlight(cell)
 
     def _attach_table_selection_notes(
         self,
@@ -337,6 +420,19 @@ class DocxExportService:
                 selection_notes.setdefault((clause_key, block_index), []).append(note)
         return {"clause": clause_notes, "selection": selection_notes}
 
+    @staticmethod
+    def _index_highlights(highlights: list[dict[str, Any]]) -> dict[tuple[str, int], list[dict[str, Any]]]:
+        indexed: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        for item in highlights or []:
+            clause_key = str(item.get("clauseKey") or "").strip()
+            if not clause_key:
+                continue
+            block_index = int(item.get("blockIndex", -1))
+            if block_index < 0:
+                continue
+            indexed.setdefault((clause_key, block_index), []).append(item)
+        return indexed
+
     def _add_paragraph_with_notes(self, document: Document, text: str, notes: list[dict[str, Any]]) -> Paragraph:
         paragraph = document.add_paragraph()
         comment_targets = self._build_comment_targets(text, notes)
@@ -410,6 +506,55 @@ class DocxExportService:
             paragraph.add_run(paragraph.text or " ")
         self._add_comment([paragraph.runs[0]], note)
 
+    @classmethod
+    def _compare_clause_nodes(cls, left: dict[str, Any], right: dict[str, Any]) -> int:
+        left_path = [str(part) for part in (left.get("clausePath") or [left.get("clauseId") or ""]) if str(part)]
+        right_path = [str(part) for part in (right.get("clausePath") or [right.get("clauseId") or ""]) if str(part)]
+        path_length = max(len(left_path), len(right_path))
+        for index in range(path_length):
+            part_compare = cls._compare_clause_part(left_path[index] if index < len(left_path) else "", right_path[index] if index < len(right_path) else "")
+            if part_compare != 0:
+                return part_compare
+        left_order = int(left.get("orderInSource") or 0)
+        right_order = int(right.get("orderInSource") or 0)
+        if left_order != right_order:
+            return left_order - right_order
+        return str(left.get("clauseId") or "").locale_compare(str(right.get("clauseId") or "")) if False else (
+            -1 if str(left.get("clauseId") or "") < str(right.get("clauseId") or "") else 1 if str(left.get("clauseId") or "") > str(right.get("clauseId") or "") else 0
+        )
+
+    @classmethod
+    def _compare_clause_part(cls, left: str, right: str) -> int:
+        left_tokens = str(left).split(".")
+        right_tokens = str(right).split(".")
+        length = max(len(left_tokens), len(right_tokens))
+        for index in range(length):
+            token_compare = cls._compare_mixed_token(left_tokens[index] if index < len(left_tokens) else "", right_tokens[index] if index < len(right_tokens) else "")
+            if token_compare != 0:
+                return token_compare
+        return 0
+
+    @staticmethod
+    def _compare_mixed_token(left: str, right: str) -> int:
+        left_match = re.match(r"^(\d+)(.*)$", str(left))
+        right_match = re.match(r"^(\d+)(.*)$", str(right))
+        if left_match and right_match:
+            number_compare = int(left_match.group(1)) - int(right_match.group(1))
+            if number_compare != 0:
+                return number_compare
+            left_suffix = left_match.group(2)
+            right_suffix = right_match.group(2)
+            if left_suffix < right_suffix:
+                return -1
+            if left_suffix > right_suffix:
+                return 1
+            return 0
+        if str(left) < str(right):
+            return -1
+        if str(left) > str(right):
+            return 1
+        return 0
+
     @staticmethod
     def _add_comment(runs: list[Any], note: dict[str, Any]) -> None:
         translation = str(note.get("translation") or "").strip()
@@ -421,6 +566,29 @@ class DocxExportService:
             DocxExportService._apply_comment_fonts(comment)
         except Exception:
             return
+
+    @staticmethod
+    def _apply_paragraph_highlight(paragraph: Paragraph) -> None:
+        if not paragraph.runs:
+            paragraph.add_run(paragraph.text or " ")
+        for run in paragraph.runs:
+            r_pr = run._element.get_or_add_rPr()
+            highlight = r_pr.find(qn("w:highlight"))
+            if highlight is None:
+                highlight = OxmlElement("w:highlight")
+                r_pr.append(highlight)
+            highlight.set(qn("w:val"), DOCX_HIGHLIGHT_COLOR)
+
+    @staticmethod
+    def _apply_cell_highlight(cell: Any) -> None:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        shd = tc_pr.find(qn("w:shd"))
+        if shd is None:
+            shd = OxmlElement("w:shd")
+            tc_pr.append(shd)
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), DOCX_SHADE_FILL)
 
     @staticmethod
     def _apply_comment_fonts(comment: Any) -> None:

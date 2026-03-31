@@ -43,6 +43,7 @@ class ExportRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     roots: list[ClauseTreePayload] = Field(min_length=1)
     notes: list[dict[str, Any]] = Field(default_factory=list)
+    highlights: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LLMActionRequest(BaseModel):
@@ -196,6 +197,7 @@ def create_router(
                 title=request.title,
                 roots=[root.model_dump(mode="json") for root in request.roots],
                 notes=request.notes,
+                highlights=request.highlights,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -210,6 +212,7 @@ def create_router(
                 title=request.title,
                 roots=[root.model_dump(mode="json") for root in request.roots],
                 notes=request.notes,
+                highlights=request.highlights,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

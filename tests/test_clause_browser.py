@@ -891,5 +891,131 @@ def test_docx_export_service_includes_notes_and_images(tmp_path: Path) -> None:
     assert exported.tables[0].style.name == "Table Grid"
 
 
+def test_docx_export_service_applies_paragraph_and_table_highlights(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "paragraph",
+                    "text": "Paragraph body",
+                    "format": {},
+                },
+                {
+                    "type": "table",
+                    "cells": [
+                        [
+                            {"text": "H1", "rowspan": 1, "colspan": 1, "header": True},
+                            {"text": "H2", "rowspan": 1, "colspan": 1, "header": True},
+                        ],
+                        [
+                            {"text": "V1", "rowspan": 1, "colspan": 1, "header": False},
+                            {"text": "V2", "rowspan": 1, "colspan": 1, "header": False},
+                        ],
+                    ],
+                },
+            ],
+            "children": [],
+        }
+    ]
+    highlights = [
+        {
+            "id": "manual:paragraph",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": -1,
+            "cellIndex": -1,
+            "rowText": "Paragraph body",
+        },
+        {
+            "id": "manual:cell",
+            "clauseKey": "23501:5",
+            "blockIndex": 1,
+            "rowIndex": 1,
+            "cellIndex": 1,
+            "rowText": "V1 | V2",
+        },
+    ]
+
+    result = service.export("My Export", roots, highlights=highlights)
+
+    exported = Document(export_dir / result.file_name)
+    paragraph = next(item for item in exported.paragraphs if item.text == "Paragraph body")
+    assert 'w:highlight w:val="yellow"' in paragraph._p.xml
+    highlighted_cell = exported.tables[0].cell(1, 1)
+    plain_cell = exported.tables[0].cell(1, 0)
+    assert 'w:fill="FFF59D"' in highlighted_cell._tc.xml
+    assert 'w:fill="FFF59D"' not in plain_cell._tc.xml
+
+
+def test_docx_export_service_sorts_clauses_by_clause_order(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5.10",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5.10",
+            "clauseTitle": "Tenth clause",
+            "clausePath": ["5", "5.10"],
+            "orderInSource": 10,
+            "blocks": [],
+            "children": [],
+        },
+        {
+            "key": "23501:5",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "clausePath": ["5"],
+            "orderInSource": 1,
+            "blocks": [],
+            "children": [
+                {
+                    "key": "23501:5.2",
+                    "specNo": "23501",
+                    "specTitle": "System architecture",
+                    "clauseId": "5.2",
+                    "clauseTitle": "Second child",
+                    "clausePath": ["5", "5.2"],
+                    "orderInSource": 3,
+                    "blocks": [],
+                    "children": [],
+                },
+                {
+                    "key": "23501:5.1",
+                    "specNo": "23501",
+                    "specTitle": "System architecture",
+                    "clauseId": "5.1",
+                    "clauseTitle": "First child",
+                    "clausePath": ["5", "5.1"],
+                    "orderInSource": 2,
+                    "blocks": [],
+                    "children": [],
+                },
+            ],
+        },
+    ]
+
+    result = service.export("My Export", roots)
+
+    exported = Document(export_dir / result.file_name)
+    headings = [p.text for p in exported.paragraphs if p.style.name.startswith("Heading")]
+    assert headings == [
+        "23501 System architecture",
+        "5 Session management",
+        "5.1 First child",
+        "5.2 Second child",
+        "5.10 Tenth clause",
+    ]
+
+
 def test_sanitize_file_stem_removes_invalid_characters() -> None:
     assert sanitize_file_stem('A/B:C*D? E') == "ABCD_E"

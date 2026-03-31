@@ -22,6 +22,7 @@ const state = {
     },
     specbotResults: [],
     specbotQueryStatus: "",
+    specbotDocumentSettingsLoading: false,
     notes: [],
     highlights: [],
     busy: null,
@@ -34,6 +35,7 @@ const state = {
       clauseLabel: "",
       blockIndex: -1,
       rowIndex: -1,
+      cellIndex: -1,
       rowText: "",
       hasSelection: false,
     },
@@ -199,6 +201,12 @@ async function refreshDocuments(options = {}) {
   if (!beginBusy("문서 검색 중입니다.", { ...options, allowDuringSpecbotQuery: true })) {
     return;
   }
+  if (options.forSpecbotSettings) {
+    state.ui.specbotDocumentSettingsLoading = true;
+    if (state.ui.isSpecbotSettingsOpen) {
+      renderSpecbotDocumentSettings();
+    }
+  }
   const query = encodeURIComponent(elements.documentSearch.value.trim());
   const clauseQuery = encodeURIComponent((elements.clauseSearch?.value || "").trim());
   const scope = getBoardScope();
@@ -214,6 +222,12 @@ async function refreshDocuments(options = {}) {
       renderSpecbotDocumentSettings();
     }
   } finally {
+    if (options.forSpecbotSettings) {
+      state.ui.specbotDocumentSettingsLoading = false;
+      if (state.ui.isSpecbotSettingsOpen) {
+        renderSpecbotDocumentSettings();
+      }
+    }
     endBusy(options);
   }
 }
@@ -234,19 +248,30 @@ function closePicker() {
   elements.pickerModal.setAttribute("aria-hidden", "true");
 }
 
-function openSpecbotSettings() {
+async function openSpecbotSettings() {
   applySpecbotSettingsToForm();
+  state.ui.isSpecbotSettingsOpen = true;
+  state.ui.specbotDocumentSettingsLoading = true;
   renderSpecbotDocumentSettings();
   renderRejectedSpecbotClauses();
-  state.ui.isSpecbotSettingsOpen = true;
   persistSessionState();
   elements.specbotSettingsModal.classList.remove("hidden");
+  elements.specbotSettingsModal.setAttribute("aria-hidden", "false");
+  try {
+    await refreshDocuments({ silent: true, forSpecbotSettings: true });
+  } catch (error) {
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
+  }
 }
 
 function closeSpecbotSettings() {
   state.ui.isSpecbotSettingsOpen = false;
+  state.ui.specbotDocumentSettingsLoading = false;
   persistSessionState();
   elements.specbotSettingsModal.classList.add("hidden");
+  elements.specbotSettingsModal.setAttribute("aria-hidden", "true");
 }
 
 function openNoticeModal(text) {
@@ -821,18 +846,19 @@ function renderTableBlock(node, block, index) {
           .map((row, rowIndex) => {
             const rowText = normalizeRowText(row.map((cell) => normalizeTableDisplayText(cell.text || "")));
             const highlighted = highlightedRowIndexes.has(rowIndex);
-            const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex).some((note) => !note.collapsed);
+            const highlightedCellIndexes = getHighlightedCellIndexes(node.key, index, rowIndex);
             return `
-              <tr class="${highlighted || hasExpandedSelectionNotes ? "is-highlighted" : ""}">
+              <tr class="${highlighted ? "is-highlighted" : ""}">
                 ${row
                   .map((cell, cellIndex) => {
                     const tag = cell.header ? "th" : "td";
                     const rowspan = Number(cell.rowspan || 1) > 1 ? ` rowspan="${Number(cell.rowspan || 1)}"` : "";
                     const colspan = Number(cell.colspan || 1) > 1 ? ` colspan="${Number(cell.colspan || 1)}"` : "";
-                    const isLastCell = cellIndex === row.length - 1;
-                    const rowToggleHtml = isLastCell ? renderSelectionNoteToggle(node.key, index, rowIndex, true) : "";
-                    const cellClass = highlighted || hasExpandedSelectionNotes ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
-                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-row-text="${escapeHtml(rowText)}"${rowspan}${colspan}>
+                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex).some((note) => !note.collapsed);
+                    const rowToggleHtml = renderSelectionNoteToggle(node.key, index, rowIndex, cellIndex, true);
+                    const cellHighlighted = highlighted || highlightedCellIndexes.has(cellIndex) || hasExpandedSelectionNotes;
+                    const cellClass = cellHighlighted ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
+                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-cell-index="${cellIndex}" data-row-text="${escapeHtml(rowText)}"${rowspan}${colspan}>
                       <div class="table-cell-inner">
                         <span>${escapeHtml(normalizeTableDisplayText(cell.text || ""))}</span>
                         ${rowToggleHtml}
@@ -850,16 +876,17 @@ function renderTableBlock(node, block, index) {
             const normalizedRow = row.map((cell) => normalizeTableDisplayText(cell));
             const rowText = normalizeRowText(normalizedRow);
             const highlighted = highlightedRowIndexes.has(rowIndex);
-            const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex).some((note) => !note.collapsed);
+            const highlightedCellIndexes = getHighlightedCellIndexes(node.key, index, rowIndex);
             return `
-              <tr class="${highlighted || hasExpandedSelectionNotes ? "is-highlighted" : ""}">
+              <tr class="${highlighted ? "is-highlighted" : ""}">
                 ${row
                   .map((cell, cellIndex) => {
                     const tag = rowIndex === 0 ? "th" : "td";
-                    const isLastCell = cellIndex === row.length - 1;
-                    const rowToggleHtml = isLastCell ? renderSelectionNoteToggle(node.key, index, rowIndex, true) : "";
-                    const cellClass = highlighted || hasExpandedSelectionNotes ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
-                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-row-text="${escapeHtml(rowText)}">
+                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex).some((note) => !note.collapsed);
+                    const rowToggleHtml = renderSelectionNoteToggle(node.key, index, rowIndex, cellIndex, true);
+                    const cellHighlighted = highlighted || highlightedCellIndexes.has(cellIndex) || hasExpandedSelectionNotes;
+                    const cellClass = cellHighlighted ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
+                    return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="${rowIndex}" data-cell-index="${cellIndex}" data-row-text="${escapeHtml(rowText)}">
                       <div class="table-cell-inner">
                         <span>${escapeHtml(normalizeTableDisplayText(cell || ""))}</span>
                         ${rowToggleHtml}
@@ -903,13 +930,13 @@ function renderTableRowNoteRow(clauseKey, blockIndex, rowIndex, colspan) {
 function renderParagraphBlock(node, block, index) {
   const paragraphClass = getParagraphClass(block.text || "", block);
   const paragraphStyle = getParagraphInlineStyle(block);
-  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index, -1);
-  const selectionNotesHtml = renderSelectionNotes(node.key, index, -1);
-  const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, -1).some((note) => !note.collapsed);
+  const selectionToggleHtml = renderSelectionNoteToggle(node.key, index, -1, -1);
+  const selectionNotesHtml = renderSelectionNotes(node.key, index, -1, -1);
+  const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, -1, -1).some((note) => !note.collapsed);
   return `
     <div class="paragraph-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""} ${hasBlockHighlight(node.key, index) ? "is-highlighted" : ""}">
       <div class="paragraph-note-row">
-        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="-1" data-row-text="${escapeHtml(String(block.text || "").trim())}">${escapeHtml(block.text || "")}</p>
+        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}" data-row-index="-1" data-cell-index="-1" data-row-text="${escapeHtml(String(block.text || "").trim())}">${escapeHtml(block.text || "")}</p>
         ${selectionToggleHtml}
       </div>
       ${selectionNotesHtml}
@@ -1015,8 +1042,8 @@ function renderClauseNoteToggle(clauseKey) {
   `;
 }
 
-function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, compact = false) {
-  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
+function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, cellIndex = -1, compact = false) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex);
   if (!notes.length) {
     return "";
   }
@@ -1031,14 +1058,15 @@ function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, compact
       data-clause-key="${escapeHtml(clauseKey)}"
       data-block-index="${blockIndex}"
       data-row-index="${rowIndex}"
+      data-cell-index="${cellIndex}"
     >
       ${label}
     </button>
   `;
 }
 
-function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1) {
-  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
+function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex);
   if (!notes.length) {
     return "";
   }
@@ -1153,12 +1181,15 @@ function hasBlockHighlight(clauseKey, blockIndex) {
 }
 
 function getHighlightedRowIndexes(clauseKey, blockIndex, block) {
-  const localEntries = getHighlightsForBlock(clauseKey, blockIndex);
+  const localEntries = getHighlightsForBlock(clauseKey, blockIndex).filter(
+    (item) => Number(item.rowIndex ?? -1) >= 0 && Number(item.cellIndex ?? -1) < 0
+  );
   const globalRowEntries = (state.ui.highlights || []).filter(
     (item) =>
       item.clauseKey === clauseKey &&
       Number(item.blockIndex) < 0 &&
-      Number(item.rowIndex ?? -1) >= 0
+      Number(item.rowIndex ?? -1) >= 0 &&
+      Number(item.cellIndex ?? -1) < 0
   );
   const entries = [...localEntries, ...globalRowEntries];
   const indexes = new Set(entries.map((item) => Number(item.rowIndex ?? -1)).filter((value) => value >= 0));
@@ -1178,13 +1209,16 @@ function getHighlightedRowIndexes(clauseKey, blockIndex, block) {
       indexes.add(rowIndex);
     }
   });
-  localEntries.forEach((item) => {
-    const rowIndex = Number(item.rowIndex ?? -1);
-    if (rowIndex >= 0) {
-      indexes.add(rowIndex);
-    }
-  });
   return indexes;
+}
+
+function getHighlightedCellIndexes(clauseKey, blockIndex, rowIndex) {
+  const entries = getHighlightsForBlock(clauseKey, blockIndex).filter(
+    (item) =>
+      Number(item.rowIndex ?? -1) === Number(rowIndex) &&
+      Number(item.cellIndex ?? -1) >= 0
+  );
+  return new Set(entries.map((item) => Number(item.cellIndex ?? -1)).filter((value) => value >= 0));
 }
 
 function bindTreeEvents() {
@@ -1262,6 +1296,9 @@ function bindTreeEvents() {
   });
 
   elements.treeContainer.querySelectorAll(".tree-text").forEach((paragraph) => {
+    paragraph.addEventListener("click", () => {
+      updateSelectionStateFromElement(paragraph, "", false);
+    });
     paragraph.addEventListener("contextmenu", (event) => {
       if (isBoardViewMode()) {
         return;
@@ -1270,15 +1307,7 @@ function bindTreeEvents() {
       const selectedText = selection ? selection.toString().trim() : "";
       event.preventDefault();
       hideNodeMenu();
-      updateSelectionState(
-        selectedText,
-        paragraph.dataset.clauseKey || "",
-        getLabelForKey(paragraph.dataset.clauseKey || ""),
-        Number(paragraph.dataset.blockIndex || -1),
-        Number(paragraph.dataset.rowIndex || -1),
-        paragraph.dataset.rowText || "",
-        Boolean(selectedText)
-      );
+      updateSelectionStateFromElement(paragraph, selectedText, Boolean(selectedText));
       showSelectionMenu(event.clientX, event.clientY);
     });
   });
@@ -1300,7 +1329,8 @@ function bindTreeEvents() {
       toggleSelectionNotes(
         button.dataset.clauseKey || "",
         Number(button.dataset.blockIndex || -1),
-        Number(button.dataset.rowIndex || -1)
+        Number(button.dataset.rowIndex || -1),
+        Number(button.dataset.cellIndex || -1)
       );
     });
   });
@@ -1308,6 +1338,12 @@ function bindTreeEvents() {
   elements.treeContainer.querySelectorAll("[data-action='delete-note']").forEach((button) => {
     button.addEventListener("click", () => {
       deleteNote(button.dataset.noteId || "");
+    });
+  });
+
+  elements.treeContainer.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
+    textarea.addEventListener("input", (event) => {
+      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
     });
   });
 
@@ -1640,6 +1676,7 @@ function handleSelectionChange() {
   const selection = window.getSelection();
   const text = selection ? selection.toString().trim() : "";
   if (!text) {
+    updateSelectionState("", "", "", -1, -1, -1, "", false);
     hideSelectionMenu();
     return;
   }
@@ -1647,19 +1684,28 @@ function handleSelectionChange() {
   if (!anchorElement) {
     return;
   }
-  updateSelectionState(
-    text,
-    anchorElement.dataset.clauseKey || "",
-    getLabelForKey(anchorElement.dataset.clauseKey || ""),
-    Number(anchorElement.dataset.blockIndex || -1),
-    Number(anchorElement.dataset.rowIndex || -1),
-    anchorElement.dataset.rowText || "",
-    true
-  );
+  updateSelectionStateFromElement(anchorElement, text, true);
 }
 
-function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, rowIndex = -1, rowText = "", hasSelection = false) {
-  state.ui.selection = { text, clauseKey, clauseLabel, blockIndex, rowIndex, rowText, hasSelection };
+function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, rowIndex = -1, cellIndex = -1, rowText = "", hasSelection = false) {
+  state.ui.selection = { text, clauseKey, clauseLabel, blockIndex, rowIndex, cellIndex, rowText, hasSelection };
+}
+
+function updateSelectionStateFromElement(element, text = "", hasSelection = false) {
+  if (!element) {
+    updateSelectionState("", "", "", -1, -1, -1, "", false);
+    return;
+  }
+  updateSelectionState(
+    text,
+    element.dataset.clauseKey || "",
+    getLabelForKey(element.dataset.clauseKey || ""),
+    Number(element.dataset.blockIndex || -1),
+    Number(element.dataset.rowIndex || -1),
+    Number(element.dataset.cellIndex || -1),
+    element.dataset.rowText || "",
+    hasSelection
+  );
 }
 
 function getLabelForKey(key) {
@@ -1703,6 +1749,7 @@ async function runSelectionAction(targetLanguage = "ko") {
       clauseKey: state.ui.selection.clauseKey,
       blockIndex: state.ui.selection.blockIndex,
       rowIndex: state.ui.selection.rowIndex,
+      cellIndex: state.ui.selection.cellIndex,
       rowText: state.ui.selection.rowText,
       sourceText: text,
       clauseLabel: state.ui.selection.clauseLabel,
@@ -1865,7 +1912,7 @@ function getClauseSourceText(node) {
   return blockText || String(node.clauseTitle || "").trim();
 }
 
-async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, rowText = "", sourceText, clauseLabel, targetLanguage }) {
+async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, cellIndex = -1, rowText = "", sourceText, clauseLabel, targetLanguage }) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
     state.ui.translationTask = {
@@ -1887,6 +1934,7 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex
       clauseKey,
       blockIndex,
       rowIndex,
+      cellIndex,
       rowText,
       clauseLabel,
       sourceText,
@@ -1912,13 +1960,14 @@ function getNotesForClause(clauseKey) {
   return (state.ui.notes || []).filter((note) => note.clauseKey === clauseKey);
 }
 
-function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1) {
+function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1, cellIndex = null) {
   return (state.ui.notes || []).filter(
     (note) =>
       note.type === "selection" &&
       note.clauseKey === clauseKey &&
       Number(note.blockIndex) === Number(blockIndex) &&
-      Number(note.rowIndex ?? -1) === Number(rowIndex)
+      Number(note.rowIndex ?? -1) === Number(rowIndex) &&
+      (cellIndex === null || Number(note.cellIndex ?? -1) === Number(cellIndex))
   );
 }
 
@@ -1928,6 +1977,17 @@ function upsertNote(note) {
     state.ui.notes = state.ui.notes.map((item, index) => (index === existingIndex ? { ...item, ...note } : item));
   } else {
     state.ui.notes = [note, ...(state.ui.notes || [])];
+  }
+  if (note.type === "selection") {
+    ensureHighlightEntry(
+      createHighlightEntry({
+        clauseKey: note.clauseKey,
+        blockIndex: note.blockIndex,
+        rowIndex: note.rowIndex,
+        cellIndex: note.cellIndex,
+        rowText: note.rowText,
+      })
+    );
   }
   if (note.type === "clause" && note.clauseKey) {
     expandNodePath(note.clauseKey);
@@ -1969,8 +2029,8 @@ function toggleClauseNotes(clauseKey) {
   renderLoadedTree();
 }
 
-function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1) {
-  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex);
+function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null) {
+  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex);
   if (!notes.length) {
     return;
   }
@@ -2034,18 +2094,42 @@ function getCurrentSelectionHighlightEntry() {
   const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
   const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
   const rowIndex = Number(state.ui.selection?.rowIndex ?? -1);
+  const cellIndex = Number(state.ui.selection?.cellIndex ?? -1);
   const rowText = String(state.ui.selection?.rowText || "").trim();
   if (!clauseKey || blockIndex < 0) {
     return null;
   }
+  return createHighlightEntry({ clauseKey, blockIndex, rowIndex, cellIndex, rowText });
+}
+
+function createHighlightEntry({ clauseKey, blockIndex = -1, rowIndex = -1, cellIndex = -1, rowText = "" }) {
+  const normalizedClauseKey = String(clauseKey || "").trim();
+  const normalizedBlockIndex = Number(blockIndex ?? -1);
+  if (!normalizedClauseKey || normalizedBlockIndex < 0) {
+    return null;
+  }
+  const normalizedRowIndex = Number(rowIndex ?? -1);
+  const normalizedCellIndex = Number(cellIndex ?? -1);
+  const normalizedRowText = String(rowText || "").trim();
   return {
-    id: `manual:${clauseKey}:${blockIndex}:${rowIndex}:${normalizeHighlightText(rowText) || "block"}`,
+    id: `manual:${normalizedClauseKey}:${normalizedBlockIndex}:${normalizedRowIndex}:${normalizedCellIndex}:${normalizeHighlightText(normalizedRowText) || "block"}`,
     type: "manual",
-    clauseKey,
-    blockIndex,
-    rowIndex,
-    rowText,
+    clauseKey: normalizedClauseKey,
+    blockIndex: normalizedBlockIndex,
+    rowIndex: normalizedRowIndex,
+    cellIndex: normalizedCellIndex,
+    rowText: normalizedRowText,
   };
+}
+
+function ensureHighlightEntry(entry) {
+  if (!entry) {
+    return;
+  }
+  const exists = (state.ui.highlights || []).some((item) => item.id === entry.id);
+  if (!exists) {
+    state.ui.highlights = [entry, ...(state.ui.highlights || [])];
+  }
 }
 
 function toggleSelectionHighlight() {
@@ -2066,8 +2150,10 @@ function toggleSelectionHighlight() {
 function addManualSelectionNote() {
   const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
   const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
+  const rowIndex = Number(state.ui.selection?.rowIndex ?? -1);
+  const cellIndex = Number(state.ui.selection?.cellIndex ?? -1);
   if (!clauseKey || blockIndex < 0) {
-    setMessage("메모를 추가할 문단이나 표 행을 먼저 선택하세요.", true);
+    setMessage("메모를 추가할 문단이나 표 셀을 먼저 선택하세요.", true);
     return;
   }
   const sourceText = String(
@@ -2075,29 +2161,22 @@ function addManualSelectionNote() {
       ? state.ui.selection.text
       : state.ui.selection?.rowText || ""
   ).trim();
-  const translation = window.prompt("메모 내용을 입력하세요.", "");
-  if (translation === null) {
-    return;
-  }
-  if (!String(translation).trim()) {
-    setMessage("메모 내용이 비어 있습니다.", true);
-    return;
-  }
   upsertNote({
     id: `manual-note:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     type: "selection",
     clauseKey,
     blockIndex,
-    rowIndex: Number(state.ui.selection?.rowIndex ?? -1),
+    rowIndex,
+    cellIndex,
     rowText: String(state.ui.selection?.rowText || ""),
     clauseLabel: String(state.ui.selection?.clauseLabel || ""),
     sourceText,
-    translation: String(translation).trim(),
+    translation: "",
     sourceLanguage: inferSourceLanguage(sourceText),
     targetLanguage: "memo",
     collapsed: false,
   });
-  setMessage("수동 메모를 추가했습니다.", false);
+  setMessage("빈 수동 메모를 추가했습니다. 바로 입력하세요.", false);
 }
 
 function renderSpecbotResults() {
@@ -2344,8 +2423,13 @@ function getRejectedSpecbotClauses() {
 
 function renderSpecbotDocumentSettings() {
   const docs = state.documents || [];
-  if (!docs.length) {
+  if (state.ui.specbotDocumentSettingsLoading) {
     elements.settingDocumentList.innerHTML = '<div class="muted">문서 목록을 불러오는 중입니다.</div>';
+    elements.settingDocumentSelectionCount.textContent = "0 / 0 selected";
+    return;
+  }
+  if (!docs.length) {
+    elements.settingDocumentList.innerHTML = '<div class="muted">선택 가능한 문서가 없습니다.</div>';
     elements.settingDocumentSelectionCount.textContent = "0 / 0 selected";
     return;
   }
@@ -2553,6 +2637,7 @@ async function exportDocx() {
         title,
         roots: state.loadedRoots,
         notes: state.ui.notes || [],
+        highlights: state.ui.highlights || [],
       }),
     });
     if (!response.ok) {
