@@ -12,6 +12,7 @@ import {
 const EDITOR_ID_KEY = "specbot-board-editor-id-v1";
 const EDITOR_LABEL_KEY = "specbot-board-editor-label-v1";
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const VIEW_AUTOSAVE_DEBOUNCE_MS = 800;
 
 const boardState = {
   currentPostId: "",
@@ -25,6 +26,7 @@ const boardState = {
   },
   isDraft: false,
   isRestoringRoute: false,
+  autosaveTimerId: 0,
 };
 
 const BOARD_ROUTE_PARAM = "board";
@@ -324,7 +326,7 @@ function stopHeartbeat() {
 }
 
 function releaseCurrentLockOnUnload() {
-  if (boardState.mode !== "edit" || !boardState.currentPostId || !boardState.currentLock) {
+  if (!boardState.currentPostId || !boardState.currentLock) {
     return;
   }
   const payload = JSON.stringify({
@@ -419,6 +421,12 @@ async function openPostInViewer(post, options = {}) {
 }
 
 async function saveCurrentPost() {
+  await persistCurrentPost();
+  setBoardMessage("게시글을 저장했습니다.", false);
+  await closeEditor();
+}
+
+async function persistCurrentPost({ autosave = false } = {}) {
   const scope = getBoardScope();
   if (!scope.releaseData || !scope.release) {
     throw new Error("게시글의 Spec Date와 Release를 선택하세요.");
@@ -449,8 +457,30 @@ async function saveCurrentPost() {
     });
     boardState.currentLock = data.lock || null;
   }
-  setBoardMessage("게시글을 저장했습니다.", false);
-  await closeEditor();
+  if (boardState.currentLock) {
+    startHeartbeat();
+  }
+  if (!autosave) {
+    setBoardMessage("게시글을 저장했습니다.", false);
+  }
+}
+
+function scheduleViewAutosave() {
+  if (boardState.mode !== "view" || !boardState.currentPostId || boardState.isRestoringRoute) {
+    return;
+  }
+  if (boardState.autosaveTimerId) {
+    window.clearTimeout(boardState.autosaveTimerId);
+  }
+  boardState.autosaveTimerId = window.setTimeout(async () => {
+    boardState.autosaveTimerId = 0;
+    try {
+      await persistCurrentPost({ autosave: true });
+      setBoardMessage("메모 변경사항을 자동 저장했습니다.", false);
+    } catch (error) {
+      showBoardError(error);
+    }
+  }, VIEW_AUTOSAVE_DEBOUNCE_MS);
 }
 
 function openDeleteModal(target) {
@@ -583,6 +613,9 @@ export function bindBoardFeature() {
   const els = boardElements();
   window.addEventListener("pagehide", releaseCurrentLockOnUnload);
   window.addEventListener("beforeunload", releaseCurrentLockOnUnload);
+  window.addEventListener("specbot:workspace-persisted", () => {
+    scheduleViewAutosave();
+  });
   window.addEventListener("popstate", async () => {
     try {
       await restoreBoardRoute();

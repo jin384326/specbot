@@ -317,7 +317,6 @@ function renderClauseNoteModal() {
   const notes = getNotesForClause(clauseKey).filter((note) => note.type === "clause");
   const sourceText = node ? getClauseSourceText(node) : "";
   const note = notes[0] || null;
-  const readOnly = isBoardViewMode();
   elements.clauseNoteModalBody.innerHTML = `
     <section class="clause-note-modal-section">
       <div class="section-heading">
@@ -331,7 +330,7 @@ function renderClauseNoteModal() {
       <div class="section-heading">
         <h3>절 메모</h3>
         ${
-          note && !readOnly
+          note
             ? `<button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>`
             : ""
         }
@@ -340,7 +339,7 @@ function renderClauseNoteModal() {
         note
           ? `
             <label class="field">
-              <textarea class="clause-note-modal-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="12" placeholder="번역 결과를 수정하세요." ${readOnly ? "readonly" : ""}>${escapeHtml(
+              <textarea class="clause-note-modal-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="12" placeholder="번역 결과를 수정하세요.">${escapeHtml(
                 note.translation || ""
               )}</textarea>
             </label>
@@ -709,7 +708,6 @@ function renderNode(node) {
   const expanded = state.ui.expandedKeys.has(node.key);
   const focusedClass = state.ui.focusedKey === node.key ? "focused" : "";
   const clauseNoteToggleHtml = renderClauseNoteToggle(node.key);
-  const readOnly = isBoardViewMode();
   const hasBlocks = Boolean((node.blocks || []).length);
   const hasChildren = Boolean((node.children || []).length);
   const childrenHtml =
@@ -736,9 +734,9 @@ function renderNode(node) {
           </div>
         </div>
         <div class="tree-actions">
-          ${readOnly ? "" : `<button class="icon-button ghost" title="번역 후 메모" aria-label="번역 후 메모" data-action="translate-clause" data-node-key="${escapeHtml(node.key)}">T</button>`}
+          <button class="icon-button ghost" title="번역 후 메모" aria-label="번역 후 메모" data-action="translate-clause" data-node-key="${escapeHtml(node.key)}">T</button>
           ${clauseNoteToggleHtml}
-          ${readOnly ? "" : `<button class="icon-button danger" title="이 절 제거" aria-label="이 절 제거" data-action="remove-node" data-node-key="${escapeHtml(node.key)}">✕</button>`}
+          ${isBoardViewMode() ? "" : `<button class="icon-button danger" title="이 절 제거" aria-label="이 절 제거" data-action="remove-node" data-node-key="${escapeHtml(node.key)}">✕</button>`}
         </div>
       </div>
       ${bodyHtml}
@@ -1070,7 +1068,6 @@ function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = 
   if (!notes.length) {
     return "";
   }
-  const readOnly = isBoardViewMode();
   const visibleNotes = notes.filter((note) => !note.collapsed);
   if (!visibleNotes.length) {
     return "";
@@ -1086,16 +1083,12 @@ function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = 
                   <strong class="note-kind">선택 메모</strong>
                 </div>
                 <div class="clause-note-meta-actions">
-                  ${
-                    readOnly
-                      ? ""
-                      : `<button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>`
-                  }
+                  <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
                 </div>
               </div>
               <div class="clause-note-body ${note.collapsed ? "hidden" : ""}">
                 <label class="field">
-                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="4" placeholder="번역 결과를 수정하세요." ${readOnly ? "readonly" : ""}>${escapeHtml(
+                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="4" placeholder="번역 결과를 수정하세요.">${escapeHtml(
                     note.translation || ""
                   )}</textarea>
                 </label>
@@ -1300,9 +1293,6 @@ function bindTreeEvents() {
       updateSelectionStateFromElement(paragraph, "", false);
     });
     paragraph.addEventListener("contextmenu", (event) => {
-      if (isBoardViewMode()) {
-        return;
-      }
       const selection = window.getSelection();
       const selectedText = selection ? selection.toString().trim() : "";
       event.preventDefault();
@@ -3263,6 +3253,7 @@ function flushPersistSessionState() {
   } catch (_error) {
     // Ignore storage failures.
   }
+  window.dispatchEvent(new CustomEvent("specbot:workspace-persisted", { detail: payload }));
 }
 
 function getWorkspaceSnapshot() {

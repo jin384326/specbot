@@ -97,18 +97,22 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
                 detail={"message": f"Post is already being edited by {current_lock.editor_label}.", "lock": current_lock.to_dict()},
             )
         try:
-            lock = locks.refresh(post_id=post_id, editor_id=payload.editorId, editor_label=payload.editorLabel)
             post = repository.update_post(
                 post_id=post_id,
                 title=payload.title,
                 body=payload.body,
                 workspace_state=payload.workspaceState,
             )
+            lock = (
+                locks.refresh(post_id=post_id, editor_id=payload.editorId, editor_label=payload.editorLabel)
+                if current_lock and current_lock.editor_id == payload.editorId
+                else None
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except LockConflictError as exc:
             raise HTTPException(status_code=409, detail={"message": str(exc), "lock": exc.lock.to_dict()}) from exc
-        return {"success": True, "data": {**post.to_dict(), "lock": lock.to_dict()}}
+        return {"success": True, "data": {**post.to_dict(), "lock": lock.to_dict() if lock else None}}
 
     @router.post("/posts/{post_id}/delete")
     def delete_post(post_id: str, payload: BoardLockPayload) -> dict[str, Any]:

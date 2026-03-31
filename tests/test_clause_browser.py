@@ -23,6 +23,7 @@ from app.clause_browser.api import (
     SpecbotQueryRequest,
     create_router,
 )
+from app.clause_browser.backend.board_api import BoardCreatePayload, BoardLockPayload, BoardUpdatePayload
 from app.clause_browser.preprocess import build_clause_browser_corpus
 from app.clause_browser.repository import ClauseRepository
 from app.clause_browser.server import ClauseBrowserSettings, create_app
@@ -276,6 +277,13 @@ def get_endpoint(app, path: str):
         if isinstance(route, APIRoute) and route.path == path:
             return route.endpoint
     raise AssertionError(f"Route not found: {path}")
+
+
+def get_endpoint_with_method(app, path: str, method: str):
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.path == path and method.upper() in route.methods:
+            return route.endpoint
+    raise AssertionError(f"Route not found: {method} {path}")
 
 
 def test_documents_endpoint_lists_specs(tmp_path: Path) -> None:
@@ -611,6 +619,44 @@ def test_llm_action_rejects_empty_text(tmp_path: Path) -> None:
         assert "Select text" in exc.detail
     else:
         raise AssertionError("Expected HTTPException")
+
+
+def test_board_update_without_lock_does_not_mark_post_as_editing(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    create_post = get_endpoint_with_method(app, "/api/clause-browser/board/posts", "POST")
+    update_post = get_endpoint_with_method(app, "/api/clause-browser/board/posts/{post_id}", "PUT")
+    get_post = get_endpoint_with_method(app, "/api/clause-browser/board/posts/{post_id}", "GET")
+
+    created = create_post(
+        BoardCreatePayload(
+            editorId="editor-1",
+            editorLabel="Editor 1",
+            title="Session Export",
+            releaseData="2025-12",
+            release="Rel-18",
+            workspaceState={"notes": []},
+        )
+    )["data"]
+    post_id = created["postId"]
+
+    # Simulate leaving edit mode so read-only autosave updates occur without a lock.
+    release_lock = get_endpoint_with_method(app, "/api/clause-browser/board/posts/{post_id}/lock/release", "POST")
+    release_lock(post_id, BoardLockPayload(editorId="editor-1", editorLabel="Editor 1"))
+
+    updated = update_post(
+        post_id,
+        BoardUpdatePayload(
+            editorId="viewer-1",
+            editorLabel="Viewer 1",
+            title="Session Export",
+            workspaceState={"notes": [{"id": "n1"}]},
+        ),
+    )["data"]
+
+    assert updated["lock"] is None
+    fetched = get_post(post_id)["data"]
+    assert fetched["lock"] is None
+    assert fetched["workspaceState"]["notes"] == [{"id": "n1"}]
 
 
 def test_llm_action_service_rejects_requests_when_queue_is_full() -> None:
