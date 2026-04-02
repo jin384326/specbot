@@ -18,6 +18,23 @@ python3 -m uvicorn app.specbot_query_server:create_app --factory --host 0.0.0.0 
 python3 -m uvicorn app.clause_browser.server:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
+Node / npm:
+
+- 일반 실행만 할 때는 `npm install` 이 필수는 아니다.
+- 현재 에디터 번들 파일 `frontend/static/js/vendor/tinymce-editor.js` 가 저장소에 포함되어 있으므로, 서버 실행만 하면 브라우저 UI는 뜬다.
+- 아래 경우에만 Node.js와 `npm install` 이 필요하다.
+  - `frontend/src/tinymce-editor.js` 를 수정한 경우
+  - `tinymce` / `esbuild` 버전을 바꾸는 경우
+  - 에디터 번들을 다시 생성해야 하는 경우
+
+에디터 번들 재빌드:
+
+```bash
+cd app/clause_browser/frontend
+npm install
+npm run build:editor
+```
+
 스크립트:
 
 ```bash

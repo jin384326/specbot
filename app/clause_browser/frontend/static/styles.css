@@ -1218,6 +1218,57 @@ button:disabled {
   border: 1px solid #d7ddd2;
   border-radius: 14px;
   background: #fbfcfa;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.docx-figure:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.clause-editor-host {
+  min-height: 32px;
+  padding: 2px 0;
+  cursor: text;
+}
+
+.clause-editor-host .tox-tinymce-inline,
+.clause-editor-host .tox-editor-container,
+.clause-editor-host .tox-edit-area {
+  border: 0;
+  box-shadow: none;
+}
+
+.clause-editor-host:focus-within {
+  outline: 2px solid rgba(102, 126, 58, 0.12);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
+.clause-editor-host .editor-block.is-highlighted,
+.clause-editor-host .is-highlighted {
+  background: rgba(255, 245, 157, 0.75);
+}
+
+.clause-editor-host table.is-highlighted,
+.clause-editor-host tr.is-highlighted > td,
+.clause-editor-host tr.is-highlighted > th,
+.clause-editor-host td.is-highlighted,
+.clause-editor-host th.is-highlighted {
+  background: rgba(255, 245, 157, 0.75);
+}
+
+.editor-selection-note-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.editor-note-card {
+  margin: 0;
 }
 
 .docx-figure img {

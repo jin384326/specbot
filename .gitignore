@@ -1,5 +1,6 @@
 # Build / local artifacts
 artifacts/
+**/node_modules/
 
 # Embedding / HF model weights and caches (tracked helper script only)
 models/*

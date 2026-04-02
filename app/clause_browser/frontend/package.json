@@ -1,0 +1,12 @@
+{
+  "name": "specbot-clause-browser-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:editor": "node scripts/build-editor.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.27.5",
+    "tinymce": "^8.4.0"
+  }
+}

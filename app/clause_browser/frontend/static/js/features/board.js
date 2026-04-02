@@ -325,6 +325,13 @@ function stopHeartbeat() {
   }
 }
 
+function clearAutosaveTimer() {
+  if (boardState.autosaveTimerId) {
+    window.clearTimeout(boardState.autosaveTimerId);
+    boardState.autosaveTimerId = 0;
+  }
+}
+
 function releaseCurrentLockOnUnload() {
   if (!boardState.currentPostId || !boardState.currentLock) {
     return;
@@ -372,6 +379,7 @@ async function openExistingPostReadOnly(postId, options = {}) {
 
 async function openDraftPost(options = {}) {
   clearMessage();
+  clearAutosaveTimer();
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = true;
@@ -386,6 +394,7 @@ async function openDraftPost(options = {}) {
 
 async function openPostInEditor(post, options = {}) {
   clearMessage();
+  clearAutosaveTimer();
   boardState.currentPostId = post.postId;
   boardState.currentLock = post.lock || null;
   boardState.isDraft = false;
@@ -404,6 +413,7 @@ async function openPostInEditor(post, options = {}) {
 
 async function openPostInViewer(post, options = {}) {
   clearMessage();
+  clearAutosaveTimer();
   boardState.currentPostId = post.postId;
   boardState.currentLock = null;
   boardState.isDraft = false;
@@ -441,6 +451,9 @@ async function persistCurrentPost({ autosave = false } = {}) {
     workspaceState: getWorkspaceSnapshot(),
   };
   if (!boardState.currentPostId) {
+    if (!boardState.isDraft) {
+      throw new Error("현재 게시글 ID를 찾을 수 없습니다. 새 글 생성이 아니라 기존 글 업데이트를 기대한 상태입니다.");
+    }
     const data = await request(`/api/clause-browser/board/posts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -469,14 +482,14 @@ function scheduleViewAutosave() {
   if (boardState.mode !== "view" || !boardState.currentPostId || boardState.isRestoringRoute) {
     return;
   }
-  if (boardState.autosaveTimerId) {
-    window.clearTimeout(boardState.autosaveTimerId);
-  }
+  clearAutosaveTimer();
   boardState.autosaveTimerId = window.setTimeout(async () => {
     boardState.autosaveTimerId = 0;
+    if (boardState.mode !== "view" || !boardState.currentPostId || boardState.isDraft || boardState.isRestoringRoute) {
+      return;
+    }
     try {
       await persistCurrentPost({ autosave: true });
-      setBoardMessage("메모 변경사항을 자동 저장했습니다.", false);
     } catch (error) {
       showBoardError(error);
     }
@@ -517,6 +530,7 @@ async function deletePost(postId) {
 
 async function closeEditor() {
   clearMessage();
+  clearAutosaveTimer();
   stopHeartbeat();
   if (boardState.currentPostId && boardState.currentLock) {
     try {
