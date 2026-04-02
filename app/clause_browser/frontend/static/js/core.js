@@ -59,6 +59,7 @@ const state = {
       cellId: "",
       rowText: "",
       hasSelection: false,
+      targets: [],
     },
     nodeMenu: {
       key: "",
@@ -1753,10 +1754,11 @@ function bindTreeEvents(scope = elements.treeContainer) {
     });
     paragraph.addEventListener("contextmenu", (event) => {
       const selection = window.getSelection();
-      const selectedText = selection ? selection.toString().trim() : "";
       event.preventDefault();
       hideNodeMenu();
-      updateSelectionStateFromElement(paragraph, selectedText, Boolean(selectedText));
+      if (!updateSelectionStateFromDomSelection(selection, paragraph)) {
+        updateSelectionStateFromElement(paragraph, "", false);
+      }
       showSelectionMenu(event.clientX, event.clientY);
     });
   });
@@ -1947,7 +1949,11 @@ function buildSelectionDeletePlan(range) {
 function getIntersectedElements(range, selector) {
   return [...elements.treeContainer.querySelectorAll(selector)].filter((element) => {
     try {
-      return range.intersectsNode(element);
+      const elementRange = document.createRange();
+      elementRange.selectNodeContents(element);
+      const startsBeforeElementEnds = range.compareBoundaryPoints(Range.START_TO_END, elementRange) < 0;
+      const endsAfterElementStarts = range.compareBoundaryPoints(Range.END_TO_START, elementRange) > 0;
+      return startsBeforeElementEnds && endsAfterElementStarts;
     } catch (_error) {
       return false;
     }
@@ -2763,7 +2769,38 @@ function handleSelectionChange() {
   if (!anchorElement) {
     return;
   }
+  updateSelectionStateFromDomSelection(selection, anchorElement);
+}
+
+function updateSelectionStateFromDomSelection(selection, fallbackElement = null) {
+  const targetSelection = selection || window.getSelection();
+  const text = targetSelection ? targetSelection.toString().trim() : "";
+  const anchorElement =
+    fallbackElement ||
+    targetSelection?.anchorNode?.parentElement?.closest(".tree-text");
+  if (!targetSelection || !text || !anchorElement) {
+    return false;
+  }
+  const range = targetSelection.rangeCount ? targetSelection.getRangeAt(0) : null;
+  const intersectedParagraphs = range ? getIntersectedElements(range, ".tree-text[data-clause-key]") : [];
+  if (intersectedParagraphs.length > 1) {
+    updateSelectionState(
+      text,
+      anchorElement.dataset.clauseKey || "",
+      getLabelForKey(anchorElement.dataset.clauseKey || ""),
+      Number(anchorElement.dataset.blockIndex || -1),
+      Number(anchorElement.dataset.rowIndex || -1),
+      Number(anchorElement.dataset.cellIndex || -1),
+      anchorElement.dataset.rowText || "",
+      true,
+      anchorElement.dataset.blockId || "",
+      anchorElement.dataset.cellId || "",
+      buildSelectionTargetsFromElements(intersectedParagraphs)
+    );
+    return true;
+  }
   updateSelectionStateFromElement(anchorElement, text, true);
+  return true;
 }
 
 function updateSelectionStateFromEditorSelection(editor = null) {
@@ -2788,6 +2825,14 @@ function updateSelectionStateFromEditorSelection(editor = null) {
   }
   const topLevelBlocks = [...host.children];
   const focusElement = resolveEditorSelectionElement(selection, host);
+  const range = selection.getRangeAt(0);
+  const intersectedBlocks = topLevelBlocks.filter((element) => {
+    try {
+      return range.intersectsNode(element);
+    } catch (_error) {
+      return false;
+    }
+  });
   const blockElement = focusElement ? findTopLevelEditorBlock(focusElement, host) : null;
   const blockIndex = blockElement ? topLevelBlocks.indexOf(blockElement) : -1;
   const blockId = blockElement instanceof HTMLElement ? String(blockElement.getAttribute("data-editor-block-id") || "") : "";
@@ -2810,6 +2855,12 @@ function updateSelectionStateFromEditorSelection(editor = null) {
       rowText = normalizeEditorText(blockElement.textContent || "");
     }
   }
+  const targets =
+    intersectedBlocks.length > 1
+      ? intersectedBlocks
+          .map((element) => buildSelectionTargetFromEditorBlock(nodeKey, element, topLevelBlocks))
+          .filter(Boolean)
+      : [];
   updateSelectionState(
     selection.toString().trim(),
     nodeKey,
@@ -2820,7 +2871,8 @@ function updateSelectionStateFromEditorSelection(editor = null) {
     rowText,
     !selection.isCollapsed && Boolean(selection.toString().trim()),
     blockId,
-    cellId
+    cellId,
+    targets
   );
   return true;
 }
@@ -2911,9 +2963,49 @@ function updateSelectionStateFromEditorTableSelection(nodeKey, host, selectedCel
     rowText,
     selectedCells.length > 0,
     blockId,
-    singleCellId
+    singleCellId,
+    []
   );
   return true;
+}
+
+function buildSelectionTargetsFromElements(elementsList) {
+  return (elementsList || [])
+    .map((element) => ({
+      clauseKey: element.dataset.clauseKey || "",
+      clauseLabel: getLabelForKey(element.dataset.clauseKey || ""),
+      blockId: element.dataset.blockId || "",
+      blockIndex: Number(element.dataset.blockIndex || -1),
+      rowIndex: Number(element.dataset.rowIndex || -1),
+      cellIndex: Number(element.dataset.cellIndex || -1),
+      cellId: element.dataset.cellId || "",
+      rowText: element.dataset.rowText || "",
+    }))
+    .filter((item) => item.clauseKey && item.blockIndex >= 0);
+}
+
+function buildSelectionTargetFromEditorBlock(nodeKey, blockElement, topLevelBlocks) {
+  if (!(blockElement instanceof HTMLElement)) {
+    return null;
+  }
+  const tagName = blockElement.tagName.toLowerCase();
+  if (tagName !== "p" && tagName !== "table") {
+    return null;
+  }
+  const blockIndex = topLevelBlocks.indexOf(blockElement);
+  if (blockIndex < 0) {
+    return null;
+  }
+  return {
+    clauseKey: nodeKey,
+    clauseLabel: getLabelForKey(nodeKey),
+    blockId: String(blockElement.getAttribute("data-editor-block-id") || ""),
+    blockIndex,
+    rowIndex: -1,
+    cellIndex: -1,
+    cellId: "",
+    rowText: normalizeEditorText(blockElement.textContent || ""),
+  };
 }
 
 function resolveEditorSelectionElement(selection, host) {
@@ -2940,8 +3032,8 @@ function findTopLevelEditorBlock(element, host) {
   return current instanceof HTMLElement && current.parentElement === host ? current : null;
 }
 
-function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, rowIndex = -1, cellIndex = -1, rowText = "", hasSelection = false, blockId = "", cellId = "") {
-  state.ui.selection = { text, clauseKey, clauseLabel, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText, hasSelection };
+function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, rowIndex = -1, cellIndex = -1, rowText = "", hasSelection = false, blockId = "", cellId = "", targets = []) {
+  state.ui.selection = { text, clauseKey, clauseLabel, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText, hasSelection, targets };
 }
 
 function updateSelectionStateFromElement(element, text = "", hasSelection = false) {
@@ -2959,7 +3051,8 @@ function updateSelectionStateFromElement(element, text = "", hasSelection = fals
     element.dataset.rowText || "",
     hasSelection,
     element.dataset.blockId || "",
-    element.dataset.cellId || ""
+    element.dataset.cellId || "",
+    []
   );
 }
 
@@ -2983,14 +3076,44 @@ function hideSelectionMenu() {
   elements.selectionMenu.classList.add("hidden");
 }
 
+function getCurrentSelectionTargets() {
+  const targets = Array.isArray(state.ui.selection?.targets) ? state.ui.selection.targets.filter(Boolean) : [];
+  if (targets.length) {
+    return targets;
+  }
+  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
+  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
+  if (!clauseKey || blockIndex < 0) {
+    return [];
+  }
+  return [
+    {
+      clauseKey,
+      blockId: String(state.ui.selection?.blockId || "").trim(),
+      blockIndex,
+      rowIndex: Number(state.ui.selection?.rowIndex ?? -1),
+      cellIndex: Number(state.ui.selection?.cellIndex ?? -1),
+      cellId: String(state.ui.selection?.cellId || "").trim(),
+      rowText: String(state.ui.selection?.rowText || "").trim(),
+      clauseLabel: String(state.ui.selection?.clauseLabel || ""),
+    },
+  ];
+}
+
 async function runSelectionAction(targetLanguage = "ko") {
   if (!beginBusy("선택 메모 번역 중입니다.")) {
     return;
   }
   const text = state.ui.selection.text;
+  const selectionTargets = getCurrentSelectionTargets();
   if (!text) {
     endBusy();
     setMessage("번역할 텍스트를 먼저 선택하세요.", true);
+    return;
+  }
+  if (!selectionTargets.length) {
+    endBusy();
+    setMessage("번역 대상을 찾을 수 없습니다.", true);
     return;
   }
   if (String(text).length > TRANSLATION_CHUNK_LIMIT) {
@@ -2998,18 +3121,20 @@ async function runSelectionAction(targetLanguage = "ko") {
     setMessage(`선택 메모는 ${TRANSLATION_CHUNK_LIMIT}자 이하만 번역할 수 있습니다. 범위를 줄여 주세요.`, true);
     return;
   }
+  const anchorTarget = selectionTargets[0];
   try {
     await createTranslatedNote({
       type: "selection",
-      clauseKey: state.ui.selection.clauseKey,
-      blockIndex: state.ui.selection.blockIndex,
-      rowIndex: state.ui.selection.rowIndex,
-      cellIndex: state.ui.selection.cellIndex,
-      cellId: state.ui.selection.cellId,
-      rowText: state.ui.selection.rowText,
+      clauseKey: anchorTarget.clauseKey,
+      blockIndex: anchorTarget.blockIndex,
+      rowIndex: anchorTarget.rowIndex,
+      cellIndex: anchorTarget.cellIndex,
+      cellId: anchorTarget.cellId,
+      rowText: anchorTarget.rowText,
       sourceText: text,
-      clauseLabel: state.ui.selection.clauseLabel,
+      clauseLabel: anchorTarget.clauseLabel || state.ui.selection.clauseLabel,
       targetLanguage,
+      targets: selectionTargets,
     });
   } finally {
     endBusy();
@@ -3168,7 +3293,7 @@ function getClauseSourceText(node) {
   return blockText || String(node.clauseTitle || "").trim();
 }
 
-async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, cellIndex = -1, cellId = "", rowText = "", sourceText, clauseLabel, targetLanguage }) {
+async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, cellIndex = -1, cellId = "", rowText = "", sourceText, clauseLabel, targetLanguage, targets = [] }) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
     state.ui.translationTask = {
@@ -3194,6 +3319,7 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex
       cellIndex,
       cellId,
       rowText,
+      targets,
       clauseLabel,
       sourceText,
       translation: response.outputText || response.data?.outputText || "",
@@ -3230,6 +3356,35 @@ function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1, cellIn
   );
 }
 
+function getHighlightEntriesForSelectionNote(note) {
+  const noteTargets = Array.isArray(note?.targets) ? note.targets.filter(Boolean) : [];
+  if (noteTargets.length) {
+    return noteTargets
+      .map((target) =>
+        createHighlightEntry({
+          clauseKey: target.clauseKey,
+          blockId: target.blockId,
+          blockIndex: target.blockIndex,
+          rowIndex: target.rowIndex,
+          cellIndex: target.cellIndex,
+          cellId: target.cellId,
+          rowText: target.rowText,
+        })
+      )
+      .filter(Boolean);
+  }
+  const singleEntry = createHighlightEntry({
+    clauseKey: note.clauseKey,
+    blockId: note.blockId,
+    blockIndex: note.blockIndex,
+    rowIndex: note.rowIndex,
+    cellIndex: note.cellIndex,
+    cellId: note.cellId,
+    rowText: note.rowText,
+  });
+  return singleEntry ? [singleEntry] : [];
+}
+
 function upsertNote(note) {
   const existingIndex = (state.ui.notes || []).findIndex((item) => item.id === note.id);
   if (existingIndex >= 0) {
@@ -3238,17 +3393,9 @@ function upsertNote(note) {
     state.ui.notes = [note, ...(state.ui.notes || [])];
   }
   if (note.type === "selection") {
-    ensureHighlightEntry(
-      createHighlightEntry({
-        clauseKey: note.clauseKey,
-        blockId: note.blockId,
-        blockIndex: note.blockIndex,
-        rowIndex: note.rowIndex,
-        cellIndex: note.cellIndex,
-        cellId: note.cellId,
-        rowText: note.rowText,
-      })
-    );
+    getHighlightEntriesForSelectionNote(note).forEach((entry) => {
+      ensureHighlightEntry(entry);
+    });
   }
   if (note.type === "clause" && note.clauseKey) {
     expandNodePath(note.clauseKey);
@@ -3326,33 +3473,24 @@ function deleteNote(noteId) {
 }
 
 function pruneHighlightForSelectionNote(note) {
-  const linkedEntry = createHighlightEntry({
-    clauseKey: note.clauseKey,
-    blockId: note.blockId,
-    blockIndex: note.blockIndex,
-    rowIndex: note.rowIndex,
-    cellIndex: note.cellIndex,
-    cellId: note.cellId,
-    rowText: note.rowText,
-  });
-  if (!linkedEntry) {
+  const linkedEntries = getHighlightEntriesForSelectionNote(note);
+  if (!linkedEntries.length) {
     return;
   }
-  const hasSiblingSelectionNote = (state.ui.notes || []).some(
-    (item) =>
-      item.type === "selection" &&
-      item.id !== note.id &&
-      item.clauseKey === note.clauseKey &&
-      String(item.blockId || "") === String(note.blockId || "") &&
-      Number(item.blockIndex ?? -1) === Number(note.blockIndex ?? -1) &&
-      Number(item.rowIndex ?? -1) === Number(note.rowIndex ?? -1) &&
-      Number(item.cellIndex ?? -1) === Number(note.cellIndex ?? -1) &&
-      String(item.cellId || "") === String(note.cellId || "")
+  const siblingHighlightIds = new Set(
+    (state.ui.notes || [])
+      .filter((item) => item.type === "selection" && item.id !== note.id)
+      .flatMap((item) => getHighlightEntriesForSelectionNote(item).map((entry) => entry.id))
   );
-  if (hasSiblingSelectionNote) {
+  const removableIds = new Set(
+    linkedEntries
+      .map((entry) => entry.id)
+      .filter((entryId) => !siblingHighlightIds.has(entryId))
+  );
+  if (!removableIds.size) {
     return;
   }
-  state.ui.highlights = (state.ui.highlights || []).filter((item) => item.id !== linkedEntry.id);
+  state.ui.highlights = (state.ui.highlights || []).filter((item) => !removableIds.has(item.id));
 }
 
 function pruneNotesForNodeKey(nodeKey) {
@@ -3399,6 +3537,27 @@ function getCurrentSelectionHighlightEntry() {
   return createHighlightEntry({ clauseKey, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText });
 }
 
+function getCurrentSelectionHighlightEntries() {
+  const selectionTargets = getCurrentSelectionTargets();
+  if (selectionTargets.length) {
+    return selectionTargets
+      .map((target) =>
+        createHighlightEntry({
+          clauseKey: target.clauseKey,
+          blockId: target.blockId,
+          blockIndex: target.blockIndex,
+          rowIndex: target.rowIndex,
+          cellIndex: target.cellIndex,
+          cellId: target.cellId,
+          rowText: target.rowText,
+        })
+      )
+      .filter(Boolean);
+  }
+  const singleEntry = getCurrentSelectionHighlightEntry();
+  return singleEntry ? [singleEntry] : [];
+}
+
 function createHighlightEntry({ clauseKey, blockId = "", blockIndex = -1, rowIndex = -1, cellIndex = -1, cellId = "", rowText = "" }) {
   const normalizedClauseKey = String(clauseKey || "").trim();
   const normalizedBlockId = String(blockId || "").trim();
@@ -3434,46 +3593,44 @@ function ensureHighlightEntry(entry) {
 }
 
 function toggleSelectionHighlight() {
-  const entry = getCurrentSelectionHighlightEntry();
-  if (!entry) {
+  const entries = getCurrentSelectionHighlightEntries();
+  if (!entries.length) {
     setMessage("Highlight할 문단이나 표 행을 먼저 선택하세요.", true);
     return;
   }
-  const exists = (state.ui.highlights || []).some((item) => item.id === entry.id);
-  state.ui.highlights = exists
-    ? (state.ui.highlights || []).filter((item) => item.id !== entry.id)
-    : [entry, ...(state.ui.highlights || [])];
+  const existingIds = new Set((state.ui.highlights || []).map((item) => item.id));
+  const allExist = entries.every((entry) => existingIds.has(entry.id));
+  state.ui.highlights = allExist
+    ? (state.ui.highlights || []).filter((item) => !entries.some((entry) => entry.id === item.id))
+    : [...entries.filter((entry) => !existingIds.has(entry.id)), ...(state.ui.highlights || [])];
   persistSessionState();
   renderLoadedTree();
 }
 
 function addManualSelectionNote() {
-  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
-  const blockId = String(state.ui.selection?.blockId || "").trim();
-  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
-  const rowIndex = Number(state.ui.selection?.rowIndex ?? -1);
-  const cellIndex = Number(state.ui.selection?.cellIndex ?? -1);
-  const cellId = String(state.ui.selection?.cellId || "").trim();
-  if (!clauseKey || blockIndex < 0) {
+  const selectionTargets = getCurrentSelectionTargets();
+  if (!selectionTargets.length) {
     setMessage("메모를 추가할 문단이나 표 셀을 먼저 선택하세요.", true);
     return;
   }
+  const anchorTarget = selectionTargets[0];
   const sourceText = String(
     state.ui.selection?.hasSelection && state.ui.selection?.text
       ? state.ui.selection.text
-      : state.ui.selection?.rowText || ""
+      : anchorTarget.rowText || ""
   ).trim();
   upsertNote({
     id: `manual-note:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     type: "selection",
-    clauseKey,
-    blockId,
-    blockIndex,
-    rowIndex,
-    cellIndex,
-    cellId,
-    rowText: String(state.ui.selection?.rowText || ""),
-    clauseLabel: String(state.ui.selection?.clauseLabel || ""),
+    clauseKey: anchorTarget.clauseKey,
+    blockId: anchorTarget.blockId,
+    blockIndex: anchorTarget.blockIndex,
+    rowIndex: anchorTarget.rowIndex,
+    cellIndex: anchorTarget.cellIndex,
+    cellId: anchorTarget.cellId,
+    rowText: anchorTarget.rowText,
+    targets: selectionTargets,
+    clauseLabel: anchorTarget.clauseLabel || getLabelForKey(anchorTarget.clauseKey),
     sourceText,
     translation: "",
     sourceLanguage: inferSourceLanguage(sourceText),
