@@ -38,9 +38,16 @@ function ensureNodeStableBlockIds(node) {
   if (!node || typeof node !== "object") {
     return node;
   }
+  const normalizedText = normalizeEditorText(node.text || "");
+  const rawBlocks = Array.isArray(node.blocks) ? node.blocks : [];
+  const normalizedBlocks = rawBlocks.length
+    ? rawBlocks
+    : normalizedText
+      ? [{ type: "paragraph", text: normalizedText }]
+      : [];
   return {
     ...node,
-    blocks: ensureBlocksHaveStableIds(Array.isArray(node.blocks) ? node.blocks : []),
+    blocks: ensureBlocksHaveStableIds(normalizedBlocks),
     children: Array.isArray(node.children) ? node.children.map((child) => ensureNodeStableBlockIds(child)) : [],
   };
 }

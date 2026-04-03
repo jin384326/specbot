@@ -40,6 +40,7 @@ const state = {
       release: "",
     },
     specbotResults: [],
+    specbotResultsCollapsed: false,
     specbotQueryStatus: "",
     specbotDocumentSettingsLoading: false,
     notes: [],
@@ -61,6 +62,9 @@ const state = {
       hasSelection: false,
       targets: [],
     },
+    selectionSnapshot: null,
+    openSelectionNoteIds: new Set(),
+    selectionNoteOverlayPositions: {},
     nodeMenu: {
       key: "",
       x: 0,
@@ -87,6 +91,15 @@ const SESSION_PERSIST_DEBOUNCE_MS = 120;
 const TRANSIENT_STATUS_HIDE_DELAY_MS = 2000;
 let sessionPersistTimer = 0;
 let messageHideTimer = 0;
+let revealedSelectionTargetTimer = 0;
+
+function escapeSelector(value) {
+  const text = String(value || "");
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(text);
+  }
+  return text.replace(/["\\]/g, "\\$&");
+}
 
 function bindElements() {
   elements.openPickerButton = document.getElementById("open-picker-button");
@@ -97,6 +110,16 @@ function bindElements() {
   elements.specbotQueryStatus = document.getElementById("specbot-query-status");
   elements.openSpecbotSettings = document.getElementById("open-specbot-settings");
   elements.specbotResultList = document.getElementById("specbot-result-list");
+  elements.toggleSpecbotResults = document.getElementById("toggle-specbot-results");
+  elements.selectionNotePanel = document.getElementById("selection-note-panel");
+  elements.selectionNoteOverlay = document.getElementById("selection-note-overlay");
+  if (!elements.selectionNoteOverlay) {
+    elements.selectionNoteOverlay = document.createElement("div");
+    elements.selectionNoteOverlay.id = "selection-note-overlay";
+    elements.selectionNoteOverlay.className = "selection-note-overlay hidden";
+    elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
+    document.body.appendChild(elements.selectionNoteOverlay);
+  }
   elements.clearSpecbotResults = document.getElementById("clear-specbot-results");
   elements.pickerSelectionSummary = document.getElementById("picker-selection-summary");
   elements.selectedClauseCount = document.getElementById("selected-clause-count");
@@ -156,6 +179,8 @@ function bindElements() {
 function bindGlobalEvents() {
   elements.treeContainer.addEventListener("scroll", debounce(syncViewportSelection, 40));
   document.addEventListener("keydown", handleTreeDeleteKeydown);
+  document.addEventListener("mouseup", handleGlobalMouseup);
+  window.addEventListener("resize", debounce(handleViewportLayoutChange, 80));
   document.addEventListener("click", (event) => {
     if (!elements.selectionMenu.contains(event.target)) {
       hideSelectionMenu();
@@ -184,6 +209,28 @@ function bindGlobalEvents() {
     flushPersistSessionState();
     abortActiveRequests();
   });
+}
+
+function handleViewportLayoutChange() {
+  syncEditorNoteRailPositions();
+  renderSelectionSidebar();
+}
+
+function handleGlobalMouseup() {
+  window.setTimeout(() => {
+    const selection = window.getSelection();
+    const text = selection ? selection.toString().trim() : "";
+    if (!text) {
+      return;
+    }
+    if (updateSelectionStateFromEditorSelection()) {
+      return;
+    }
+    const anchorElement = selection?.anchorNode?.parentElement?.closest(".tree-text");
+    if (anchorElement) {
+      updateSelectionStateFromDomSelection(selection, anchorElement);
+    }
+  }, 0);
 }
 
 async function loadConfig() {
@@ -708,6 +755,8 @@ function renderLoadedTree() {
     .map(([specNo, nodes]) => renderLoadedSpecGroup(specNo, nodes))
     .join("");
   bindTreeEvents();
+  syncEditorNoteRailPositions();
+  renderSelectionSidebar();
   renderClauseNoteModal();
   syncViewportSelection();
 }
@@ -734,6 +783,7 @@ function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClaus
   if (next) {
     bindTreeEvents(next);
   }
+  syncEditorNoteRailPositions();
   if (refreshSelectedList) {
     renderSelectedClauseList();
   }
@@ -743,6 +793,7 @@ function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClaus
   if (refreshClauseNoteModal && state.ui.clauseNoteModalKey === nodeKey) {
     renderClauseNoteModal();
   }
+  renderSelectionSidebar();
   syncViewportSelection();
 }
 
@@ -768,6 +819,8 @@ function rerenderLoadedNodes(nodeKeys, options = {}) {
   if (options.refreshClauseNoteModal) {
     renderClauseNoteModal();
   }
+  renderSelectionSidebar();
+  syncEditorNoteRailPositions();
 }
 
 function renderLoadedSpecGroup(specNo, nodes) {
@@ -795,7 +848,14 @@ function renderNode(node) {
   const expanded = state.ui.expandedKeys.has(node.key);
   const focusedClass = state.ui.focusedKey === node.key ? "focused" : "";
   const clauseNoteToggleHtml = renderClauseNoteToggle(node.key);
-  const hasBlocks = Boolean((node.blocks || []).length);
+  const fallbackBlocks = ensureBlocksHaveStableIds(
+    Array.isArray(node.blocks) && node.blocks.length
+      ? node.blocks
+      : normalizeEditorText(node.text || "")
+        ? [{ type: "paragraph", text: normalizeEditorText(node.text || "") }]
+        : []
+  );
+  const hasBlocks = Boolean(fallbackBlocks.length);
   const hasChildren = Boolean((node.children || []).length);
   const childrenHtml =
     expanded && hasChildren
@@ -804,7 +864,7 @@ function renderNode(node) {
   const bodyHtml = expanded
     ? `
       <div class="tree-body ${hasBlocks ? "" : "tree-body-compact"}">
-        ${hasBlocks ? (isBoardEditMode() ? renderEditorSection(node) : renderBlocks(node)) : ""}
+        ${hasBlocks ? renderEditorSection(node) : ""}
         ${childrenHtml}
       </div>
     `
@@ -832,64 +892,356 @@ function renderNode(node) {
 }
 
 function renderEditorSection(node) {
-  return `${renderEditorHost(node)}${renderEditorSelectionNotes(node)}`;
+  const normalizedBlocks = ensureBlocksHaveStableIds(Array.isArray(node.blocks) ? node.blocks : []);
+  const fallbackText = normalizeEditorText(node.text || "");
+  const blocks =
+    normalizedBlocks.length && deriveNodeTextFromBlocks(normalizedBlocks)
+      ? normalizedBlocks
+      : fallbackText
+        ? [{ id: createStableBlockId(), type: "paragraph", text: fallbackText }]
+        : normalizedBlocks;
+  const noteRailHtml = renderEditorNoteRail(node, blocks);
+  return `
+    <div class="editor-section ${noteRailHtml ? "editor-section-with-rail" : ""}">
+      ${noteRailHtml}
+      ${renderEditorHost(node, blocks)}
+    </div>
+  `;
 }
 
-function renderEditorHost(node) {
+function renderEditorHost(node, blocks = ensureBlocksHaveStableIds(Array.isArray(node.blocks) ? node.blocks : [])) {
   return `
     <div
       class="clause-editor-host"
       data-editor-node-key="${escapeHtml(node.key)}"
       data-editor-clause-id="${escapeHtml(node.clauseId || "")}"
-    >${buildEditorHtmlFromBlocks(node.key, node.blocks || [])}</div>
+    >${buildEditorHtmlFromBlocks(node.key, blocks)}</div>
   `;
 }
 
-function renderEditorSelectionNotes(node) {
-  const notes = (state.ui.notes || [])
+function renderEditorNoteRail(node, blocks) {
+  const selectionNotes = (state.ui.notes || [])
     .filter((note) => note.type === "selection" && note.clauseKey === node.key)
     .sort((left, right) =>
       getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId) - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
       Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
       Number(left.cellIndex ?? -1) - Number(right.cellIndex ?? -1)
     );
-  if (!notes.length) {
+  if (!selectionNotes.length) {
     return "";
   }
+  const seen = new Set();
+  const anchors = selectionNotes.flatMap((note) => {
+    const anchor = getSelectionNoteAnchor(note) || note;
+    const blockIndex = getResolvedBlockIndexForReference(anchor.clauseKey || note.clauseKey, anchor.blockIndex, anchor.blockId);
+    const blockId = String(anchor.blockId || note.blockId || getBlockIdByIndex(note.clauseKey, blockIndex) || "");
+    const rowIndex = Number(anchor.rowIndex ?? -1);
+    const cellIndex = Number(anchor.cellIndex ?? -1);
+    const cellId = String(anchor.cellId || "").trim();
+    const anchorKey = [note.clauseKey, blockId, rowIndex, cellId || cellIndex].join(":");
+    if (seen.has(anchorKey)) {
+      return [];
+    }
+    seen.add(anchorKey);
+    return [{
+      clauseKey: note.clauseKey,
+      blockIndex,
+      blockId,
+      rowIndex,
+      cellIndex,
+      cellId,
+      label:
+        rowIndex >= 0
+          ? cellIndex >= 0
+            ? `R${rowIndex + 1} C${cellIndex + 1}`
+            : `R${rowIndex + 1}`
+          : `P${blockIndex + 1}`,
+    }];
+  });
   return `
-    <div class="editor-selection-note-list" data-editor-note-list="${escapeHtml(node.key)}">
-      ${notes
-        .map((note) => {
-          const resolvedBlockIndex = getResolvedBlockIndexForReference(note.clauseKey, note.blockIndex, note.blockId);
-          const blockLabel = resolvedBlockIndex >= 0 ? `block ${resolvedBlockIndex + 1}` : "block ?";
-          const location =
-            Number(note.rowIndex ?? -1) >= 0
-              ? `row ${Number(note.rowIndex ?? -1) + 1}${Number(note.cellIndex ?? -1) >= 0 ? ` · cell ${Number(note.cellIndex ?? -1) + 1}` : ""}`
-              : "paragraph";
-          return `
-            <article class="clause-note-card editor-note-card ${note.collapsed ? "collapsed" : ""}" data-note-id="${escapeHtml(note.id)}">
-              <div class="clause-note-meta">
-                <div class="clause-note-meta-main">
-                  <strong class="note-kind">선택 메모</strong>
-                  <span class="muted">${escapeHtml(blockLabel)} · ${escapeHtml(location)}</span>
-                </div>
-                <div class="clause-note-meta-actions">
-                  <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
-                </div>
-              </div>
-              <div class="clause-note-body">
-                <label class="field">
-                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="4" placeholder="메모를 입력하세요.">${escapeHtml(
-                    note.translation || ""
-                  )}</textarea>
-                </label>
-              </div>
-            </article>
-          `;
-        })
+    <div class="editor-note-rail">
+      ${anchors
+        .map((anchor) => `
+          <div class="editor-note-anchor">
+            ${renderSelectionNoteToggle(
+              anchor.clauseKey,
+              anchor.blockIndex,
+              anchor.rowIndex,
+              anchor.cellIndex,
+              true,
+              anchor.blockId,
+              anchor.cellId
+            )}
+            <span class="editor-note-anchor-label">${escapeHtml(anchor.label)}</span>
+            ${renderSelectionNotes(
+              anchor.clauseKey,
+              anchor.blockIndex,
+              anchor.rowIndex,
+              anchor.cellIndex,
+              anchor.blockId,
+              anchor.cellId
+            )}
+          </div>
+        `)
         .join("")}
     </div>
   `;
+}
+
+function syncEditorNoteRailPositions() {
+  window.requestAnimationFrame(() => {
+    document.querySelectorAll(".editor-section-with-rail").forEach((section) => {
+      const rail = section.querySelector(".editor-note-rail");
+      const host = section.querySelector(".clause-editor-host");
+      if (!(rail instanceof HTMLElement) || !(host instanceof HTMLElement)) {
+        return;
+      }
+      const hostRect = host.getBoundingClientRect();
+      rail.style.minHeight = `${Math.ceil(host.scrollHeight || hostRect.height || 0)}px`;
+      rail.querySelectorAll(".editor-note-anchor").forEach((anchor) => {
+        const button = anchor.querySelector("[data-action='toggle-selection-notes']");
+        if (!(anchor instanceof HTMLElement) || !(button instanceof HTMLElement)) {
+          return;
+        }
+        const pseudoNote = {
+          clauseKey: button.dataset.clauseKey || "",
+          blockId: button.dataset.blockId || "",
+          blockIndex: Number(button.dataset.blockIndex || -1),
+          rowIndex: Number(button.dataset.rowIndex || -1),
+          cellIndex: Number(button.dataset.cellIndex || -1),
+          cellId: button.dataset.cellId || "",
+        };
+        const target = findSelectionNoteTargetElement(pseudoNote);
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const targetRect = target.getBoundingClientRect();
+        anchor.style.top = `${Math.max(0, Math.round(targetRect.top - hostRect.top - 2))}px`;
+      });
+    });
+  });
+}
+
+function renderSelectionSidebar() {
+  if (!elements.selectionNotePanel) {
+    return;
+  }
+  elements.selectionNotePanel.innerHTML = "";
+  elements.selectionNotePanel.classList.add("hidden");
+  elements.selectionNotePanel.setAttribute("aria-hidden", "true");
+  renderSelectionNoteOverlay();
+}
+
+function bindSelectionSidebarEvents() {
+  if (!elements.selectionNoteOverlay) {
+    return;
+  }
+  elements.selectionNoteOverlay.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
+    textarea.addEventListener("input", (event) => {
+      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
+    });
+  });
+  elements.selectionNoteOverlay.querySelectorAll("[data-action='delete-note']").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteNote(button.dataset.noteId || "");
+    });
+  });
+  elements.selectionNoteOverlay.querySelectorAll("[data-action='toggle-selection-note-card']").forEach((button) => {
+    button.addEventListener("click", () => {
+      closeSelectionNoteById(button.dataset.noteId || "");
+    });
+  });
+}
+
+function renderSelectionNoteOverlay() {
+  if (!elements.selectionNoteOverlay) {
+    return;
+  }
+  const overlayNotes = (state.ui.notes || []).filter((note) => note.type === "selection" && isSelectionNoteOpen(note));
+  console.debug("[selection-note] render overlay", {
+    openIds: [...(state.ui.openSelectionNoteIds || [])],
+    overlayNoteIds: overlayNotes.map((note) => note.id),
+    storedPositions: state.ui.selectionNoteOverlayPositions || {},
+  });
+  if (!overlayNotes.length) {
+    elements.selectionNoteOverlay.innerHTML = "";
+    elements.selectionNoteOverlay.classList.add("hidden");
+    elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
+    return;
+  }
+  const cards = overlayNotes.flatMap((note) => {
+    const position = getSelectionNoteOverlayPosition(note) || state.ui.selectionNoteOverlayPositions?.[String(note.id || "")] || null;
+    if (!position) {
+      console.debug("[selection-note] missing overlay position", {
+        noteId: note.id,
+        note,
+        storedPosition: state.ui.selectionNoteOverlayPositions?.[String(note.id || "")] || null,
+      });
+      return [];
+    }
+    return [`
+      <article
+        class="clause-note-card selection-note-floating-card"
+        data-note-id="${escapeHtml(note.id)}"
+        style="top:${Math.round(position.top)}px; left:${Math.round(position.left)}px; width:${Math.round(position.width)}px;"
+      >
+        <div class="clause-note-meta">
+          <div class="clause-note-meta-main">
+            <strong class="note-kind">${escapeHtml(note.clauseLabel || "선택 메모")}</strong>
+          </div>
+          <div class="clause-note-meta-actions">
+            <button
+              class="icon-button ghost note-collapse-button"
+              title="접기"
+              aria-label="접기"
+              data-action="toggle-selection-note-card"
+              data-note-id="${escapeHtml(note.id)}"
+              data-clause-key="${escapeHtml(note.clauseKey || "")}"
+              data-block-id="${escapeHtml(note.blockId || "")}"
+              data-block-index="${Number(note.blockIndex ?? -1)}"
+              data-row-index="${Number(note.rowIndex ?? -1)}"
+              data-cell-index="${Number(note.cellIndex ?? -1)}"
+              data-cell-id="${escapeHtml(note.cellId || "")}"
+            >−</button>
+            <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
+          </div>
+        </div>
+        <div class="clause-note-body">
+          <label class="field">
+            <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="6" placeholder="메모를 입력하세요.">${escapeHtml(note.translation || "")}</textarea>
+          </label>
+        </div>
+      </article>
+    `];
+  });
+  elements.selectionNoteOverlay.innerHTML = cards.join("");
+  elements.selectionNoteOverlay.classList.toggle("hidden", !cards.length);
+  elements.selectionNoteOverlay.setAttribute("aria-hidden", cards.length ? "false" : "true");
+  bindSelectionSidebarEvents();
+}
+
+function getSelectionNoteOverlayPosition(note) {
+  const target = findSelectionNoteTargetElement(note) || findSelectionNoteAnchorElement(note);
+  if (!(target instanceof HTMLElement)) {
+    return null;
+  }
+  const rect = findSelectionNoteTextRect(target, note) || target.getBoundingClientRect();
+  const width = Math.min(620, Math.max(320, Math.floor(window.innerWidth * 0.28)));
+  const top = Math.min(window.innerHeight - 260, Math.max(16, rect.top - 8));
+  const left = Math.max(16, rect.left - width - 12);
+  return { top, left, width };
+}
+
+function findSelectionNoteTextRect(target, note) {
+  const sourceText = String(note?.sourceText || "").trim();
+  if (!sourceText) {
+    return null;
+  }
+  const targetText = String(target.textContent || "");
+  const startIndex = targetText.indexOf(sourceText);
+  if (startIndex < 0) {
+    return null;
+  }
+  const endIndex = startIndex + sourceText.length;
+  const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+  let currentOffset = 0;
+  let startNode = null;
+  let startNodeOffset = 0;
+  let endNode = null;
+  let endNodeOffset = 0;
+  while (walker.nextNode()) {
+    const textNode = walker.currentNode;
+    const textValue = String(textNode.textContent || "");
+    const nextOffset = currentOffset + textValue.length;
+    if (!startNode && startIndex >= currentOffset && startIndex <= nextOffset) {
+      startNode = textNode;
+      startNodeOffset = Math.max(0, startIndex - currentOffset);
+    }
+    if (endIndex >= currentOffset && endIndex <= nextOffset) {
+      endNode = textNode;
+      endNodeOffset = Math.max(0, endIndex - currentOffset);
+      break;
+    }
+    currentOffset = nextOffset;
+  }
+  if (!startNode || !endNode) {
+    return null;
+  }
+  try {
+    const range = document.createRange();
+    range.setStart(startNode, startNodeOffset);
+    range.setEnd(endNode, endNodeOffset);
+    const rects = [...range.getClientRects()].filter((item) => item.width > 0 || item.height > 0);
+    return rects[0] || range.getBoundingClientRect();
+  } catch (_error) {
+    return null;
+  }
+}
+
+function findSelectionNoteTargetElement(note) {
+  const anchor = getSelectionNoteAnchor(note);
+  const clauseKey = String(anchor?.clauseKey || note?.clauseKey || "").trim();
+  const blockId = String(anchor?.blockId || note?.blockId || "").trim();
+  const cellId = String(anchor?.cellId || note?.cellId || "").trim();
+  const rowIndex = Number(anchor?.rowIndex ?? note?.rowIndex ?? -1);
+  if (!clauseKey || !blockId) {
+    return null;
+  }
+  const host = document.querySelector(
+    `.clause-editor-host[data-editor-node-key="${escapeSelector(clauseKey)}"]`
+  );
+  if (!(host instanceof HTMLElement)) {
+    return null;
+  }
+  if (cellId) {
+    return host.querySelector(
+      `[data-editor-block-id="${escapeSelector(blockId)}"] [data-editor-cell-id="${escapeSelector(cellId)}"]`
+    );
+  }
+  const blockElement = host.querySelector(`[data-editor-block-id="${escapeSelector(blockId)}"]`);
+  if (!(blockElement instanceof HTMLElement)) {
+    return null;
+  }
+  if (rowIndex >= 0 && blockElement.tagName.toLowerCase() === "table") {
+    const row = blockElement.querySelectorAll("tr")[rowIndex];
+    if (row instanceof HTMLElement) {
+      return row;
+    }
+  }
+  return blockElement;
+}
+
+function findSelectionNoteAnchorElement(note) {
+  const anchor = getSelectionNoteAnchor(note);
+  const clauseKey = String(anchor?.clauseKey || note?.clauseKey || "").trim();
+  const blockId = String(anchor?.blockId || note?.blockId || "").trim();
+  const cellId = String(anchor?.cellId || note?.cellId || "").trim();
+  const rowIndex = Number(anchor?.rowIndex ?? note?.rowIndex ?? -1);
+  const blockIndex = getResolvedBlockIndexForReference(clauseKey, anchor?.blockIndex ?? note?.blockIndex, blockId);
+  const selector = [
+    `[data-action="toggle-selection-notes"]`,
+    `[data-clause-key="${escapeSelector(clauseKey)}"]`,
+    `[data-block-index="${blockIndex}"]`,
+    `[data-row-index="${rowIndex}"]`,
+    `[data-block-id="${escapeSelector(blockId)}"]`,
+    cellId ? `[data-cell-id="${escapeSelector(cellId)}"]` : "",
+  ].join("");
+  return document.querySelector(selector);
+}
+
+function getSelectionNoteAnchor(note) {
+  const noteTargets = Array.isArray(note?.targets) ? note.targets.filter(Boolean) : [];
+  if (!noteTargets.length) {
+    return null;
+  }
+  const sortedTargets = [...noteTargets].sort((left, right) =>
+    String(left.clauseKey || "").localeCompare(String(right.clauseKey || "")) ||
+    getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId)
+      - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
+    Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
+    Number(left.cellIndex ?? -1) - Number(right.cellIndex ?? -1)
+  );
+  return sortedTargets[0] || null;
 }
 
 function renderTranslationStatus() {
@@ -1219,22 +1571,54 @@ function syncBlockReferenceForItem(item) {
 function syncClauseAnnotationBlockReferences(clauseKey) {
   const normalizedClauseKey = String(clauseKey || "").trim();
   if (!normalizedClauseKey) {
-    return;
+    return { notesChanged: false, highlightsChanged: false, removedSelectionNoteIds: [] };
   }
-  state.ui.notes = (state.ui.notes || []).flatMap((note) => {
+  const previousNotes = state.ui.notes || [];
+  const previousHighlights = state.ui.highlights || [];
+  const nextNotes = previousNotes.flatMap((note) => {
     if (note.type !== "selection" || note.clauseKey !== normalizedClauseKey) {
       return [note];
     }
     const synced = syncBlockReferenceForItem(note);
     return synced ? [synced] : [];
   });
-  state.ui.highlights = (state.ui.highlights || []).flatMap((item) => {
+  const nextHighlights = previousHighlights.flatMap((item) => {
     if (item.clauseKey !== normalizedClauseKey) {
       return [item];
     }
     const synced = syncBlockReferenceForItem(item);
     return synced ? [synced] : [];
   });
+  const previousSelectionIds = new Set(
+    previousNotes
+      .filter((note) => note.type === "selection" && note.clauseKey === normalizedClauseKey)
+      .map((note) => String(note.id || ""))
+      .filter(Boolean)
+  );
+  const nextSelectionIds = new Set(
+    nextNotes
+      .filter((note) => note.type === "selection" && note.clauseKey === normalizedClauseKey)
+      .map((note) => String(note.id || ""))
+      .filter(Boolean)
+  );
+  const removedSelectionNoteIds = [...previousSelectionIds].filter((id) => !nextSelectionIds.has(id));
+  if (removedSelectionNoteIds.length) {
+    const openIds = new Set(state.ui.openSelectionNoteIds || []);
+    removedSelectionNoteIds.forEach((id) => openIds.delete(id));
+    state.ui.openSelectionNoteIds = openIds;
+    const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
+    removedSelectionNoteIds.forEach((id) => {
+      delete nextPositions[id];
+    });
+    state.ui.selectionNoteOverlayPositions = nextPositions;
+  }
+  state.ui.notes = nextNotes;
+  state.ui.highlights = nextHighlights;
+  return {
+    notesChanged: JSON.stringify(previousNotes) !== JSON.stringify(nextNotes),
+    highlightsChanged: JSON.stringify(previousHighlights) !== JSON.stringify(nextHighlights),
+    removedSelectionNoteIds,
+  };
 }
 
 function syncAllAnnotationBlockReferences() {
@@ -1282,16 +1666,18 @@ function renderTableBlock(node, block, index) {
                     const tag = cell.header ? "th" : "td";
                     const rowspan = Number(cell.rowspan || 1) > 1 ? ` rowspan="${Number(cell.rowspan || 1)}"` : "";
                     const colspan = Number(cell.colspan || 1) > 1 ? ` colspan="${Number(cell.colspan || 1)}"` : "";
-                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex, String(block.id || ""), String(cell.id || "")).some((note) => !note.collapsed);
+                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex, String(block.id || ""), String(cell.id || "")).some((note) => isSelectionNoteOpen(note));
                     const rowToggleHtml = renderSelectionNoteToggle(node.key, index, rowIndex, cellIndex, true, String(block.id || ""), String(cell.id || ""));
+                    const cellNotesHtml = renderSelectionNotes(node.key, index, rowIndex, cellIndex, String(block.id || ""), String(cell.id || ""));
                     const cellHighlighted = highlighted || highlightedCellIndexes.has(cellIndex) || hasExpandedSelectionNotes;
                     const cellClass = cellHighlighted ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
                     const currentColumnIndex = visualColumnIndex;
                     visualColumnIndex += Number(cell.colspan || 1);
                     return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-id="${escapeHtml(String(block.id || ""))}" data-cell-id="${escapeHtml(String(cell.id || ""))}" data-block-index="${index}" data-row-index="${rowIndex}" data-cell-index="${cellIndex}" data-col-index="${currentColumnIndex}" data-row-text="${escapeHtml(rowText)}"${rowspan}${colspan}>
                       <div class="table-cell-inner">
-                        <span class="table-cell-text">${escapeHtml(normalizeTableDisplayText(cell.text || ""))}</span>
                         ${rowToggleHtml}
+                        <span class="table-cell-text">${escapeHtml(normalizeTableDisplayText(cell.text || ""))}</span>
+                        ${cellNotesHtml}
                       </div>
                     </${tag}>`;
                   })
@@ -1312,14 +1698,16 @@ function renderTableBlock(node, block, index) {
                 ${row
                   .map((cell, cellIndex) => {
                     const tag = rowIndex === 0 ? "th" : "td";
-                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex, String(block.id || ""), "").some((note) => !note.collapsed);
+                    const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, rowIndex, cellIndex, String(block.id || ""), "").some((note) => isSelectionNoteOpen(note));
                     const rowToggleHtml = renderSelectionNoteToggle(node.key, index, rowIndex, cellIndex, true, String(block.id || ""), "");
+                    const cellNotesHtml = renderSelectionNotes(node.key, index, rowIndex, cellIndex, String(block.id || ""), "");
                     const cellHighlighted = highlighted || highlightedCellIndexes.has(cellIndex) || hasExpandedSelectionNotes;
                     const cellClass = cellHighlighted ? "tree-text table-cell-content is-highlighted" : "tree-text table-cell-content";
                     return `<${tag} class="${cellClass}" data-clause-key="${escapeHtml(node.key)}" data-block-id="${escapeHtml(String(block.id || ""))}" data-cell-id="" data-block-index="${index}" data-row-index="${rowIndex}" data-cell-index="${cellIndex}" data-col-index="${cellIndex}" data-row-text="${escapeHtml(rowText)}">
                       <div class="table-cell-inner">
-                        <span class="table-cell-text">${escapeHtml(normalizeTableDisplayText(cell || ""))}</span>
                         ${rowToggleHtml}
+                        <span class="table-cell-text">${escapeHtml(normalizeTableDisplayText(cell || ""))}</span>
+                        ${cellNotesHtml}
                       </div>
                     </${tag}>`;
                   })
@@ -1363,12 +1751,12 @@ function renderParagraphBlock(node, block, index) {
   const blockId = String(block.id || "");
   const selectionToggleHtml = renderSelectionNoteToggle(node.key, index, -1, -1, false, blockId);
   const selectionNotesHtml = renderSelectionNotes(node.key, index, -1, -1, blockId);
-  const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, -1, -1, blockId).some((note) => !note.collapsed);
+  const hasExpandedSelectionNotes = getSelectionNotesForTarget(node.key, index, -1, -1, blockId).some((note) => isSelectionNoteOpen(note));
   return `
     <div class="paragraph-block ${hasExpandedSelectionNotes ? "has-selection-note" : ""} ${hasBlockHighlight(node.key, index) ? "is-highlighted" : ""}">
       <div class="paragraph-note-row">
-        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-id="${escapeHtml(blockId)}" data-block-index="${index}" data-row-index="-1" data-cell-index="-1" data-row-text="${escapeHtml(String(block.text || "").trim())}">${escapeHtml(block.text || "")}</p>
         ${selectionToggleHtml}
+        <p class="${paragraphClass}" style="${escapeHtml(paragraphStyle)}" data-clause-key="${escapeHtml(node.key)}" data-block-id="${escapeHtml(blockId)}" data-block-index="${index}" data-row-index="-1" data-cell-index="-1" data-row-text="${escapeHtml(String(block.text || "").trim())}">${escapeHtml(block.text || "")}</p>
       </div>
       ${selectionNotesHtml}
     </div>
@@ -1478,14 +1866,16 @@ function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, cellInd
   if (!notes.length) {
     return "";
   }
-  const expanded = notes.some((note) => !note.collapsed);
-  const label = compact ? "📝" : `📝 ${notes.length}`;
+  const expanded = notes.some((note) => isSelectionNoteOpen(note));
+  const label = compact ? "📝" : "📝";
+  const noteIds = notes.map((note) => String(note.id || "")).filter(Boolean).join(",");
   return `
     <button
       class="selection-note-toggle ${compact ? "compact" : ""} ${expanded ? "expanded" : ""}"
       title="선택 메모 ${notes.length}개"
       aria-label="선택 메모 ${notes.length}개"
       data-action="toggle-selection-notes"
+      data-note-ids="${escapeHtml(noteIds)}"
       data-clause-key="${escapeHtml(clauseKey)}"
       data-block-id="${escapeHtml(blockId)}"
       data-block-index="${blockIndex}"
@@ -1499,41 +1889,7 @@ function renderSelectionNoteToggle(clauseKey, blockIndex, rowIndex = -1, cellInd
 }
 
 function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = "", cellId = "") {
-  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId);
-  if (!notes.length) {
-    return "";
-  }
-  const visibleNotes = notes.filter((note) => !note.collapsed);
-  if (!visibleNotes.length) {
-    return "";
-  }
-  return `
-    <div class="selection-note-list">
-      ${visibleNotes
-        .map(
-          (note) => `
-            <article class="clause-note-card ${note.collapsed ? "collapsed" : ""}" data-note-id="${escapeHtml(note.id)}">
-              <div class="clause-note-meta">
-                <div class="clause-note-meta-main">
-                  <strong class="note-kind">선택 메모</strong>
-                </div>
-                <div class="clause-note-meta-actions">
-                  <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
-                </div>
-              </div>
-              <div class="clause-note-body ${note.collapsed ? "hidden" : ""}">
-                <label class="field">
-                  <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="4" placeholder="번역 결과를 수정하세요.">${escapeHtml(
-                    note.translation || ""
-                  )}</textarea>
-                </label>
-              </div>
-            </article>
-          `
-        )
-        .join("")}
-    </div>
-  `;
+  return "";
 }
 
 function normalizeRowText(parts) {
@@ -1662,20 +2018,19 @@ function getHighlightedCellIndexes(clauseKey, blockIndex, rowIndex, blockId = ge
 }
 
 function bindTreeEvents(scope = elements.treeContainer) {
-  if (isBoardEditMode()) {
-    initializeClauseEditors({
-      scope,
-      findNodeByKey,
-      state,
-      updateSelectedClauseActiveState,
-      buildEditorHtmlFromBlocks,
-      ensureBlocksHaveStableIds,
-      updateSelectionStateFromEditorSelection,
-      hideNodeMenu,
-      showSelectionMenu,
-      syncEditorHtmlToNode,
-    });
-  }
+  initializeClauseEditors({
+    scope,
+    findNodeByKey,
+    state,
+    readOnly: isBoardViewMode(),
+    updateSelectedClauseActiveState,
+    buildEditorHtmlFromBlocks,
+    ensureBlocksHaveStableIds,
+    updateSelectionStateFromEditorSelection,
+    hideNodeMenu,
+    showSelectionMenu,
+    syncEditorHtmlToNode,
+  });
   scope.querySelectorAll("[data-action='toggle-node']").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.nodeKey;
@@ -1750,28 +2105,37 @@ function bindTreeEvents(scope = elements.treeContainer) {
 
   scope.querySelectorAll(".tree-text").forEach((paragraph) => {
     paragraph.addEventListener("click", () => {
+      const selection = window.getSelection();
+      const selectedText = selection ? selection.toString().trim() : "";
+      if (selectedText && updateSelectionStateFromDomSelection(selection, paragraph)) {
+        return;
+      }
       updateSelectionStateFromElement(paragraph, "", false);
+    });
+    paragraph.addEventListener("mouseup", () => {
+      window.setTimeout(() => {
+        const selection = window.getSelection();
+        const selectedText = selection ? selection.toString().trim() : "";
+        if (!selectedText) {
+          return;
+        }
+        updateSelectionStateFromDomSelection(selection, paragraph);
+      }, 0);
     });
     paragraph.addEventListener("contextmenu", (event) => {
       const selection = window.getSelection();
       event.preventDefault();
       hideNodeMenu();
-      if (!updateSelectionStateFromDomSelection(selection, paragraph)) {
+      const snapshotTargets = Array.isArray(state.ui.selectionSnapshot?.targets) ? state.ui.selectionSnapshot.targets : [];
+      if (
+        !(snapshotTargets.length > 1) &&
+        !updateSelectionStateFromDomSelection(selection, paragraph) &&
+        !state.ui.selection?.hasSelection &&
+        !state.ui.selectionSnapshot?.hasSelection
+      ) {
         updateSelectionStateFromElement(paragraph, "", false);
       }
       showSelectionMenu(event.clientX, event.clientY);
-    });
-  });
-
-  scope.querySelectorAll(".editor-selection-note-list, .editor-selection-note-list *").forEach((element) => {
-    element.addEventListener("mousedown", (event) => {
-      event.stopPropagation();
-    });
-    element.addEventListener("click", (event) => {
-      event.stopPropagation();
-    });
-    element.addEventListener("contextmenu", (event) => {
-      event.stopPropagation();
     });
   });
 
@@ -1796,13 +2160,18 @@ function bindTreeEvents(scope = elements.treeContainer) {
 
   scope.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
     button.addEventListener("click", () => {
-      toggleSelectionNotes(
-        button.dataset.clauseKey || "",
-        Number(button.dataset.blockIndex || -1),
-        Number(button.dataset.rowIndex || -1),
-        Number(button.dataset.cellIndex || -1),
-        button.dataset.blockId || "",
-        button.dataset.cellId || ""
+      toggleSelectionNotesByIds(
+        String(button.dataset.noteIds || "").split(",").map((item) => item.trim()).filter(Boolean),
+        {
+          clauseKey: button.dataset.clauseKey || "",
+          blockIndex: Number(button.dataset.blockIndex || -1),
+          rowIndex: Number(button.dataset.rowIndex || -1),
+          cellIndex: Number(button.dataset.cellIndex || -1),
+          blockId: button.dataset.blockId || "",
+          cellId: button.dataset.cellId || "",
+          rowText: button.dataset.rowText || "",
+        },
+        button
       );
     });
   });
@@ -1834,7 +2203,14 @@ function syncEditorHtmlToNode(nodeKey, html) {
   if (!changed) {
     return;
   }
+  const annotationSyncResult = syncClauseAnnotationBlockReferences(nodeKey);
   persistSessionState();
+  if (annotationSyncResult.notesChanged || annotationSyncResult.highlightsChanged) {
+    rerenderLoadedNode(nodeKey);
+    renderSelectionSidebar();
+    syncSelectionNoteToggleButtons();
+    return;
+  }
   updateSelectionStateFromEditorSelection();
 }
 
@@ -2328,9 +2704,6 @@ function updateNodeBlocks(nodeKey, transform) {
       text: deriveNodeTextFromBlocks(nextBlocks),
     };
   });
-  if (changed) {
-    syncClauseAnnotationBlockReferences(nodeKey);
-  }
   return changed;
 }
 
@@ -2761,6 +3134,9 @@ function handleSelectionChange() {
   const selection = window.getSelection();
   const text = selection ? selection.toString().trim() : "";
   if (!text) {
+    if (!elements.selectionMenu?.classList.contains("hidden") && state.ui.selection?.hasSelection) {
+      return;
+    }
     updateSelectionState("", "", "", -1, -1, -1, "", false);
     hideSelectionMenu();
     return;
@@ -2797,9 +3173,11 @@ function updateSelectionStateFromDomSelection(selection, fallbackElement = null)
       anchorElement.dataset.cellId || "",
       buildSelectionTargetsFromElements(intersectedParagraphs)
     );
+    snapshotCurrentSelectionState();
     return true;
   }
   updateSelectionStateFromElement(anchorElement, text, true);
+  snapshotCurrentSelectionState();
   return true;
 }
 
@@ -2874,6 +3252,7 @@ function updateSelectionStateFromEditorSelection(editor = null) {
     cellId,
     targets
   );
+  snapshotCurrentSelectionState();
   return true;
 }
 
@@ -2952,6 +3331,36 @@ function updateSelectionStateFromEditorTableSelection(nodeKey, host, selectedCel
     singleRowEntry && singleRowEntry.cellIds.size === 1 ? [...singleRowEntry.cellIds][0] : "";
   const rowText = singleRowEntry?.rowText || "";
   const selectionText = selectedTexts.join(" | ").trim() || rowText || normalizeEditorText(blockElement.textContent || "");
+  const targets = rowIndexes.flatMap((rowIndex) => {
+    const entry = rowMap.get(rowIndex);
+    if (!entry) {
+      return [];
+    }
+    const sortedCellIndexes = [...entry.cellIndexes].sort((left, right) => left - right);
+    const sortedCellIds = [...entry.cellIds];
+    if (sortedCellIndexes.length === 1 && sortedCellIds.length === 1) {
+      return [{
+        clauseKey: nodeKey,
+        clauseLabel: getLabelForKey(nodeKey),
+        blockId,
+        blockIndex,
+        rowIndex,
+        cellIndex: sortedCellIndexes[0],
+        cellId: sortedCellIds[0],
+        rowText: entry.rowText,
+      }];
+    }
+    return [{
+      clauseKey: nodeKey,
+      clauseLabel: getLabelForKey(nodeKey),
+      blockId,
+      blockIndex,
+      rowIndex,
+      cellIndex: -1,
+      cellId: "",
+      rowText: entry.rowText,
+    }];
+  });
 
   updateSelectionState(
     selectionText,
@@ -2964,8 +3373,9 @@ function updateSelectionStateFromEditorTableSelection(nodeKey, host, selectedCel
     selectedCells.length > 0,
     blockId,
     singleCellId,
-    []
+    targets
   );
+  snapshotCurrentSelectionState();
   return true;
 }
 
@@ -3036,6 +3446,13 @@ function updateSelectionState(text, clauseKey, clauseLabel, blockIndex = -1, row
   state.ui.selection = { text, clauseKey, clauseLabel, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText, hasSelection, targets };
 }
 
+function snapshotCurrentSelectionState() {
+  state.ui.selectionSnapshot = {
+    ...state.ui.selection,
+    targets: Array.isArray(state.ui.selection?.targets) ? state.ui.selection.targets.map((target) => ({ ...target })) : [],
+  };
+}
+
 function updateSelectionStateFromElement(element, text = "", hasSelection = false) {
   if (!element) {
     updateSelectionState("", "", "", -1, -1, -1, "", false);
@@ -3062,11 +3479,13 @@ function getLabelForKey(key) {
 }
 
 function showSelectionMenu(x, y) {
-  const hasSelection = Boolean(state.ui.selection?.hasSelection && state.ui.selection?.text);
+  const effectiveSelection = getEffectiveSelection();
+  const hasSelection = Boolean(effectiveSelection?.hasSelection && effectiveSelection?.text);
   const translateButton = elements.selectionMenu.querySelector("[data-action='translate-selection']");
   if (translateButton) {
     translateButton.disabled = !hasSelection;
   }
+  snapshotCurrentSelectionState();
   elements.selectionMenu.style.left = `${x}px`;
   elements.selectionMenu.style.top = `${y}px`;
   elements.selectionMenu.classList.remove("hidden");
@@ -3076,26 +3495,35 @@ function hideSelectionMenu() {
   elements.selectionMenu.classList.add("hidden");
 }
 
+function getEffectiveSelection() {
+  const snapshot = state.ui.selectionSnapshot;
+  if (snapshot && (snapshot.hasSelection || (Array.isArray(snapshot.targets) && snapshot.targets.length))) {
+    return snapshot;
+  }
+  return state.ui.selection;
+}
+
 function getCurrentSelectionTargets() {
-  const targets = Array.isArray(state.ui.selection?.targets) ? state.ui.selection.targets.filter(Boolean) : [];
+  const selection = getEffectiveSelection();
+  const targets = Array.isArray(selection?.targets) ? selection.targets.filter(Boolean) : [];
   if (targets.length) {
     return targets;
   }
-  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
-  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
+  const clauseKey = String(selection?.clauseKey || "").trim();
+  const blockIndex = Number(selection?.blockIndex ?? -1);
   if (!clauseKey || blockIndex < 0) {
     return [];
   }
   return [
     {
       clauseKey,
-      blockId: String(state.ui.selection?.blockId || "").trim(),
+      blockId: String(selection?.blockId || "").trim(),
       blockIndex,
-      rowIndex: Number(state.ui.selection?.rowIndex ?? -1),
-      cellIndex: Number(state.ui.selection?.cellIndex ?? -1),
-      cellId: String(state.ui.selection?.cellId || "").trim(),
-      rowText: String(state.ui.selection?.rowText || "").trim(),
-      clauseLabel: String(state.ui.selection?.clauseLabel || ""),
+      rowIndex: Number(selection?.rowIndex ?? -1),
+      cellIndex: Number(selection?.cellIndex ?? -1),
+      cellId: String(selection?.cellId || "").trim(),
+      rowText: String(selection?.rowText || "").trim(),
+      clauseLabel: String(selection?.clauseLabel || ""),
     },
   ];
 }
@@ -3104,7 +3532,8 @@ async function runSelectionAction(targetLanguage = "ko") {
   if (!beginBusy("선택 메모 번역 중입니다.")) {
     return;
   }
-  const text = state.ui.selection.text;
+  const selection = getEffectiveSelection();
+  const text = selection?.text || "";
   const selectionTargets = getCurrentSelectionTargets();
   if (!text) {
     endBusy();
@@ -3132,7 +3561,7 @@ async function runSelectionAction(targetLanguage = "ko") {
       cellId: anchorTarget.cellId,
       rowText: anchorTarget.rowText,
       sourceText: text,
-      clauseLabel: anchorTarget.clauseLabel || state.ui.selection.clauseLabel,
+      clauseLabel: anchorTarget.clauseLabel || selection?.clauseLabel,
       targetLanguage,
       targets: selectionTargets,
     });
@@ -3346,14 +3775,53 @@ function getNotesForClause(clauseKey) {
 
 function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = getBlockIdByIndex(clauseKey, blockIndex), cellId = "") {
   return (state.ui.notes || []).filter(
-    (note) =>
-      note.type === "selection" &&
-      blockReferenceMatches(note, clauseKey, blockIndex, blockId) &&
-      Number(note.rowIndex ?? -1) === Number(rowIndex) &&
-      (cellId
-        ? String(note.cellId || "") === String(cellId)
-        : cellIndex === null || Number(note.cellIndex ?? -1) === Number(cellIndex))
+    (note) => {
+      if (note.type !== "selection") {
+        return false;
+      }
+      const noteTargets = Array.isArray(note.targets) ? note.targets.filter(Boolean) : [];
+      if (noteTargets.length) {
+        return noteTargets.some((target) => selectionTargetMatches(target, clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId));
+      }
+      return (
+        blockReferenceMatches(note, clauseKey, blockIndex, blockId) &&
+        Number(note.rowIndex ?? -1) === Number(rowIndex) &&
+        (cellId
+          ? String(note.cellId || "") === String(cellId)
+          : cellIndex === null || Number(note.cellIndex ?? -1) === Number(cellIndex))
+      );
+    }
   );
+}
+
+function selectionTargetMatches(target, clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = "", cellId = "") {
+  const targetClauseKey = String(target?.clauseKey || "").trim();
+  if (targetClauseKey !== String(clauseKey || "").trim()) {
+    return false;
+  }
+  const resolvedTargetBlockId = String(target?.blockId || "").trim();
+  const resolvedTargetBlockIndex = getResolvedBlockIndexForReference(targetClauseKey, target?.blockIndex, resolvedTargetBlockId);
+  const resolvedBlockIndex = getResolvedBlockIndexForReference(targetClauseKey, blockIndex, blockId);
+  if (resolvedTargetBlockId && blockId) {
+    if (resolvedTargetBlockId !== String(blockId || "").trim()) {
+      return false;
+    }
+  } else if (resolvedTargetBlockIndex !== resolvedBlockIndex) {
+    return false;
+  }
+  if (Number(target?.rowIndex ?? -1) !== Number(rowIndex ?? -1)) {
+    return false;
+  }
+  if (cellId) {
+    return String(target?.cellId || "").trim() === String(cellId || "").trim();
+  }
+  return cellIndex === null || Number(target?.cellIndex ?? -1) === Number(cellIndex);
+}
+
+function isSelectionNoteOpen(note) {
+  return note?.type === "selection"
+    ? state.ui.openSelectionNoteIds.has(String(note.id || ""))
+    : !note?.collapsed;
 }
 
 function getHighlightEntriesForSelectionNote(note) {
@@ -3386,11 +3854,22 @@ function getHighlightEntriesForSelectionNote(note) {
 }
 
 function upsertNote(note) {
+  console.debug("[selection-note] upsert note", {
+    noteId: note?.id,
+    noteType: note?.type,
+    clauseKey: note?.clauseKey,
+    beforeIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   const existingIndex = (state.ui.notes || []).findIndex((item) => item.id === note.id);
   if (existingIndex >= 0) {
     state.ui.notes = state.ui.notes.map((item, index) => (index === existingIndex ? { ...item, ...note } : item));
   } else {
     state.ui.notes = [note, ...(state.ui.notes || [])];
+  }
+  if (note.type === "selection") {
+    const nextOpen = new Set(state.ui.openSelectionNoteIds || []);
+    nextOpen.add(String(note.id || ""));
+    state.ui.openSelectionNoteIds = nextOpen;
   }
   if (note.type === "selection") {
     getHighlightEntriesForSelectionNote(note).forEach((entry) => {
@@ -3400,6 +3879,10 @@ function upsertNote(note) {
   if (note.type === "clause" && note.clauseKey) {
     expandNodePath(note.clauseKey);
   }
+  console.debug("[selection-note] upsert note result", {
+    noteId: note?.id,
+    afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   persistSessionState();
   renderLoadedTree();
 }
@@ -3439,21 +3922,234 @@ function toggleClauseNotes(clauseKey) {
 
 function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = getBlockIdByIndex(clauseKey, blockIndex), cellId = "") {
   const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId);
-  if (!notes.length) {
+  toggleSelectionNotesByIds(
+    notes.map((note) => String(note.id || "")).filter(Boolean),
+    { clauseKey, blockIndex, rowIndex, cellIndex: cellIndex === null ? -1 : cellIndex, blockId, cellId }
+  );
+}
+
+function toggleSelectionNotesByIds(noteIds, anchor = {}, triggerElement = null) {
+  const normalizedIds = [...new Set((noteIds || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!normalizedIds.length) {
+    console.debug("[selection-note] toggle skipped empty ids", { noteIds, anchor });
     return;
   }
-  const shouldCollapse = notes.some((note) => !note.collapsed);
-  const ids = new Set(notes.map((note) => note.id));
-  state.ui.notes = (state.ui.notes || []).map((note) =>
-    ids.has(note.id) ? { ...note, collapsed: shouldCollapse } : note
-  );
+  let notes = (state.ui.notes || []).filter((note) => normalizedIds.includes(String(note.id || "")));
+  if (!notes.length && anchor?.clauseKey) {
+    notes = getSelectionNotesForTarget(
+      String(anchor.clauseKey || ""),
+      Number(anchor.blockIndex ?? -1),
+      Number(anchor.rowIndex ?? -1),
+      anchor.cellIndex === null || anchor.cellIndex === undefined ? null : Number(anchor.cellIndex),
+      String(anchor.blockId || ""),
+      String(anchor.cellId || "")
+    );
+  }
+  if (!notes.length) {
+    console.debug("[selection-note] toggle skipped notes not found", {
+      normalizedIds,
+      anchor,
+      selectionNotes: (state.ui.notes || []).filter((note) => note.type === "selection").map((note) => note.id),
+    });
+    return;
+  }
+  const effectiveIds = [...new Set(notes.map((note) => String(note.id || "")).filter(Boolean))];
+  const openIds = new Set(state.ui.openSelectionNoteIds || []);
+  const shouldCollapse = notes.some((note) => isSelectionNoteOpen(note));
+  const normalizedBlockId = String(anchor.blockId || "").trim() || getBlockIdByIndex(anchor.clauseKey || "", Number(anchor.blockIndex || -1)) || "";
+  const normalizedCellId = String(anchor.cellId || "").trim();
+  console.debug("[selection-note] toggle start", {
+    normalizedIds,
+    shouldCollapse,
+    openIds: [...openIds],
+    anchor,
+    notes: notes.map((note) => ({
+      id: note.id,
+      clauseKey: note.clauseKey,
+      blockId: note.blockId,
+      blockIndex: note.blockIndex,
+      rowIndex: note.rowIndex,
+      cellIndex: note.cellIndex,
+      cellId: note.cellId,
+      sourceText: note.sourceText,
+    })),
+  });
+  if (!shouldCollapse) {
+    const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
+    const resolvedPosition = getSelectionNoteOverlayPosition({
+      clauseKey: String(anchor.clauseKey || notes[0]?.clauseKey || ""),
+      blockId: normalizedBlockId || String(notes[0]?.blockId || ""),
+      blockIndex: Number(anchor.blockIndex ?? notes[0]?.blockIndex ?? -1),
+      rowIndex: Number(anchor.rowIndex ?? notes[0]?.rowIndex ?? -1),
+      cellIndex: Number(anchor.cellIndex ?? notes[0]?.cellIndex ?? -1),
+      cellId: normalizedCellId || String(notes[0]?.cellId || ""),
+      sourceText: String(notes[0]?.sourceText || ""),
+    }) || getSelectionNoteOverlayPositionFromTrigger(triggerElement);
+    effectiveIds.forEach((id) => {
+      if (resolvedPosition) {
+        nextPositions[id] = resolvedPosition;
+      }
+    });
+    state.ui.selectionNoteOverlayPositions = nextPositions;
+    console.debug("[selection-note] resolved position", {
+      normalizedIds,
+      resolvedPosition,
+      nextPositions,
+    });
+    state.ui.notes = (state.ui.notes || []).map((note) =>
+      effectiveIds.includes(String(note.id || ""))
+        ? {
+            ...note,
+            clauseKey: String(anchor.clauseKey || note.clauseKey || ""),
+            blockIndex: Number(anchor.blockIndex ?? note.blockIndex ?? -1),
+            blockId: normalizedBlockId || String(note.blockId || ""),
+            rowIndex: Number(anchor.rowIndex ?? note.rowIndex ?? -1),
+            cellIndex: Number(anchor.cellIndex ?? note.cellIndex ?? -1),
+            cellId: normalizedCellId || String(note.cellId || ""),
+            rowText: String(anchor.rowText || note.rowText || ""),
+          }
+        : note
+    );
+  }
+  effectiveIds.forEach((id) => {
+    if (shouldCollapse) {
+      openIds.delete(id);
+    } else {
+      openIds.add(id);
+    }
+  });
+  state.ui.openSelectionNoteIds = openIds;
+  console.debug("[selection-note] toggle end", {
+    normalizedIds,
+    effectiveIds,
+    shouldCollapse,
+    openIds: [...state.ui.openSelectionNoteIds],
+  });
+  persistSessionState();
+  renderSelectionSidebar();
+  syncSelectionNoteToggleButtons();
+}
+
+function getSelectionNoteOverlayPositionFromTrigger(triggerElement) {
+  if (!(triggerElement instanceof HTMLElement)) {
+    return null;
+  }
+  const rect = triggerElement.getBoundingClientRect();
+  const width = Math.min(620, Math.max(320, Math.floor(window.innerWidth * 0.28)));
+  const top = Math.min(window.innerHeight - 260, Math.max(16, rect.top - 8));
+  const left = Math.max(16, rect.left - width - 12);
+  return { top, left, width };
+}
+
+function collapseAllSelectionNotes() {
+  state.ui.openSelectionNoteIds = new Set();
+  persistSessionState();
+  renderSelectionSidebar();
+  syncSelectionNoteToggleButtons();
+}
+
+function closeSelectionNoteById(noteId) {
+  const normalizedNoteId = String(noteId || "").trim();
+  if (!normalizedNoteId) {
+    return;
+  }
+  const openIds = new Set(state.ui.openSelectionNoteIds || []);
+  openIds.delete(normalizedNoteId);
+  state.ui.openSelectionNoteIds = openIds;
+  persistSessionState();
+  renderSelectionSidebar();
+  syncSelectionNoteToggleButtons();
+}
+
+function syncSelectionNoteToggleButtons() {
+  document.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
+    const noteIds = String(button.dataset.noteIds || "").split(",").map((item) => item.trim()).filter(Boolean);
+    const expanded = noteIds.some((id) => state.ui.openSelectionNoteIds.has(id));
+    button.classList.toggle("expanded", expanded);
+  });
+}
+
+function toggleSelectionNoteCard(noteId) {
+  const normalizedNoteId = String(noteId || "").trim();
+  if (!normalizedNoteId) {
+    return;
+  }
+  let openedNote = null;
+  const openIds = new Set(state.ui.openSelectionNoteIds || []);
+  if (openIds.has(normalizedNoteId)) {
+    openIds.delete(normalizedNoteId);
+  } else {
+    openIds.add(normalizedNoteId);
+    openedNote = (state.ui.notes || []).find((note) => note.id === normalizedNoteId) || null;
+  }
+  state.ui.openSelectionNoteIds = openIds;
   persistSessionState();
   renderLoadedTree();
+  if (openedNote) {
+    revealSelectionNoteTarget(openedNote);
+  }
+}
+
+function revealSelectionNoteTarget(note) {
+  const noteTargets = Array.isArray(note?.targets) && note.targets.length
+    ? note.targets
+    : [{
+        clauseKey: note?.clauseKey || "",
+        blockId: note?.blockId || "",
+        cellId: note?.cellId || "",
+      }];
+  const primaryTarget = noteTargets.find((target) => String(target?.clauseKey || "").trim()) || null;
+  if (!primaryTarget?.clauseKey) {
+    return;
+  }
+  focusNode(primaryTarget.clauseKey);
+  window.clearTimeout(revealedSelectionTargetTimer);
+  revealedSelectionTargetTimer = window.setTimeout(() => {
+    const targets = noteTargets.flatMap((target) => {
+      const clauseKey = String(target?.clauseKey || "").trim();
+      if (!clauseKey) {
+        return [];
+      }
+      const nodeElement = document.getElementById(`node-${escapeKey(clauseKey)}`);
+      if (!(nodeElement instanceof HTMLElement)) {
+        return [];
+      }
+      const cellId = String(target?.cellId || "").trim();
+      const blockId = String(target?.blockId || "").trim();
+      let element = null;
+      if (cellId) {
+        element = nodeElement.querySelector(`[data-editor-cell-id="${escapeSelector(cellId)}"]`);
+      }
+      if (!element && blockId) {
+        element = nodeElement.querySelector(`[data-editor-block-id="${escapeSelector(blockId)}"]`);
+      }
+      return element ? [element] : [];
+    });
+    if (!targets.length) {
+      return;
+    }
+    const uniqueTargets = [...new Set(targets)];
+    uniqueTargets[0].scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    uniqueTargets.forEach((target) => target.classList.add("note-target-reveal"));
+    window.setTimeout(() => {
+      uniqueTargets.forEach((target) => target.classList.remove("note-target-reveal"));
+    }, 1800);
+  }, 80);
 }
 
 function deleteNote(noteId) {
+  console.debug("[selection-note] delete note", {
+    noteId,
+    beforeIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   const targetNote = (state.ui.notes || []).find((note) => note.id === noteId) || null;
   state.ui.notes = (state.ui.notes || []).filter((note) => note.id !== noteId);
+  const openIds = new Set(state.ui.openSelectionNoteIds || []);
+  openIds.delete(String(noteId || ""));
+  state.ui.openSelectionNoteIds = openIds;
+  const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
+  delete nextPositions[String(noteId || "")];
+  state.ui.selectionNoteOverlayPositions = nextPositions;
   if (targetNote?.type === "selection") {
     pruneHighlightForSelectionNote(targetNote);
   }
@@ -3465,6 +4161,10 @@ function deleteNote(noteId) {
       elements.clauseNoteModal.setAttribute("aria-hidden", "true");
     }
   }
+  console.debug("[selection-note] delete note result", {
+    noteId,
+    afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   persistSessionState();
   renderLoadedTree();
   if (state.ui.clauseNoteModalKey) {
@@ -3524,13 +4224,14 @@ function inferTargetLanguage(text) {
 }
 
 function getCurrentSelectionHighlightEntry() {
-  const clauseKey = String(state.ui.selection?.clauseKey || "").trim();
-  const blockId = String(state.ui.selection?.blockId || "").trim();
-  const blockIndex = Number(state.ui.selection?.blockIndex ?? -1);
-  const rowIndex = Number(state.ui.selection?.rowIndex ?? -1);
-  const cellIndex = Number(state.ui.selection?.cellIndex ?? -1);
-  const cellId = String(state.ui.selection?.cellId || "").trim();
-  const rowText = String(state.ui.selection?.rowText || "").trim();
+  const selection = getEffectiveSelection();
+  const clauseKey = String(selection?.clauseKey || "").trim();
+  const blockId = String(selection?.blockId || "").trim();
+  const blockIndex = Number(selection?.blockIndex ?? -1);
+  const rowIndex = Number(selection?.rowIndex ?? -1);
+  const cellIndex = Number(selection?.cellIndex ?? -1);
+  const cellId = String(selection?.cellId || "").trim();
+  const rowText = String(selection?.rowText || "").trim();
   if (!clauseKey || blockIndex < 0) {
     return null;
   }
@@ -3609,14 +4310,15 @@ function toggleSelectionHighlight() {
 
 function addManualSelectionNote() {
   const selectionTargets = getCurrentSelectionTargets();
+  const selection = getEffectiveSelection();
   if (!selectionTargets.length) {
     setMessage("메모를 추가할 문단이나 표 셀을 먼저 선택하세요.", true);
     return;
   }
   const anchorTarget = selectionTargets[0];
   const sourceText = String(
-    state.ui.selection?.hasSelection && state.ui.selection?.text
-      ? state.ui.selection.text
+    selection?.hasSelection && selection?.text
+      ? selection.text
       : anchorTarget.rowText || ""
   ).trim();
   upsertNote({
@@ -3640,6 +4342,17 @@ function addManualSelectionNote() {
 }
 
 function renderSpecbotResults() {
+  const collapsed = Boolean(state.ui.specbotResultsCollapsed);
+  if (elements.toggleSpecbotResults) {
+    elements.toggleSpecbotResults.textContent = collapsed ? "+" : "−";
+    elements.toggleSpecbotResults.title = collapsed ? "펼치기" : "접기";
+    elements.toggleSpecbotResults.setAttribute("aria-label", collapsed ? "펼치기" : "접기");
+  }
+  elements.specbotResultList.classList.toggle("hidden", collapsed);
+  elements.specbotResultList.setAttribute("aria-hidden", collapsed ? "true" : "false");
+  if (collapsed) {
+    return;
+  }
   if (!state.ui.specbotResults.length) {
     elements.specbotResultList.innerHTML = '<div class="muted">상단 Query로 SpecBot을 실행하면 결과가 여기에 표시됩니다.</div>';
     return;
@@ -3699,6 +4412,12 @@ function renderSpecbotResults() {
       );
     });
   });
+}
+
+function toggleSpecbotResultsPanel() {
+  state.ui.specbotResultsCollapsed = !state.ui.specbotResultsCollapsed;
+  persistSessionState();
+  renderSpecbotResults();
 }
 
 function showNodeMenu(x, y, key) {
@@ -4740,6 +5459,7 @@ function getWorkspaceSnapshot() {
     specbotSettings: state.ui.specbotSettings,
     boardScope: state.ui.boardScope,
     specbotResults: state.ui.specbotResults,
+    specbotResultsCollapsed: Boolean(state.ui.specbotResultsCollapsed),
     notes: state.ui.notes || [],
     highlights: state.ui.highlights || [],
   };
@@ -4763,7 +5483,11 @@ function restoreSessionState() {
     );
     state.ui.clauseQuery = payload.clauseQuery || "";
     state.ui.specbotQueryText = payload.specbotQueryText || "";
+    state.ui.specbotResultsCollapsed = Boolean(payload.specbotResultsCollapsed);
     state.ui.notes = Array.isArray(payload.notes) ? payload.notes : [];
+    console.debug("[selection-note] restore session state", {
+      noteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+    });
     state.ui.highlights = Array.isArray(payload.highlights) ? payload.highlights : [];
     syncAllAnnotationBlockReferences();
     if (payload.specbotSettings && typeof payload.specbotSettings === "object") {
@@ -4785,6 +5509,10 @@ function restoreSessionState() {
 }
 
 async function applyWorkspaceSnapshot(payload) {
+  console.debug("[selection-note] apply workspace snapshot start", {
+    incomingNoteIds: Array.isArray(payload?.notes) ? payload.notes.filter((item) => item?.type === "selection").map((item) => item.id) : [],
+    currentNoteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   state.activeSpecNo = payload?.activeSpecNo || "";
   state.loadedRoots = ensureForestStableBlockIds(Array.isArray(payload?.loadedRoots) ? payload.loadedRoots : []);
   state.ui.expandedKeys = new Set(Array.isArray(payload?.expandedKeys) ? payload.expandedKeys : []);
@@ -4794,7 +5522,11 @@ async function applyWorkspaceSnapshot(payload) {
   state.ui.collapsedLoadedSpecs = new Set(Array.isArray(payload?.collapsedLoadedSpecs) ? payload.collapsedLoadedSpecs : []);
   state.ui.clauseQuery = payload?.clauseQuery || "";
   state.ui.specbotQueryText = payload?.specbotQueryText || "";
+  state.ui.specbotResultsCollapsed = Boolean(payload?.specbotResultsCollapsed);
   state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  console.debug("[selection-note] apply workspace snapshot result", {
+    appliedNoteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
+  });
   state.ui.highlights = Array.isArray(payload?.highlights) ? payload.highlights : [];
   syncAllAnnotationBlockReferences();
   state.ui.specbotResults = Array.isArray(payload?.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
@@ -4838,6 +5570,7 @@ async function resetWorkspace() {
     collapsedLoadedSpecs: [],
     clauseQuery: "",
     specbotQueryText: "",
+    specbotResultsCollapsed: false,
     notes: [],
     highlights: [],
     specbotResults: [],
@@ -4864,6 +5597,7 @@ export {
   openPicker,
   runSpecbotQuery,
   clearSpecbotResults,
+  toggleSpecbotResultsPanel,
   openSpecbotSettings,
   saveSpecbotSettings,
   clearRejectedSpecbotClauses,

@@ -12,7 +12,7 @@ const editorMap = new WeakMap();
 
 export async function mountClauseEditor(
   element,
-  { html = "", onChange = () => {}, onFocus = () => {}, onContextMenu = () => {}, onSelectionChange = () => {} } = {}
+  { html = "", readOnly = false, onChange = () => {}, onFocus = () => {}, onContextMenu = () => {}, onSelectionChange = () => {} } = {}
 ) {
   if (!element) {
     return null;
@@ -20,16 +20,19 @@ export async function mountClauseEditor(
   const existing = editorMap.get(element);
   if (existing) {
     existing.setContent(html || "");
+    existing.mode?.set?.(readOnly ? "readonly" : "design");
     return existing;
   }
 
   const editors = await tinymce.init({
     target: element,
     inline: true,
+    readonly: readOnly,
     license_key: "gpl",
     menubar: false,
-    toolbar:
-      "undo redo | bold italic underline | bullist numlist | table image link | removeformat",
+    toolbar: readOnly
+      ? false
+      : "undo redo | bold italic underline | bullist numlist | table image link | removeformat",
     plugins: "table lists image autoresize link",
     skin: false,
     content_css: false,
@@ -76,14 +79,24 @@ export async function mountClauseEditor(
     `,
     setup(editor) {
       let changeTimer = 0;
+      let suppressChange = false;
       const emitChange = () => {
+        if (suppressChange) {
+          return;
+        }
         window.clearTimeout(changeTimer);
         changeTimer = window.setTimeout(() => {
+          if (suppressChange || editor.removed) {
+            return;
+          }
           onChange(editor.getContent({ format: "html" }));
         }, 120);
       };
       editor.on("init", () => {
+        suppressChange = true;
         editor.setContent(html || "");
+        editor.mode?.set?.(readOnly ? "readonly" : "design");
+        suppressChange = false;
       });
       editor.on("focus", () => {
         onFocus(editor);
@@ -96,7 +109,11 @@ export async function mountClauseEditor(
       editor.on("NodeChange SelectionChange TableSelectionChange click mouseup keyup", () => {
         onSelectionChange(editor);
       });
-      editor.on("input change undo redo SetContent ExecCommand TableModified", emitChange);
+      editor.on("remove", () => {
+        suppressChange = true;
+        window.clearTimeout(changeTimer);
+      });
+      editor.on("input change undo redo ExecCommand TableModified", emitChange);
     },
   });
 

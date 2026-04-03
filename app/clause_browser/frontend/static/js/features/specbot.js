@@ -6,10 +6,12 @@ import {
   runSpecbotQuery,
   saveSpecbotSettings,
   setAllSpecbotDocuments,
+  toggleSpecbotResultsPanel,
 } from "../core.js";
 
 export function bindSpecbotFeature() {
   elements.clearSpecbotResults.addEventListener("click", clearSpecbotResults);
+  elements.toggleSpecbotResults.addEventListener("click", toggleSpecbotResultsPanel);
   elements.specbotQuery.addEventListener("keydown", async (event) => {
     if (event.key === "Enter") {
       event.preventDefault();

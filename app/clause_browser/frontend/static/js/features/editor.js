@@ -4,6 +4,7 @@ function initializeClauseEditors({
   scope,
   findNodeByKey,
   state,
+  readOnly = false,
   updateSelectedClauseActiveState,
   buildEditorHtmlFromBlocks,
   ensureBlocksHaveStableIds,
@@ -24,6 +25,7 @@ function initializeClauseEditors({
       updateSelectedClauseActiveState();
     });
     void mountClauseEditor(element, {
+      readOnly,
       html: buildEditorHtmlFromBlocks(nodeKey, ensureBlocksHaveStableIds(node.blocks || [])),
       onFocus: () => {
         state.ui.focusedKey = nodeKey;
@@ -39,7 +41,9 @@ function initializeClauseEditors({
         updateSelectionStateFromEditorSelection();
       },
       onChange: (html) => {
-        syncEditorHtmlToNode(nodeKey, html);
+        if (!readOnly) {
+          syncEditorHtmlToNode(nodeKey, html);
+        }
       },
     });
   });

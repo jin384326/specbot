@@ -151,19 +151,29 @@
                 </div>
               </div>
             </section>
-            <section class="panel-section">
+            <section class="panel-section specbot-results-section">
               <div class="section-heading specbot-results-heading">
                 <h2 class="specbot-results-title">SpecBot 결과</h2>
-                <button
-                  id="clear-specbot-results"
-                  class="ghost icon-button"
-                  type="button"
-                  title="결과 비우기"
-                  aria-label="결과 비우기"
-                >✕</button>
+                <div class="clause-note-meta-actions">
+                  <button
+                    id="toggle-specbot-results"
+                    class="ghost icon-button note-collapse-button"
+                    type="button"
+                    title="접기"
+                    aria-label="접기"
+                  >−</button>
+                  <button
+                    id="clear-specbot-results"
+                    class="ghost icon-button"
+                    type="button"
+                    title="결과 비우기"
+                    aria-label="결과 비우기"
+                  >✕</button>
+                </div>
               </div>
               <div id="specbot-result-list" class="result-list"></div>
             </section>
+            <section id="selection-note-panel" class="panel-section selection-note-panel-section hidden" aria-hidden="true"></section>
           </aside>
         </main>
       </section>
