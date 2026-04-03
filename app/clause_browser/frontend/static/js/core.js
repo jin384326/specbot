@@ -16,6 +16,19 @@ import {
   removeTableRowFromCells,
   removeTableColumnFromCells,
 } from "./utils/table-utils.js";
+import {
+  createSelectionNoteIndex,
+  createHighlightIndex,
+  getSelectionNotesForTargetFromIndex,
+  getSelectionNotesForClauseFromIndex,
+  getHighlightsForBlockFromIndex,
+  getGlobalRowHighlightsForClauseFromIndex,
+} from "./utils/annotation-index.js";
+import { createRenderBatcher } from "./utils/render-batcher.js";
+import {
+  getAffectedClauseKeysForSelectionArtifacts,
+  buildFocusNodeUpdatePlan,
+} from "./utils/tree-update-plan.js";
 
 const state = {
   config: null,
@@ -92,6 +105,43 @@ const TRANSIENT_STATUS_HIDE_DELAY_MS = 2000;
 let sessionPersistTimer = 0;
 let messageHideTimer = 0;
 let revealedSelectionTargetTimer = 0;
+let selectionNoteIndexCache = { source: null, index: createSelectionNoteIndex() };
+let highlightIndexCache = { source: null, index: createHighlightIndex() };
+const renderBatcher = createRenderBatcher();
+
+function getSelectionNoteIndex() {
+  const notes = state.ui.notes || [];
+  if (selectionNoteIndexCache.source !== notes) {
+    selectionNoteIndexCache = {
+      source: notes,
+      index: createSelectionNoteIndex(notes, getResolvedBlockIndexForReference),
+    };
+  }
+  return selectionNoteIndexCache.index;
+}
+
+function getHighlightIndex() {
+  const highlights = state.ui.highlights || [];
+  if (highlightIndexCache.source !== highlights) {
+    highlightIndexCache = {
+      source: highlights,
+      index: createHighlightIndex(highlights, getResolvedBlockIndexForReference),
+    };
+  }
+  return highlightIndexCache.index;
+}
+
+function requestSelectionSidebarRender() {
+  renderBatcher.schedule("selection-sidebar", () => {
+    renderSelectionSidebar();
+  });
+}
+
+function requestEditorNoteRailSync() {
+  renderBatcher.schedule("editor-note-rail", () => {
+    syncEditorNoteRailPositions();
+  });
+}
 
 function escapeSelector(value) {
   const text = String(value || "");
@@ -212,8 +262,8 @@ function bindGlobalEvents() {
 }
 
 function handleViewportLayoutChange() {
-  syncEditorNoteRailPositions();
-  renderSelectionSidebar();
+  requestEditorNoteRailSync();
+  requestSelectionSidebarRender();
 }
 
 function handleGlobalMouseup() {
@@ -755,13 +805,13 @@ function renderLoadedTree() {
     .map(([specNo, nodes]) => renderLoadedSpecGroup(specNo, nodes))
     .join("");
   bindTreeEvents();
-  syncEditorNoteRailPositions();
-  renderSelectionSidebar();
+  requestEditorNoteRailSync();
+  requestSelectionSidebarRender();
   renderClauseNoteModal();
   syncViewportSelection();
 }
 
-function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClauseTree = false, refreshClauseNoteModal = true } = {}) {
+function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClauseTree = false, refreshClauseNoteModal = true, refreshAuxiliaryUi = true } = {}) {
   const node = findNodeByKey(nodeKey);
   const current = document.getElementById(`node-${escapeKey(nodeKey)}`);
   if (!node || !current) {
@@ -783,7 +833,9 @@ function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClaus
   if (next) {
     bindTreeEvents(next);
   }
-  syncEditorNoteRailPositions();
+  if (refreshAuxiliaryUi) {
+    requestEditorNoteRailSync();
+  }
   if (refreshSelectedList) {
     renderSelectedClauseList();
   }
@@ -793,7 +845,9 @@ function rerenderLoadedNode(nodeKey, { refreshSelectedList = false, refreshClaus
   if (refreshClauseNoteModal && state.ui.clauseNoteModalKey === nodeKey) {
     renderClauseNoteModal();
   }
-  renderSelectionSidebar();
+  if (refreshAuxiliaryUi) {
+    requestSelectionSidebarRender();
+  }
   syncViewportSelection();
 }
 
@@ -808,6 +862,7 @@ function rerenderLoadedNodes(nodeKeys, options = {}) {
       refreshSelectedList: false,
       refreshClauseTree: false,
       refreshClauseNoteModal: false,
+      refreshAuxiliaryUi: false,
     });
   });
   if (options.refreshSelectedList) {
@@ -819,8 +874,16 @@ function rerenderLoadedNodes(nodeKeys, options = {}) {
   if (options.refreshClauseNoteModal) {
     renderClauseNoteModal();
   }
-  renderSelectionSidebar();
-  syncEditorNoteRailPositions();
+  requestSelectionSidebarRender();
+  requestEditorNoteRailSync();
+}
+
+function updateLoadedTreeFocusedState(previousFocusedKey = "", nextFocusedKey = "") {
+  const keys = [...new Set([previousFocusedKey, nextFocusedKey].map((key) => String(key || "").trim()).filter(Boolean))];
+  keys.forEach((key) => {
+    const element = document.getElementById(`node-${escapeKey(key)}`);
+    element?.classList.toggle("focused", key === nextFocusedKey);
+  });
 }
 
 function renderLoadedSpecGroup(specNo, nodes) {
@@ -920,8 +983,7 @@ function renderEditorHost(node, blocks = ensureBlocksHaveStableIds(Array.isArray
 }
 
 function renderEditorNoteRail(node, blocks) {
-  const selectionNotes = (state.ui.notes || [])
-    .filter((note) => note.type === "selection" && note.clauseKey === node.key)
+  const selectionNotes = getSelectionNotesForClauseFromIndex(getSelectionNoteIndex(), node.key)
     .sort((left, right) =>
       getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId) - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
       Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
@@ -1953,9 +2015,7 @@ function buildHighlightRowVariants(value) {
 }
 
 function getHighlightsForBlock(clauseKey, blockIndex, blockId = getBlockIdByIndex(clauseKey, blockIndex)) {
-  return (state.ui.highlights || []).filter(
-    (item) => blockReferenceMatches(item, clauseKey, blockIndex, blockId)
-  );
+  return getHighlightsForBlockFromIndex(getHighlightIndex(), clauseKey, blockIndex, blockId, getResolvedBlockIndexForReference);
 }
 
 function hasBlockHighlight(clauseKey, blockIndex, blockId = getBlockIdByIndex(clauseKey, blockIndex)) {
@@ -1966,13 +2026,7 @@ function getHighlightedRowIndexes(clauseKey, blockIndex, block, blockId = getBlo
   const localEntries = getHighlightsForBlock(clauseKey, blockIndex, blockId).filter(
     (item) => Number(item.rowIndex ?? -1) >= 0 && Number(item.cellIndex ?? -1) < 0
   );
-  const globalRowEntries = (state.ui.highlights || []).filter(
-    (item) =>
-      item.clauseKey === clauseKey &&
-      Number(item.blockIndex) < 0 &&
-      Number(item.rowIndex ?? -1) >= 0 &&
-      Number(item.cellIndex ?? -1) < 0
-  );
+  const globalRowEntries = getGlobalRowHighlightsForClauseFromIndex(getHighlightIndex(), clauseKey);
   const entries = [...localEntries, ...globalRowEntries];
   const indexes = new Set(entries.map((item) => Number(item.rowIndex ?? -1)).filter((value) => value >= 0));
   const rowTexts = new Set();
@@ -2857,6 +2911,9 @@ function mergeLoadedRoot(roots, subtree) {
 function focusNode(key) {
   hideNodeMenu();
   const node = findNodeByKey(key);
+  const previousFocusedKey = state.ui.focusedKey;
+  const previousExpandedKeys = new Set(state.ui.expandedKeys || []);
+  const previousCollapsedLoadedSpecs = new Set(state.ui.collapsedLoadedSpecs || []);
   if (node?.specNo) {
     const collapsedLoadedSpecs = new Set(state.ui.collapsedLoadedSpecs || []);
     collapsedLoadedSpecs.delete(node.specNo);
@@ -2866,7 +2923,21 @@ function focusNode(key) {
   state.ui.focusedKey = key;
   state.ui.viewportKey = key;
   persistSessionState();
-  renderLoadedTree();
+  const updatePlan = buildFocusNodeUpdatePlan({
+    key,
+    previousFocusedKey,
+    previousExpandedKeys,
+    nextExpandedKeys: new Set(state.ui.expandedKeys || []),
+    previousCollapsedLoadedSpecs,
+    nextCollapsedLoadedSpecs: new Set(state.ui.collapsedLoadedSpecs || []),
+  });
+  if (updatePlan.requiresStructureRender) {
+    renderLoadedTree();
+  } else {
+    updateLoadedTreeFocusedState(previousFocusedKey, key);
+    requestSelectionSidebarRender();
+    requestEditorNoteRailSync();
+  }
   updateSelectedClauseActiveState();
   ensureSelectedClauseVisible();
   window.setTimeout(() => {
@@ -3774,48 +3845,16 @@ function getNotesForClause(clauseKey) {
 }
 
 function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = getBlockIdByIndex(clauseKey, blockIndex), cellId = "") {
-  return (state.ui.notes || []).filter(
-    (note) => {
-      if (note.type !== "selection") {
-        return false;
-      }
-      const noteTargets = Array.isArray(note.targets) ? note.targets.filter(Boolean) : [];
-      if (noteTargets.length) {
-        return noteTargets.some((target) => selectionTargetMatches(target, clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId));
-      }
-      return (
-        blockReferenceMatches(note, clauseKey, blockIndex, blockId) &&
-        Number(note.rowIndex ?? -1) === Number(rowIndex) &&
-        (cellId
-          ? String(note.cellId || "") === String(cellId)
-          : cellIndex === null || Number(note.cellIndex ?? -1) === Number(cellIndex))
-      );
-    }
+  return getSelectionNotesForTargetFromIndex(
+    getSelectionNoteIndex(),
+    clauseKey,
+    blockIndex,
+    rowIndex,
+    cellIndex,
+    blockId,
+    cellId,
+    getResolvedBlockIndexForReference
   );
-}
-
-function selectionTargetMatches(target, clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = "", cellId = "") {
-  const targetClauseKey = String(target?.clauseKey || "").trim();
-  if (targetClauseKey !== String(clauseKey || "").trim()) {
-    return false;
-  }
-  const resolvedTargetBlockId = String(target?.blockId || "").trim();
-  const resolvedTargetBlockIndex = getResolvedBlockIndexForReference(targetClauseKey, target?.blockIndex, resolvedTargetBlockId);
-  const resolvedBlockIndex = getResolvedBlockIndexForReference(targetClauseKey, blockIndex, blockId);
-  if (resolvedTargetBlockId && blockId) {
-    if (resolvedTargetBlockId !== String(blockId || "").trim()) {
-      return false;
-    }
-  } else if (resolvedTargetBlockIndex !== resolvedBlockIndex) {
-    return false;
-  }
-  if (Number(target?.rowIndex ?? -1) !== Number(rowIndex ?? -1)) {
-    return false;
-  }
-  if (cellId) {
-    return String(target?.cellId || "").trim() === String(cellId || "").trim();
-  }
-  return cellIndex === null || Number(target?.cellIndex ?? -1) === Number(cellIndex);
 }
 
 function isSelectionNoteOpen(note) {
@@ -3884,7 +3923,14 @@ function upsertNote(note) {
     afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
   });
   persistSessionState();
-  renderLoadedTree();
+  const affectedClauseKeys = getAffectedClauseKeysForSelectionArtifacts([note]);
+  if (note.type === "selection" && affectedClauseKeys.length) {
+    rerenderLoadedNodes(affectedClauseKeys);
+  } else if (note.type === "clause" && note.clauseKey) {
+    rerenderLoadedNode(note.clauseKey);
+  } else {
+    renderLoadedTree();
+  }
 }
 
 function expandNodePath(targetKey) {
@@ -4026,7 +4072,7 @@ function toggleSelectionNotesByIds(noteIds, anchor = {}, triggerElement = null) 
     openIds: [...state.ui.openSelectionNoteIds],
   });
   persistSessionState();
-  renderSelectionSidebar();
+  requestSelectionSidebarRender();
   syncSelectionNoteToggleButtons();
 }
 
@@ -4044,7 +4090,7 @@ function getSelectionNoteOverlayPositionFromTrigger(triggerElement) {
 function collapseAllSelectionNotes() {
   state.ui.openSelectionNoteIds = new Set();
   persistSessionState();
-  renderSelectionSidebar();
+  requestSelectionSidebarRender();
   syncSelectionNoteToggleButtons();
 }
 
@@ -4057,7 +4103,7 @@ function closeSelectionNoteById(noteId) {
   openIds.delete(normalizedNoteId);
   state.ui.openSelectionNoteIds = openIds;
   persistSessionState();
-  renderSelectionSidebar();
+  requestSelectionSidebarRender();
   syncSelectionNoteToggleButtons();
 }
 
@@ -4166,7 +4212,14 @@ function deleteNote(noteId) {
     afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
   });
   persistSessionState();
-  renderLoadedTree();
+  const affectedClauseKeys = targetNote ? getAffectedClauseKeysForSelectionArtifacts([targetNote]) : [];
+  if (targetNote?.type === "selection" && affectedClauseKeys.length) {
+    rerenderLoadedNodes(affectedClauseKeys);
+  } else if (targetNote?.clauseKey) {
+    rerenderLoadedNode(targetNote.clauseKey);
+  } else {
+    renderLoadedTree();
+  }
   if (state.ui.clauseNoteModalKey) {
     renderClauseNoteModal();
   }
@@ -4305,7 +4358,7 @@ function toggleSelectionHighlight() {
     ? (state.ui.highlights || []).filter((item) => !entries.some((entry) => entry.id === item.id))
     : [...entries.filter((entry) => !existingIds.has(entry.id)), ...(state.ui.highlights || [])];
   persistSessionState();
-  renderLoadedTree();
+  rerenderLoadedNodes(getAffectedClauseKeysForSelectionArtifacts(entries));
 }
 
 function addManualSelectionNote() {
