@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.clause_browser.backend.board_repository import BoardLockManager, BoardPostRepository, LockConflictError
+from app.clause_browser.backend.board_repository import BoardDeletionError, BoardLockManager, BoardPostRepository, LockConflictError
 
 
 class BoardLockPayload(BaseModel):
@@ -14,6 +14,7 @@ class BoardLockPayload(BaseModel):
 
 
 class BoardCreatePayload(BoardLockPayload):
+    boardId: str = Field(default="default", min_length=1, max_length=120)
     title: str = Field(default="새 게시글", min_length=1, max_length=200)
     body: str = Field(default="", max_length=20000)
     releaseData: str = Field(min_length=1, max_length=32)
@@ -27,13 +28,17 @@ class BoardUpdatePayload(BoardLockPayload):
     workspaceState: dict[str, Any] = Field(default_factory=dict)
 
 
+class BoardListCreatePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 def create_board_router(*, repository: BoardPostRepository, locks: BoardLockManager) -> APIRouter:
     router = APIRouter(prefix="/api/clause-browser/board", tags=["clause-board"])
 
     @router.get("/posts")
-    def list_posts(query: str = "") -> dict[str, Any]:
+    def list_posts(query: str = "", boardId: str = "") -> dict[str, Any]:
         items = []
-        for post in repository.list_posts(query=query):
+        for post in repository.list_posts(query=query, board_id=boardId):
             lock = locks.get_lock(post.post_id)
             items.append(
                 {
@@ -43,9 +48,29 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
             )
         return {"success": True, "data": {"items": items}}
 
+    @router.get("/boards")
+    def list_boards() -> dict[str, Any]:
+        return {"success": True, "data": {"items": [board.to_dict() for board in repository.list_boards()]}}
+
+    @router.post("/boards")
+    def create_board(payload: BoardListCreatePayload) -> dict[str, Any]:
+        board = repository.create_board(name=payload.name)
+        return {"success": True, "data": board.to_dict()}
+
+    @router.post("/boards/{board_id}/delete")
+    def delete_board(board_id: str) -> dict[str, Any]:
+        try:
+            repository.delete_board(board_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except BoardDeletionError as exc:
+            raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
+        return {"success": True, "data": {"deleted": True, "boardId": board_id}}
+
     @router.post("/posts")
     def create_post(payload: BoardCreatePayload) -> dict[str, Any]:
         post = repository.create_post(
+            board_id=payload.boardId,
             title=payload.title,
             body=payload.body,
             release_data=payload.releaseData,

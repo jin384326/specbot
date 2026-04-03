@@ -15,6 +15,14 @@
             <h1>게시글 목록</h1>
           </div>
           <div class="topbar-actions">
+            <label class="field board-select-field">
+              <span>게시판</span>
+              <div class="board-select-row">
+                <select id="board-select"></select>
+                <button id="board-create-board" class="ghost" type="button">게시판 추가</button>
+                <button id="board-delete-board" class="ghost danger" type="button">게시판 삭제</button>
+              </div>
+            </label>
             <label class="field query-field">
               <span>게시글 검색</span>
               <input id="board-search" type="search" placeholder="제목 또는 내용 검색" />
@@ -59,6 +67,29 @@
           <div class="compact-modal-actions">
             <button class="ghost" data-action="close-board-create-modal">취소</button>
             <button id="board-create-confirm" class="primary">확인</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="board-create-board-modal" class="modal-shell hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-action="close-board-create-board-modal"></div>
+        <div class="modal-card compact-modal-card">
+          <header class="modal-header">
+            <div>
+              <p class="eyebrow">Specbot Board</p>
+              <h2>게시판 추가</h2>
+            </div>
+            <button class="ghost" data-action="close-board-create-board-modal">닫기</button>
+          </header>
+          <div class="compact-modal-body">
+            <label class="field">
+              <span>게시판 이름</span>
+              <input id="board-create-board-name" type="text" maxlength="120" placeholder="예: Rel-18 검토 게시판" />
+            </label>
+          </div>
+          <div class="compact-modal-actions">
+            <button class="ghost" data-action="close-board-create-board-modal">취소</button>
+            <button id="board-create-board-confirm" class="primary">추가</button>
           </div>
         </div>
       </div>

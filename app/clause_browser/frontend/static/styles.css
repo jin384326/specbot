@@ -141,6 +141,20 @@ h2 {
   min-width: min(420px, 40vw);
 }
 
+.board-select-field {
+  min-width: min(380px, 32vw);
+}
+
+.board-select-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.board-select-row select {
+  min-width: 180px;
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(250px, 320px) minmax(420px, 1fr) minmax(280px, 340px);

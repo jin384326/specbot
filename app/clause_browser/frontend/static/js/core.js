@@ -4978,6 +4978,18 @@ function clearMessage() {
   }
 }
 
+function clearSelectionNoteUiState() {
+  state.ui.openSelectionNoteIds = new Set();
+  state.ui.selectionNoteOverlayPositions = {};
+  state.ui.selectionSnapshot = null;
+  if (elements.selectionNoteOverlay) {
+    elements.selectionNoteOverlay.innerHTML = "";
+    elements.selectionNoteOverlay.classList.add("hidden");
+    elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
+  }
+  syncSelectionNoteToggleButtons();
+}
+
 async function apiGet(url) {
   const { signal, release } = registerRequestController();
   let response;
@@ -5577,6 +5589,7 @@ async function applyWorkspaceSnapshot(payload) {
   state.ui.specbotQueryText = payload?.specbotQueryText || "";
   state.ui.specbotResultsCollapsed = Boolean(payload?.specbotResultsCollapsed);
   state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  clearSelectionNoteUiState();
   console.debug("[selection-note] apply workspace snapshot result", {
     appliedNoteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
   });
@@ -5657,6 +5670,7 @@ export {
   exportDocx,
   openNoticeModal,
   clearMessage,
+  clearSelectionNoteUiState,
   runSelectionAction,
   toggleSelectionHighlight,
   addManualSelectionNote,

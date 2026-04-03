@@ -1,6 +1,7 @@
 import {
   applyWorkspaceSnapshot,
   clearMessage,
+  clearSelectionNoteUiState,
   state,
   getBoardScope,
   getWorkspaceSnapshot,
@@ -13,10 +14,13 @@ const EDITOR_ID_KEY = "specbot-board-editor-id-v1";
 const EDITOR_LABEL_KEY = "specbot-board-editor-label-v1";
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const VIEW_AUTOSAVE_DEBOUNCE_MS = 800;
+const BOARD_MESSAGE_HIDE_DELAY_MS = 3000;
 
 const boardState = {
   currentPostId: "",
   currentLock: null,
+  boards: [],
+  currentBoardId: "default",
   heartbeatId: 0,
   mode: "list",
   deleteTarget: null,
@@ -27,6 +31,7 @@ const boardState = {
   isDraft: false,
   isRestoringRoute: false,
   autosaveTimerId: 0,
+  messageTimerId: 0,
 };
 
 const BOARD_ROUTE_PARAM = "board";
@@ -57,6 +62,9 @@ function boardElements() {
     boardScreen: document.getElementById("board-screen"),
     editorScreen: document.getElementById("editor-screen"),
     boardSearch: document.getElementById("board-search"),
+    boardSelect: document.getElementById("board-select"),
+    boardCreateBoard: document.getElementById("board-create-board"),
+    boardDeleteBoard: document.getElementById("board-delete-board"),
     boardCreatePost: document.getElementById("board-create-post"),
     boardListCount: document.getElementById("board-list-count"),
     boardMessageBar: document.getElementById("board-message-bar"),
@@ -65,6 +73,9 @@ function boardElements() {
     boardCreateReleaseData: document.getElementById("board-create-release-data"),
     boardCreateRelease: document.getElementById("board-create-release"),
     boardCreateConfirm: document.getElementById("board-create-confirm"),
+    boardCreateBoardModal: document.getElementById("board-create-board-modal"),
+    boardCreateBoardName: document.getElementById("board-create-board-name"),
+    boardCreateBoardConfirm: document.getElementById("board-create-board-confirm"),
     boardBackToList: document.getElementById("board-back-to-list"),
     boardSavePost: document.getElementById("board-save-post"),
     boardPostTitle: document.getElementById("board-post-title"),
@@ -82,6 +93,43 @@ function boardElements() {
 function setBoardMessage(text, isError = false) {
   const el = boardElements().boardMessageBar;
   el.innerHTML = text ? `<div class="message ${isError ? "error" : ""}">${escapeHtml(text)}</div>` : "";
+  if (boardState.messageTimerId) {
+    window.clearTimeout(boardState.messageTimerId);
+    boardState.messageTimerId = 0;
+  }
+  if (text && !isError) {
+    boardState.messageTimerId = window.setTimeout(() => {
+      setBoardMessage("", false);
+    }, BOARD_MESSAGE_HIDE_DELAY_MS);
+  }
+}
+
+function currentBoard() {
+  return boardState.boards.find((item) => item.boardId === boardState.currentBoardId) || null;
+}
+
+function renderBoardSelector() {
+  const els = boardElements();
+  if (!els.boardSelect) {
+    return;
+  }
+  const boards = boardState.boards || [];
+  if (!boards.length) {
+    els.boardSelect.innerHTML = "";
+    return;
+  }
+  if (!boards.some((item) => item.boardId === boardState.currentBoardId)) {
+    boardState.currentBoardId = boards[0].boardId || "default";
+  }
+  els.boardSelect.innerHTML = boards
+    .map(
+      (item) =>
+        `<option value="${escapeHtml(item.boardId)}" ${item.boardId === boardState.currentBoardId ? "selected" : ""}>${escapeHtml(item.name || item.boardId)}</option>`
+    )
+    .join("");
+  if (els.boardDeleteBoard) {
+    els.boardDeleteBoard.classList.toggle("hidden", boardState.currentBoardId === "default");
+  }
 }
 
 function showBoardError(error) {
@@ -208,6 +256,50 @@ async function confirmCreatePost() {
   await openDraftPost();
 }
 
+function openCreateBoardModal() {
+  const els = boardElements();
+  els.boardCreateBoardName.value = "";
+  els.boardCreateBoardModal.classList.remove("hidden");
+  els.boardCreateBoardModal.setAttribute("aria-hidden", "false");
+}
+
+function closeCreateBoardModal() {
+  const els = boardElements();
+  els.boardCreateBoardModal.classList.add("hidden");
+  els.boardCreateBoardModal.setAttribute("aria-hidden", "true");
+}
+
+async function confirmCreateBoard() {
+  const els = boardElements();
+  const name = els.boardCreateBoardName.value.trim();
+  if (!name) {
+    throw new Error("게시판 이름을 입력하세요.");
+  }
+  const data = await request(`/api/clause-browser/board/boards`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  boardState.currentBoardId = data.boardId || boardState.currentBoardId;
+  closeCreateBoardModal();
+  await refreshBoards();
+  await refreshBoardPosts();
+}
+
+async function deleteCurrentBoard() {
+  const board = currentBoard();
+  if (!board || board.boardId === "default") {
+    throw new Error("기본 게시판은 삭제할 수 없습니다.");
+  }
+  await request(`/api/clause-browser/board/boards/${board.boardId}/delete`, {
+    method: "POST",
+  });
+  boardState.currentBoardId = "default";
+  await refreshBoards();
+  await refreshBoardPosts();
+  setBoardMessage("게시판을 삭제했습니다.", false);
+}
+
 async function request(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => ({}));
@@ -219,6 +311,12 @@ async function request(url, options = {}) {
     throw new Error(String(detail || "Request failed"));
   }
   return payload.data;
+}
+
+async function refreshBoards() {
+  const data = await request(`/api/clause-browser/board/boards`);
+  boardState.boards = Array.isArray(data.items) ? data.items : [];
+  renderBoardSelector();
 }
 
 function renderBoardPosts(items) {
@@ -237,7 +335,8 @@ function renderBoardPosts(items) {
           <div class="board-post-main">
             <div class="board-post-title">${escapeHtml(item.title || "Untitled post")}</div>
             <div class="board-post-meta">
-              <span>${escapeHtml(item.updatedAt || "")}</span>
+              <span>${escapeHtml(item.createdAt || "")}</span>
+              <span>${escapeHtml(currentBoard()?.name || "")}</span>
               <span>${escapeHtml([item.releaseData, item.release].filter(Boolean).join(" / "))}</span>
               <span>${escapeHtml(lockText)}</span>
             </div>
@@ -294,7 +393,8 @@ function renderBoardPosts(items) {
 
 async function refreshBoardPosts() {
   const query = encodeURIComponent(boardElements().boardSearch.value.trim());
-  const data = await request(`/api/clause-browser/board/posts?query=${query}`);
+  const boardId = encodeURIComponent(boardState.currentBoardId || "default");
+  const data = await request(`/api/clause-browser/board/posts?query=${query}&boardId=${boardId}`);
   renderBoardPosts(data.items || []);
 }
 
@@ -379,10 +479,14 @@ async function openExistingPostReadOnly(postId, options = {}) {
 
 async function openDraftPost(options = {}) {
   clearMessage();
+  clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = true;
+  if (!boardState.currentBoardId) {
+    boardState.currentBoardId = "default";
+  }
   boardElements().boardPostTitle.value = "새 게시글";
   renderBoardScopeOptions(getBoardScope());
   showEditorScreen();
@@ -394,9 +498,12 @@ async function openDraftPost(options = {}) {
 
 async function openPostInEditor(post, options = {}) {
   clearMessage();
+  clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
   boardState.currentLock = post.lock || null;
+  boardState.currentBoardId = post.boardId || boardState.currentBoardId || "default";
+  renderBoardSelector();
   boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
   renderBoardScopeOptions({ releaseData: post.releaseData, release: post.release });
@@ -413,9 +520,12 @@ async function openPostInEditor(post, options = {}) {
 
 async function openPostInViewer(post, options = {}) {
   clearMessage();
+  clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
   boardState.currentLock = null;
+  boardState.currentBoardId = post.boardId || boardState.currentBoardId || "default";
+  renderBoardSelector();
   boardState.isDraft = false;
   boardElements().boardPostTitle.value = post.title || "";
   renderBoardScopeOptions({ releaseData: post.releaseData, release: post.release });
@@ -444,6 +554,7 @@ async function persistCurrentPost({ autosave = false } = {}) {
   const payload = {
     editorId: editorId(),
     editorLabel: editorLabel(),
+    boardId: boardState.currentBoardId || "default",
     title: boardElements().boardPostTitle.value.trim() || "Untitled post",
     body: "",
     releaseData: scope.releaseData,
@@ -530,6 +641,7 @@ async function deletePost(postId) {
 
 async function closeEditor() {
   clearMessage();
+  clearSelectionNoteUiState();
   clearAutosaveTimer();
   stopHeartbeat();
   if (boardState.currentPostId && boardState.currentLock) {
@@ -643,6 +755,28 @@ export function bindBoardFeature() {
   document.querySelectorAll("[data-action='close-board-create-modal']").forEach((element) => {
     element.addEventListener("click", () => closeCreateModal());
   });
+  document.querySelectorAll("[data-action='close-board-create-board-modal']").forEach((element) => {
+    element.addEventListener("click", () => closeCreateBoardModal());
+  });
+  els.boardSelect.addEventListener("change", async () => {
+    boardState.currentBoardId = els.boardSelect.value || "default";
+    renderBoardSelector();
+    try {
+      await refreshBoardPosts();
+    } catch (error) {
+      showBoardError(error);
+    }
+  });
+  els.boardCreateBoard.addEventListener("click", () => {
+    openCreateBoardModal();
+  });
+  els.boardDeleteBoard.addEventListener("click", async () => {
+    try {
+      await deleteCurrentBoard();
+    } catch (error) {
+      showBoardError(error);
+    }
+  });
   els.boardCreatePost.addEventListener("click", async () => {
     try {
       await createPost();
@@ -684,6 +818,13 @@ export function bindBoardFeature() {
       showBoardError(error);
     }
   });
+  els.boardCreateBoardConfirm.addEventListener("click", async () => {
+    try {
+      await confirmCreateBoard();
+    } catch (error) {
+      showBoardError(error);
+    }
+  });
   els.boardSearch.addEventListener(
     "input",
     debounce(async () => {
@@ -708,6 +849,7 @@ export function bindBoardFeature() {
 export async function initializeBoard() {
   renderBoardScopeOptions();
   showBoardScreen();
+  await refreshBoards();
   await refreshBoardPosts();
   await restoreBoardRoute();
 }
