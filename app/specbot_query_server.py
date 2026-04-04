@@ -62,6 +62,7 @@ class SpecbotQueryRequest(BaseModel):
 
 class LLMActionRequest(BaseModel):
     actionType: str = Field(min_length=1, max_length=50)
+    actionScope: str | None = Field(default=None, min_length=1, max_length=50)
     text: str = Field(min_length=1, max_length=200000)
     sourceLanguage: str = Field(min_length=2, max_length=16)
     targetLanguage: str = Field(min_length=2, max_length=16)
@@ -78,6 +79,8 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
         model=active_settings.llm_action_model,
         system_prompt_path=active_settings.project_root / "system_prompt_clause_summary.txt",
         user_prompt_path=active_settings.project_root / "user_prompt_clause_summary.txt",
+        selection_system_prompt_path=active_settings.project_root / "system_prompt_translate.txt",
+        selection_user_prompt_path=active_settings.project_root / "user_prompt_translate.txt",
     )
     task_limiter = SharedTaskLimiter(
         max_concurrent_tasks=active_settings.task_max_concurrency,
@@ -124,6 +127,7 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
             return await task_limiter.run_async(
                 llm_service.run,
                 action_type=payload.actionType,
+                action_scope=payload.actionScope,
                 text=payload.text,
                 source_language=payload.sourceLanguage,
                 target_language=payload.targetLanguage,
@@ -167,6 +171,7 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
                 result = await task_limiter.run_async(
                     llm_service.run,
                     action_type=payload.actionType,
+                    action_scope=payload.actionScope,
                     text=payload.text,
                     source_language=payload.sourceLanguage,
                     target_language=payload.targetLanguage,

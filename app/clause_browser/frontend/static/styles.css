@@ -103,6 +103,7 @@ h2 {
   min-height: 0;
   color: var(--muted);
   font-size: 18px;
+  font-weight: 700;
   line-height: 1.4;
   background: #f5f8f3;
   border: 1px solid var(--border);
@@ -617,11 +618,13 @@ button:disabled {
   align-items: center;
   gap: 12px;
   font-size: 19px;
+  font-weight: 700;
   line-height: 1.4;
 }
 
 .translation-status-detail {
   font-size: 16px;
+  font-weight: 600;
   line-height: 1.4;
   color: var(--muted);
 }
@@ -638,6 +641,7 @@ button:disabled {
   pointer-events: auto;
   width: 100%;
   justify-content: center;
+  font-weight: 700;
   transition: opacity 0.18s ease, transform 0.18s ease;
 }
 

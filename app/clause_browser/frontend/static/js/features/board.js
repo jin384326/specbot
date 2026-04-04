@@ -4,6 +4,7 @@ import {
   clearMessage,
   clearTransientActivityUi,
   clearSelectionNoteUiState,
+  setMessage,
   state,
   getBoardScope,
   getWorkspaceSnapshot,
@@ -572,8 +573,6 @@ async function openPostInViewer(post, options = {}) {
 
 async function saveCurrentPost() {
   await persistCurrentPost();
-  setBoardMessage("게시글을 저장했습니다.", false);
-  await closeEditor();
 }
 
 async function persistCurrentPost({ autosave = false } = {}) {
@@ -619,6 +618,7 @@ async function persistCurrentPost({ autosave = false } = {}) {
   }
   if (!autosave) {
     setBoardMessage("게시글을 저장했습니다.", false);
+    setMessage("게시글을 저장했습니다.", false);
   }
 }
 

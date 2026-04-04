@@ -834,6 +834,30 @@ def test_llm_action_service_rejects_requests_when_queue_is_full() -> None:
     assert len(queue_errors) == 1
 
 
+def test_llm_action_service_uses_selection_prompts_for_selection_scope(tmp_path: Path) -> None:
+    clause_system = tmp_path / "system_prompt_clause_summary.txt"
+    clause_user = tmp_path / "user_prompt_clause_summary.txt"
+    selection_system = tmp_path / "system_prompt_translate.txt"
+    selection_user = tmp_path / "user_prompt_translate.txt"
+    clause_system.write_text("CLAUSE_SYSTEM", encoding="utf-8")
+    clause_user.write_text("CLAUSE_USER {context_text}", encoding="utf-8")
+    selection_system.write_text("SELECTION_SYSTEM", encoding="utf-8")
+    selection_user.write_text("SELECTION_USER {context_text}", encoding="utf-8")
+
+    service = LLMActionService(
+        provider="mock",
+        model="mock-model",
+        system_prompt_path=clause_system,
+        user_prompt_path=clause_user,
+        selection_system_prompt_path=selection_system,
+        selection_user_prompt_path=selection_user,
+    )
+
+    assert service._get_translation_prompt_pair("selection") == ("SELECTION_SYSTEM", "SELECTION_USER {context_text}")
+    assert service._get_translation_prompt_pair("clause") == ("CLAUSE_SYSTEM", "CLAUSE_USER {context_text}")
+    assert service._get_translation_prompt_pair(None) == ("CLAUSE_SYSTEM", "CLAUSE_USER {context_text}")
+
+
 def test_llm_action_endpoint_returns_429_when_queue_is_full(tmp_path: Path) -> None:
     class BusyLLMActionService(LLMActionService):
         def run_limited(self, **kwargs):

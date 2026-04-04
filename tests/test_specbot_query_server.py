@@ -5,7 +5,7 @@ from pathlib import Path
 from app.specbot_query_server import SpecbotQueryDefaults, SpecbotQueryServerSettings, create_app
 
 
-def test_query_server_uses_clause_summary_prompts_for_llm_actions(monkeypatch, tmp_path: Path) -> None:
+def test_query_server_uses_split_prompts_for_llm_actions(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class StubEngine:
@@ -55,3 +55,5 @@ def test_query_server_uses_clause_summary_prompts_for_llm_actions(monkeypatch, t
     assert app.title == "SpecBot Query API"
     assert captured["llm_kwargs"]["system_prompt_path"] == tmp_path / "system_prompt_clause_summary.txt"
     assert captured["llm_kwargs"]["user_prompt_path"] == tmp_path / "user_prompt_clause_summary.txt"
+    assert captured["llm_kwargs"]["selection_system_prompt_path"] == tmp_path / "system_prompt_translate.txt"
+    assert captured["llm_kwargs"]["selection_user_prompt_path"] == tmp_path / "user_prompt_translate.txt"

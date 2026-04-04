@@ -2960,6 +2960,7 @@ async function runSelectionAction(targetLanguage = "ko") {
   try {
     await createTranslatedNote({
       type: "selection",
+      actionScope: "selection",
       clauseKey: anchorTarget.clauseKey,
       blockIndex: anchorTarget.blockIndex,
       rowIndex: anchorTarget.rowIndex,
@@ -3019,6 +3020,7 @@ async function runClauseTranslation(clauseKey) {
       renderTranslationStatus();
       await createTranslatedNote({
         type: "clause",
+        actionScope: "clause",
         clauseKey: currentNode.key,
         sourceText: currentNode.sourceText,
         clauseLabel: getLabelForKey(currentNode.key),
@@ -3131,9 +3133,23 @@ function getClauseSourceText(node) {
   return blockText || String(node.clauseTitle || "").trim();
 }
 
-async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex = -1, cellIndex = -1, cellId = "", rowText = "", sourceText, clauseLabel, targetLanguage, targets = [] }) {
+async function createTranslatedNote({
+  type,
+  actionScope,
+  clauseKey,
+  blockIndex = -1,
+  rowIndex = -1,
+  cellIndex = -1,
+  cellId = "",
+  rowText = "",
+  sourceText,
+  clauseLabel,
+  targetLanguage,
+  targets = [],
+}) {
   try {
     const sourceLanguage = inferSourceLanguage(sourceText);
+    const effectiveActionScope = String(actionScope || "").trim() || (type === "clause" ? "clause" : "selection");
     state.ui.translationTask = {
       status: "queued",
       queuedPosition: 0,
@@ -3142,6 +3158,7 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex
     renderTranslationStatus();
     const response = await streamLlmAction("/api/clause-browser/llm-actions", {
       actionType: "translate",
+      actionScope: effectiveActionScope,
       text: sourceText,
       sourceLanguage,
       targetLanguage,
@@ -3664,6 +3681,7 @@ export {
   clearRejectedSpecbotClauses,
   exportDocx,
   openNoticeModal,
+  setMessage,
   clearMessage,
   clearTransientActivityUi,
   clearSelectionNoteUiState,

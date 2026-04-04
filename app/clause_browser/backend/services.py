@@ -616,6 +616,8 @@ class LLMActionService:
         model: str = "gpt-4o-mini",
         system_prompt_path: str | Path | None = None,
         user_prompt_path: str | Path | None = None,
+        selection_system_prompt_path: str | Path | None = None,
+        selection_user_prompt_path: str | Path | None = None,
         max_concurrent_requests: int = 2,
         max_queued_requests: int = 5,
     ) -> None:
@@ -638,6 +640,14 @@ class LLMActionService:
             user_prompt_path,
             default="Translate the following 3GPP context into Korean.\n\n[CONTEXT]\n{context_text}",
         )
+        self._selection_system_prompt = self._load_prompt(
+            selection_system_prompt_path,
+            default=self._system_prompt,
+        )
+        self._selection_user_prompt_template = self._load_prompt(
+            selection_user_prompt_path,
+            default=self._user_prompt_template,
+        )
 
     def available_actions(self) -> list[dict[str, str]]:
         return [{"type": "translate", "label": "Translate"}]
@@ -650,6 +660,7 @@ class LLMActionService:
         source_language: str,
         target_language: str,
         context: str | None = None,
+        action_scope: str | None = None,
         should_cancel=None,
     ) -> dict[str, Any]:
         cleaned_text = text.strip()
@@ -666,6 +677,7 @@ class LLMActionService:
                 source_language=source_language,
                 target_language=target_language,
                 context=context or "",
+                action_scope=action_scope,
                 should_cancel=should_cancel,
             )
         if self._provider == "mock":
@@ -686,6 +698,7 @@ class LLMActionService:
         source_language: str,
         target_language: str,
         context: str | None = None,
+        action_scope: str | None = None,
         should_cancel=None,
     ) -> dict[str, Any]:
         self._acquire_request_slot()
@@ -696,6 +709,7 @@ class LLMActionService:
                 source_language=source_language,
                 target_language=target_language,
                 context=context,
+                action_scope=action_scope,
                 should_cancel=should_cancel,
             )
         finally:
@@ -733,6 +747,7 @@ class LLMActionService:
         source_language: str,
         target_language: str,
         context: str,
+        action_scope: str | None = None,
         should_cancel=None,
     ) -> dict[str, Any]:
         try:
@@ -742,12 +757,12 @@ class LLMActionService:
 
         client = ChatOpenAI(model=self._model, temperature=0)
         translated_parts: list[str] = []
+        system_prompt, user_prompt_template = self._get_translation_prompt_pair(action_scope)
         for chunk in self._split_translation_text(text):
             if should_cancel and should_cancel():
                 raise LLMActionCancelledError("LLM action cancelled by client.")
-            system_prompt = self._system_prompt
             context_text = chunk if not context else f"{context}\n\n{chunk}"
-            human_prompt = self._user_prompt_template.replace("{context_text}", context_text)
+            human_prompt = user_prompt_template.replace("{context_text}", context_text)
             response = client.invoke([("system", system_prompt), ("human", human_prompt)])
             content = response.content if isinstance(response.content, str) else str(response.content)
             translated_parts.append(content.strip())
@@ -759,6 +774,11 @@ class LLMActionService:
             "sourceLanguage": source_language,
             "targetLanguage": target_language,
         }
+
+    def _get_translation_prompt_pair(self, action_scope: str | None) -> tuple[str, str]:
+        if str(action_scope or "").strip().lower() == "selection":
+            return self._selection_system_prompt, self._selection_user_prompt_template
+        return self._system_prompt, self._user_prompt_template
 
     @staticmethod
     def _load_prompt(path: str | Path | None, *, default: str) -> str:
@@ -1112,6 +1132,7 @@ class LLMActionHttpService:
         self,
         *,
         action_type: str,
+        action_scope: str | None = None,
         text: str,
         source_language: str,
         target_language: str,
@@ -1122,6 +1143,7 @@ class LLMActionHttpService:
 
         payload = {
             "actionType": action_type,
+            "actionScope": action_scope,
             "text": text,
             "sourceLanguage": source_language,
             "targetLanguage": target_language,

@@ -14,6 +14,7 @@ import {
 } from "./core.js";
 import { bindBoardFeature, initializeBoard } from "./features/board.js";
 import { bindDocumentsFeature } from "./features/documents.js";
+import { bindEditorSaveShortcutFeature } from "./features/editor-save-shortcut.js";
 import { bindExportFeature } from "./features/export.js";
 import { bindSelectionFeature } from "./features/selection.js";
 import { bindSpecbotFeature } from "./features/specbot.js";
@@ -24,6 +25,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindGlobalEvents();
   bindBoardFeature();
   bindDocumentsFeature();
+  bindEditorSaveShortcutFeature();
   bindSpecbotFeature();
   bindSelectionFeature();
   bindExportFeature();

@@ -48,6 +48,7 @@ class ExportRequest(BaseModel):
 
 class LLMActionRequest(BaseModel):
     actionType: str = Field(min_length=1, max_length=50)
+    actionScope: str | None = Field(default=None, min_length=1, max_length=50)
     text: str = Field(min_length=1, max_length=200000)
     sourceLanguage: str = Field(min_length=2, max_length=16)
     targetLanguage: str = Field(min_length=2, max_length=16)
@@ -252,6 +253,7 @@ def create_router(
             if hasattr(llm_service, "run_async"):
                 result = await llm_service.run_async(
                     action_type=payload.actionType,
+                    action_scope=payload.actionScope,
                     text=payload.text,
                     source_language=payload.sourceLanguage,
                     target_language=payload.targetLanguage,
@@ -261,6 +263,7 @@ def create_router(
             else:
                 result = llm_service.run_limited(
                     action_type=payload.actionType,
+                    action_scope=payload.actionScope,
                     text=payload.text,
                     source_language=payload.sourceLanguage,
                     target_language=payload.targetLanguage,
