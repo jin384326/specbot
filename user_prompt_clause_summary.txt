@@ -1,0 +1,4 @@
+다음 3GPP 문서 내용을 한국어로 요약하세요.
+
+[CONTEXT]
+{context_text}

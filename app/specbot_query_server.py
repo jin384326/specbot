@@ -472,8 +472,8 @@ def create_app(settings: SpecbotQueryServerSettings | None = None) -> FastAPI:
     llm_service = LLMActionService(
         provider=active_settings.llm_action_provider,
         model=active_settings.llm_action_model,
-        system_prompt_path=active_settings.project_root / "system_prompt_translate.txt",
-        user_prompt_path=active_settings.project_root / "user_prompt_translate.txt",
+        system_prompt_path=active_settings.project_root / "system_prompt_clause_summary.txt",
+        user_prompt_path=active_settings.project_root / "user_prompt_clause_summary.txt",
     )
     task_limiter = SharedTaskLimiter(
         max_concurrent_tasks=active_settings.task_max_concurrency,
