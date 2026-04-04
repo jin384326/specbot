@@ -111,6 +111,9 @@ const state = {
     translationJob: null,
     translationTask: null,
     clauseNoteModalKey: "",
+    noteViewReadOnly: false,
+    noteMutationWarningShown: false,
+    dirtyNoteIds: new Set(),
     selection: {
       text: "",
       clauseKey: "",
@@ -274,7 +277,16 @@ const selectionNoteController = createSelectionNoteController({
   requestSelectionSidebarRender: () => requestSelectionSidebarRender(),
   focusNode: (key) => focusNode(key),
   setMessage: (text, isError) => setMessage(text, isError),
-  ensureSelectionMutationAllowed: (actionLabel) => ensureBoardViewMutationAllowed(actionLabel),
+  ensureSelectionMutationAllowed: (actionLabel, options) => ensureBoardViewMutationAllowed(actionLabel, options),
+  syncNoteReadOnlyOnOpen: () => refreshNoteReadOnlyState(),
+  isNoteReadOnly: () => Boolean(state.ui.noteViewReadOnly),
+  markNoteDirty: (noteId) => {
+    const dirtyIds = new Set(state.ui.dirtyNoteIds || []);
+    dirtyIds.add(String(noteId || ""));
+    state.ui.dirtyNoteIds = dirtyIds;
+  },
+  clearNoteDirty: (noteId) => clearDirtyNoteIds([noteId]),
+  hasDirtyNote: (noteId) => isAnyNoteDirty([noteId]),
   inferSourceLanguage: (text) => inferSourceLanguage(text),
   escapeHtml,
   escapeKey,
@@ -442,7 +454,7 @@ function bindGlobalEvents() {
       closeNoticeModal();
     }
     if (event.target.closest("[data-action='close-clause-note-modal']")) {
-      closeClauseNoteModal();
+      void closeClauseNoteModal();
     }
   });
   window.addEventListener("pagehide", () => {
@@ -594,8 +606,9 @@ function closeNoticeModal() {
   elements.noticeModal.setAttribute("aria-hidden", "true");
 }
 
-function openClauseNoteModal(clauseKey) {
+async function openClauseNoteModal(clauseKey) {
   state.ui.clauseNoteModalKey = clauseKey;
+  await refreshNoteReadOnlyState();
   renderClauseNoteModal();
   persistSessionState();
   elements.clauseNoteModal.classList.remove("hidden");
@@ -610,13 +623,13 @@ function isBoardEditMode() {
   return document.body?.dataset?.boardMode === "edit";
 }
 
-async function ensureBoardViewMutationAllowed(actionLabel = "이 작업을 수행") {
+async function getBoardViewMutationState(actionLabel = "이 작업을 수행", { showMessage = true, warnOnce = false } = {}) {
   if (!isBoardViewMode()) {
-    return true;
+    return { allowed: true, locked: false };
   }
   const postId = String(document.body?.dataset?.boardPostId || "").trim();
   if (!postId) {
-    return true;
+    return { allowed: true, locked: false };
   }
   try {
     const response = await fetch(`/api/clause-browser/board/posts/${encodeURIComponent(postId)}`);
@@ -626,24 +639,72 @@ async function ensureBoardViewMutationAllowed(actionLabel = "이 작업을 수�
     }
     const lock = payload?.data?.lock;
     if (!lock) {
-      return true;
+      state.ui.noteMutationWarningShown = false;
+      return { allowed: true, locked: false };
     }
     const editorLabel = String(lock.editorLabel || "").trim();
-    setMessage(
-      editorLabel
-        ? `${editorLabel} 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`
-        : `다른 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`,
-      true
-    );
-    return false;
+    if (showMessage && (!warnOnce || !state.ui.noteMutationWarningShown)) {
+      setMessage(
+        editorLabel
+          ? `${editorLabel} 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`
+          : `다른 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`,
+        true
+      );
+      if (warnOnce) {
+        state.ui.noteMutationWarningShown = true;
+      }
+    }
+    return { allowed: false, locked: true };
   } catch (error) {
-    setMessage(String(error?.message || `현재 편집 상태를 확인할 수 없어 ${actionLabel}할 수 없습니다.`), true);
-    return false;
+    if (showMessage && (!warnOnce || !state.ui.noteMutationWarningShown)) {
+      setMessage(String(error?.message || `현재 편집 상태를 확인할 수 없어 ${actionLabel}할 수 없습니다.`), true);
+      if (warnOnce) {
+        state.ui.noteMutationWarningShown = true;
+      }
+    }
+    return { allowed: false, locked: true };
   }
 }
 
-function closeClauseNoteModal() {
+async function ensureBoardViewMutationAllowed(actionLabel = "이 작업을 수행", options = {}) {
+  const result = await getBoardViewMutationState(actionLabel, options);
+  return result.allowed;
+}
+
+async function refreshNoteReadOnlyState() {
+  const result = await getBoardViewMutationState("메모를 수정", { showMessage: false });
+  state.ui.noteViewReadOnly = result.locked;
+  if (!result.locked) {
+    state.ui.noteMutationWarningShown = false;
+  }
+  return result.locked;
+}
+
+function isAnyNoteDirty(noteIds = []) {
+  const dirtyIds = state.ui.dirtyNoteIds || new Set();
+  return (noteIds || []).some((noteId) => dirtyIds.has(String(noteId || "")));
+}
+
+function clearDirtyNoteIds(noteIds = []) {
+  const dirtyIds = new Set(state.ui.dirtyNoteIds || []);
+  (noteIds || []).forEach((noteId) => {
+    dirtyIds.delete(String(noteId || ""));
+  });
+  state.ui.dirtyNoteIds = dirtyIds;
+}
+
+async function closeClauseNoteModal() {
+  const clauseKey = state.ui.clauseNoteModalKey;
+  const noteIds = getNotesForClause(clauseKey)
+    .filter((note) => note.type === "clause")
+    .map((note) => String(note.id || ""))
+    .filter(Boolean);
+  if (isAnyNoteDirty(noteIds)) {
+    const allowed = await ensureBoardViewMutationAllowed("메모 변경을 완료", { warnOnce: true });
+    state.ui.noteViewReadOnly = !allowed;
+  }
   state.ui.clauseNoteModalKey = "";
+  clearDirtyNoteIds(noteIds);
   persistSessionState();
   elements.clauseNoteModal.classList.add("hidden");
   elements.clauseNoteModal.setAttribute("aria-hidden", "true");
@@ -656,6 +717,7 @@ function renderClauseNoteModal() {
     return;
   }
   const node = findNodeByKey(clauseKey);
+  const isReadOnly = Boolean(state.ui.noteViewReadOnly);
   elements.clauseNoteModalTitle.textContent = node
     ? `${node.specNo} / ${node.clauseId} ${node.clauseTitle}`
     : "절 메모";
@@ -675,16 +737,17 @@ function renderClauseNoteModal() {
       <div class="section-heading">
         <h3>절 메모</h3>
         ${
-          note
+          note && !isReadOnly
             ? `<button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>`
             : ""
         }
       </div>
+      ${isReadOnly ? '<div class="muted note-readonly-notice">다른 사용자가 편집 중이어서 메모를 조회 전용으로만 볼 수 있습니다.</div>' : ""}
       ${
         note
           ? `
             <label class="field">
-              <textarea class="clause-note-modal-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="12" placeholder="번역 결과를 수정하세요.">${escapeHtml(
+              <textarea class="clause-note-modal-textarea ${isReadOnly ? "is-readonly" : ""}" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="12" placeholder="번역 결과를 수정하세요." ${isReadOnly ? "readonly" : ""}>${escapeHtml(
                 note.translation || ""
               )}</textarea>
             </label>
@@ -703,8 +766,8 @@ function bindClauseNoteModalEvents() {
     });
   });
   elements.clauseNoteModalBody.querySelectorAll("[data-action='delete-note']").forEach((button) => {
-    button.addEventListener("click", () => {
-      deleteNote(button.dataset.noteId || "");
+    button.addEventListener("click", async () => {
+      await deleteNote(button.dataset.noteId || "");
     });
   });
 }
@@ -2071,14 +2134,14 @@ function bindTreeEvents(scope = elements.treeContainer) {
   });
 
   scope.querySelectorAll("[data-action='toggle-clause-notes']").forEach((button) => {
-    button.addEventListener("click", () => {
-      toggleClauseNotes(button.dataset.clauseKey || "");
+    button.addEventListener("click", async () => {
+      await toggleClauseNotes(button.dataset.clauseKey || "");
     });
   });
 
   scope.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
-    button.addEventListener("click", () => {
-      toggleSelectionNotesByIds(
+    button.addEventListener("click", async () => {
+      await toggleSelectionNotesByIds(
         String(button.dataset.noteIds || "").split(",").map((item) => item.trim()).filter(Boolean),
         {
           clauseKey: button.dataset.clauseKey || "",
@@ -2095,8 +2158,8 @@ function bindTreeEvents(scope = elements.treeContainer) {
   });
 
   scope.querySelectorAll("[data-action='delete-note']").forEach((button) => {
-    button.addEventListener("click", () => {
-      deleteNote(button.dataset.noteId || "");
+    button.addEventListener("click", async () => {
+      await deleteNote(button.dataset.noteId || "");
     });
   });
 
@@ -3234,11 +3297,11 @@ function expandNodePath(targetKey) {
   state.ui.expandedKeys = keys;
 }
 
-function toggleClauseNotes(clauseKey) {
+async function toggleClauseNotes(clauseKey) {
   if (state.ui.clauseNoteModalKey === clauseKey) {
-    closeClauseNoteModal();
+    await closeClauseNoteModal();
   } else {
-    openClauseNoteModal(clauseKey);
+    await openClauseNoteModal(clauseKey);
   }
   renderLoadedTree();
 }

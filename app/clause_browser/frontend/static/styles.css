@@ -1245,6 +1245,18 @@ button:disabled {
   resize: vertical;
 }
 
+.clause-note-textarea.is-readonly,
+.clause-note-modal-textarea.is-readonly {
+  background: #f7faf6;
+  color: var(--muted);
+}
+
+.note-readonly-notice {
+  margin-top: -2px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .notice-modal-text {
   padding: 8px 4px 0;
   line-height: 1.6;

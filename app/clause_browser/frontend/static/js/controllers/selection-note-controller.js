@@ -21,6 +21,11 @@ export function createSelectionNoteController(dependencies) {
     focusNode,
     setMessage,
     ensureSelectionMutationAllowed = async () => true,
+    syncNoteReadOnlyOnOpen = async () => false,
+    isNoteReadOnly = () => false,
+    markNoteDirty = () => {},
+    clearNoteDirty = () => {},
+    hasDirtyNote = () => false,
     inferSourceLanguage,
     escapeHtml,
     escapeKey,
@@ -88,13 +93,13 @@ export function createSelectionNoteController(dependencies) {
       });
     });
     elements.selectionNoteOverlay.querySelectorAll("[data-action='delete-note']").forEach((button) => {
-      button.addEventListener("click", () => {
-        deleteNote(button.dataset.noteId || "");
+      button.addEventListener("click", async () => {
+        await deleteNote(button.dataset.noteId || "");
       });
     });
     elements.selectionNoteOverlay.querySelectorAll("[data-action='toggle-selection-note-card']").forEach((button) => {
-      button.addEventListener("click", () => {
-        closeSelectionNoteById(button.dataset.noteId || "");
+      button.addEventListener("click", async () => {
+        await closeSelectionNoteById(button.dataset.noteId || "");
       });
     });
   }
@@ -120,6 +125,7 @@ export function createSelectionNoteController(dependencies) {
       elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
       return;
     }
+    const readOnly = Boolean(isNoteReadOnly());
     const cards = overlayNotes.flatMap((note) => {
       const position = getSelectionNoteOverlayPosition(note) || state.ui.selectionNoteOverlayPositions?.[String(note.id || "")] || null;
       if (!position) {
@@ -149,12 +155,13 @@ export function createSelectionNoteController(dependencies) {
               data-cell-index="${Number(note.cellIndex ?? -1)}"
               data-cell-id="${escapeHtml(note.cellId || "")}"
             >−</button>
-            <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
+            ${readOnly ? "" : `<button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>`}
           </div>
         </div>
+        ${readOnly ? '<div class="muted note-readonly-notice">다른 사용자가 편집 중이어서 메모를 조회 전용으로만 볼 수 있습니다.</div>' : ""}
         <div class="clause-note-body">
           <label class="field">
-            <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="6" placeholder="메모를 입력하세요.">${escapeHtml(note.translation || "")}</textarea>
+            <textarea class="clause-note-textarea ${readOnly ? "is-readonly" : ""}" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="6" placeholder="메모를 입력하세요." ${readOnly ? "readonly" : ""}>${escapeHtml(note.translation || "")}</textarea>
           </label>
         </div>
       </article>
@@ -340,6 +347,7 @@ export function createSelectionNoteController(dependencies) {
 
   function updateNoteField(noteId, field, value) {
     state.ui.notes = (state.ui.notes || []).map((note) => (note.id === noteId ? { ...note, [field]: value } : note));
+    markNoteDirty(noteId);
     persistSessionState();
   }
 
@@ -356,13 +364,13 @@ export function createSelectionNoteController(dependencies) {
 
   function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = getBlockIdByIndex(clauseKey, blockIndex), cellId = "") {
     const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId);
-    toggleSelectionNotesByIds(
+    void toggleSelectionNotesByIds(
       notes.map((note) => String(note.id || "")).filter(Boolean),
       { clauseKey, blockIndex, rowIndex, cellIndex: cellIndex === null ? -1 : cellIndex, blockId, cellId }
     );
   }
 
-  function toggleSelectionNotesByIds(noteIds, anchor = {}, triggerElement = null) {
+  async function toggleSelectionNotesByIds(noteIds, anchor = {}, triggerElement = null) {
     const normalizedIds = [...new Set((noteIds || []).map((item) => String(item || "").trim()).filter(Boolean))];
     if (!normalizedIds.length) {
       return;
@@ -386,6 +394,9 @@ export function createSelectionNoteController(dependencies) {
     const shouldCollapse = notes.some((note) => isSelectionNoteOpen(note));
     const normalizedBlockId = String(anchor.blockId || "").trim() || getBlockIdByIndex(anchor.clauseKey || "", Number(anchor.blockIndex || -1)) || "";
     const normalizedCellId = String(anchor.cellId || "").trim();
+    if (!shouldCollapse) {
+      await syncNoteReadOnlyOnOpen();
+    }
     if (!shouldCollapse) {
       const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
       const resolvedPosition = getSelectionNoteOverlayPosition({
@@ -438,14 +449,18 @@ export function createSelectionNoteController(dependencies) {
     syncSelectionNoteToggleButtons();
   }
 
-  function closeSelectionNoteById(noteId) {
+  async function closeSelectionNoteById(noteId) {
     const normalizedNoteId = String(noteId || "").trim();
     if (!normalizedNoteId) {
       return;
     }
+    if (hasDirtyNote(normalizedNoteId)) {
+      await ensureSelectionMutationAllowed("메모 변경을 완료", { warnOnce: true });
+    }
     const openIds = new Set(state.ui.openSelectionNoteIds || []);
     openIds.delete(normalizedNoteId);
     state.ui.openSelectionNoteIds = openIds;
+    clearNoteDirty(normalizedNoteId);
     persistSessionState();
     requestSelectionSidebarRender();
     syncSelectionNoteToggleButtons();
@@ -547,7 +562,12 @@ export function createSelectionNoteController(dependencies) {
     state.ui.highlights = (state.ui.highlights || []).filter((item) => !removableIds.has(item.id));
   }
 
-  function deleteNote(noteId) {
+  async function deleteNote(noteId) {
+    const allowed = await ensureSelectionMutationAllowed("메모를 삭제", { warnOnce: true });
+    if (!allowed) {
+      requestSelectionSidebarRender();
+      return;
+    }
     const targetNote = (state.ui.notes || []).find((note) => note.id === noteId) || null;
     state.ui.notes = (state.ui.notes || []).filter((note) => note.id !== noteId);
     const openIds = new Set(state.ui.openSelectionNoteIds || []);
@@ -556,6 +576,7 @@ export function createSelectionNoteController(dependencies) {
     const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
     delete nextPositions[String(noteId || "")];
     state.ui.selectionNoteOverlayPositions = nextPositions;
+    clearNoteDirty(noteId);
     if (targetNote?.type === "selection") {
       pruneHighlightForSelectionNote(targetNote);
     }

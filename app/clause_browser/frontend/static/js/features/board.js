@@ -148,7 +148,13 @@ function renderBoardSelector() {
 function showBoardError(error) {
   const message = String(error?.message || error || "Request failed");
   if (/already being edited/i.test(message)) {
-    openNoticeModal(message);
+    const matchedEditorLabel = message.match(/already being edited by\s+(.+?)(?:[.]\s*|$)/i);
+    const editorLabel = String(matchedEditorLabel?.[1] || "").trim();
+    const localizedMessage = editorLabel
+      ? `${editorLabel} 사용자가 편집 중이어서 메모 변경을 완료할 수 없습니다.`
+      : "다른 사용자가 편집 중이어서 메모 변경을 완료할 수 없습니다.";
+    setBoardMessage(localizedMessage, true);
+    setMessage(localizedMessage, true);
     return;
   }
   setBoardMessage(message, true);
