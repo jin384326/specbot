@@ -2090,6 +2090,8 @@ function syncEditorHtmlToNode(nodeKey, html) {
   if (!changed) {
     return;
   }
+  const previousNotesSnapshot = JSON.stringify(state.ui.notes || []);
+  const previousHighlightsSnapshot = JSON.stringify(state.ui.highlights || []);
   if (Array.isArray(previousBlocks)) {
     state.ui.notes = remapTableAnnotationsForEditorChange(
       state.ui.notes || [],
@@ -2106,9 +2108,16 @@ function syncEditorHtmlToNode(nodeKey, html) {
       { normalizeRowText, normalizeTableDisplayText }
     );
   }
+  const remapNotesChanged = previousNotesSnapshot !== JSON.stringify(state.ui.notes || []);
+  const remapHighlightsChanged = previousHighlightsSnapshot !== JSON.stringify(state.ui.highlights || []);
   const annotationSyncResult = syncClauseAnnotationBlockReferences(nodeKey);
   persistSessionState();
-  if (annotationSyncResult.notesChanged || annotationSyncResult.highlightsChanged) {
+  if (
+    remapNotesChanged ||
+    remapHighlightsChanged ||
+    annotationSyncResult.notesChanged ||
+    annotationSyncResult.highlightsChanged
+  ) {
     rerenderLoadedNode(nodeKey);
     renderSelectionSidebar();
     syncSelectionNoteToggleButtons();

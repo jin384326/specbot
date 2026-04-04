@@ -90,3 +90,72 @@ test("table annotation sync removes row-level note when its row is deleted in ed
 
   assert.deepEqual(notes, []);
 });
+
+test("table annotation sync remaps multi-cell row note targets to the shifted row", () => {
+  const previousBlocks = [
+    {
+      id: "block-1",
+      type: "table",
+      cells: [
+        [{ id: "a1", text: "A1" }, { id: "a2", text: "A2" }],
+        [{ id: "b1", text: "B1" }, { id: "b2", text: "B2" }],
+        [{ id: "c1", text: "C1" }, { id: "c2", text: "C2" }],
+      ],
+    },
+  ];
+  const nextBlocks = [
+    {
+      id: "block-1",
+      type: "table",
+      cells: [
+        [{ id: "a1", text: "A1" }, { id: "a2", text: "A2" }],
+        [{ id: "c1", text: "C1" }, { id: "c2", text: "C2" }],
+      ],
+    },
+  ];
+
+  const [note] = remapTableAnnotationsForEditorChange(
+    [{
+      id: "note-row",
+      type: "selection",
+      clauseKey: "23501:1.1",
+      blockId: "block-1",
+      blockIndex: 0,
+      rowIndex: 2,
+      cellIndex: -1,
+      cellId: "",
+      rowText: "c1 | c2",
+      targets: [
+        {
+          clauseKey: "23501:1.1",
+          blockId: "block-1",
+          blockIndex: 0,
+          rowIndex: 2,
+          cellIndex: -1,
+          cellId: "",
+          rowText: "c1 | c2",
+        },
+      ],
+    }],
+    "23501:1.1",
+    previousBlocks,
+    nextBlocks,
+    { normalizeRowText, normalizeTableDisplayText }
+  );
+
+  assert.equal(note.rowIndex, 1);
+  assert.equal(note.cellIndex, -1);
+  assert.equal(note.cellId, "");
+  assert.equal(note.rowText, "c1 | c2");
+  assert.deepEqual(note.targets, [
+    {
+      clauseKey: "23501:1.1",
+      blockId: "block-1",
+      blockIndex: 0,
+      rowIndex: 1,
+      cellIndex: -1,
+      cellId: "",
+      rowText: "c1 | c2",
+    },
+  ]);
+});
