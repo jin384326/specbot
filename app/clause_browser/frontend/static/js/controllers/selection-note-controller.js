@@ -20,6 +20,7 @@ export function createSelectionNoteController(dependencies) {
     requestSelectionSidebarRender,
     focusNode,
     setMessage,
+    ensureSelectionMutationAllowed = async () => true,
     inferSourceLanguage,
     escapeHtml,
     escapeKey,
@@ -579,11 +580,14 @@ export function createSelectionNoteController(dependencies) {
     }
   }
 
-  function addManualSelectionNote() {
+  async function addManualSelectionNote() {
     const selectionTargets = getCurrentSelectionTargets();
     const selection = getEffectiveSelection();
     if (!selectionTargets.length) {
       setMessage("메모를 추가할 문단이나 표 셀을 먼저 선택하세요.", true);
+      return;
+    }
+    if (!(await ensureSelectionMutationAllowed("선택 메모를 추가"))) {
       return;
     }
     const anchorTarget = selectionTargets[0];

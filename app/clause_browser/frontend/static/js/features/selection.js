@@ -17,11 +17,11 @@ export function bindSelectionFeature() {
         return;
       }
       if (button.dataset.action === "toggle-selection-highlight") {
-        toggleSelectionHighlight();
+        await toggleSelectionHighlight();
         return;
       }
       if (button.dataset.action === "add-manual-selection-note") {
-        addManualSelectionNote();
+        await addManualSelectionNote();
       }
     });
   });

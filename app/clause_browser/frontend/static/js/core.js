@@ -274,6 +274,7 @@ const selectionNoteController = createSelectionNoteController({
   requestSelectionSidebarRender: () => requestSelectionSidebarRender(),
   focusNode: (key) => focusNode(key),
   setMessage: (text, isError) => setMessage(text, isError),
+  ensureSelectionMutationAllowed: (actionLabel) => ensureBoardViewMutationAllowed(actionLabel),
   inferSourceLanguage: (text) => inferSourceLanguage(text),
   escapeHtml,
   escapeKey,
@@ -607,6 +608,38 @@ function isBoardViewMode() {
 
 function isBoardEditMode() {
   return document.body?.dataset?.boardMode === "edit";
+}
+
+async function ensureBoardViewMutationAllowed(actionLabel = "이 작업을 수행") {
+  if (!isBoardViewMode()) {
+    return true;
+  }
+  const postId = String(document.body?.dataset?.boardPostId || "").trim();
+  if (!postId) {
+    return true;
+  }
+  try {
+    const response = await fetch(`/api/clause-browser/board/posts/${encodeURIComponent(postId)}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(payload?.detail || "Request failed"));
+    }
+    const lock = payload?.data?.lock;
+    if (!lock) {
+      return true;
+    }
+    const editorLabel = String(lock.editorLabel || "").trim();
+    setMessage(
+      editorLabel
+        ? `${editorLabel} 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`
+        : `다른 사용자가 편집 중이어서 ${actionLabel}할 수 없습니다.`,
+      true
+    );
+    return false;
+  } catch (error) {
+    setMessage(String(error?.message || `현재 편집 상태를 확인할 수 없어 ${actionLabel}할 수 없습니다.`), true);
+    return false;
+  }
 }
 
 function closeClauseNoteModal() {
@@ -2899,6 +2932,9 @@ function getCurrentSelectionTargets() {
 }
 
 async function runSelectionAction(targetLanguage = "ko") {
+  if (!(await ensureBoardViewMutationAllowed("선택 메모 번역을 수행"))) {
+    return;
+  }
   if (!beginBusy("선택 메모 번역 중입니다.")) {
     return;
   }
@@ -2941,6 +2977,9 @@ async function runSelectionAction(targetLanguage = "ko") {
 }
 
 async function runClauseTranslation(clauseKey) {
+  if (!(await ensureBoardViewMutationAllowed("절 메모 번역을 수행"))) {
+    return;
+  }
   if (!beginBusy("절 번역 중입니다.")) {
     return;
   }
@@ -3108,6 +3147,9 @@ async function createTranslatedNote({ type, clauseKey, blockIndex = -1, rowIndex
       targetLanguage,
       context: clauseLabel,
     });
+    if (!(await ensureBoardViewMutationAllowed(type === "clause" ? "절 메모를 생성" : "선택 메모를 생성"))) {
+      return;
+    }
     upsertNote({
       id: type === "clause" ? `${clauseKey}:clause` : `selection:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
       type,
@@ -3265,10 +3307,16 @@ function ensureHighlightEntry(entry) {
   }
 }
 
-function toggleSelectionHighlight() {
+async function toggleSelectionHighlight() {
+  if (!(await ensureBoardViewMutationAllowed("Highlight를 적용"))) {
+    return;
+  }
   const entries = getCurrentSelectionHighlightEntries();
   if (!entries.length) {
     setMessage("Highlight할 문단이나 표 행을 먼저 선택하세요.", true);
+    return;
+  }
+  if (!(await ensureBoardViewMutationAllowed("Highlight를 적용"))) {
     return;
   }
   const existingIds = new Set((state.ui.highlights || []).map((item) => item.id));

@@ -51,6 +51,7 @@ function createFixture() {
     rerenderLoadedNode: [],
     renderLoadedTree: 0,
     messages: [],
+    ensureSelectionMutationAllowed: [],
   };
   const elements = {
     selectionNotePanel: {
@@ -126,6 +127,10 @@ function createFixture() {
     setMessage: (text, isError) => {
       calls.messages.push({ text, isError });
     },
+    ensureSelectionMutationAllowed: async (actionLabel) => {
+      calls.ensureSelectionMutationAllowed.push(actionLabel);
+      return true;
+    },
     inferSourceLanguage: () => "en",
     escapeHtml: (value) => String(value),
     escapeKey: (value) => String(value),
@@ -136,10 +141,10 @@ function createFixture() {
   return { controller, state, elements, calls };
 }
 
-test("selection note controller adds manual note and linked highlight", () => {
+test("selection note controller adds manual note and linked highlight", async () => {
   const { controller, state, calls } = createFixture();
 
-  controller.addManualSelectionNote();
+  await controller.addManualSelectionNote();
 
   assert.equal(state.ui.notes.length, 1);
   assert.equal(state.ui.notes[0].type, "selection");
@@ -148,6 +153,95 @@ test("selection note controller adds manual note and linked highlight", () => {
   assert.equal(state.ui.openSelectionNoteIds.size, 1);
   assert.equal(calls.persisted, 1);
   assert.deepEqual(calls.rerenderLoadedNodes[0], ["23501:1.1"]);
+  assert.deepEqual(calls.ensureSelectionMutationAllowed, ["선택 메모를 추가"]);
+});
+
+test("selection note controller blocks manual note when selection mutation is not allowed", async () => {
+  const { state, calls } = createFixture();
+  const controller = createSelectionNoteController({
+    state,
+    elements: {
+      selectionNotePanel: {
+        innerHTML: "",
+        classList: createClassList(),
+        attrs: {},
+        setAttribute(name, value) {
+          this.attrs[name] = value;
+        },
+      },
+      selectionNoteOverlay: {
+        innerHTML: "",
+        classList: createClassList(),
+        attrs: {},
+        setAttribute(name, value) {
+          this.attrs[name] = value;
+        },
+        querySelectorAll() {
+          return [];
+        },
+      },
+      clauseNoteModal: {
+        classList: createClassList(),
+        attrs: {},
+        setAttribute(name, value) {
+          this.attrs[name] = value;
+        },
+      },
+    },
+    getSelectionNoteIndex: () => ({}),
+    getSelectionNotesForClauseFromIndex: () => [],
+    getSelectionNotesForTarget: () => [],
+    getResolvedBlockIndexForReference: (_clauseKey, blockIndex) => Number(blockIndex ?? -1),
+    getBlockIdByIndex: () => "block-1",
+    getCurrentSelectionTargets: () => [{ clauseKey: "23501:1.1", clauseLabel: "23501 / 1.1", blockId: "block-1", blockIndex: 0, rowIndex: -1, cellIndex: -1, cellId: "", rowText: "Selected row" }],
+    getEffectiveSelection: () => ({ hasSelection: true, text: "Selected text" }),
+    getLabelForKey: (key) => key,
+    createHighlightEntry: ({ clauseKey, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText }) => ({
+      id: [clauseKey, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText].join(":"),
+      clauseKey,
+      blockId,
+      blockIndex,
+      rowIndex,
+      cellIndex,
+      cellId,
+      rowText,
+    }),
+    ensureHighlightEntry: (entry) => {
+      if (!(state.ui.highlights || []).some((item) => item.id === entry.id)) {
+        state.ui.highlights = [entry, ...(state.ui.highlights || [])];
+      }
+    },
+    getAffectedClauseKeysForSelectionArtifacts: (items) => [...new Set(items.map((item) => item.clauseKey).filter(Boolean))],
+    persistSessionState: () => {
+      calls.persisted += 1;
+    },
+    rerenderLoadedNodes: (keys) => {
+      calls.rerenderLoadedNodes.push(keys);
+    },
+    rerenderLoadedNode: (key) => {
+      calls.rerenderLoadedNode.push(key);
+    },
+    renderLoadedTree: () => {
+      calls.renderLoadedTree += 1;
+    },
+    requestSelectionSidebarRender: () => {},
+    focusNode: () => {},
+    setMessage: (text, isError) => {
+      calls.messages.push({ text, isError });
+    },
+    ensureSelectionMutationAllowed: async () => false,
+    inferSourceLanguage: () => "en",
+    escapeHtml: (value) => String(value),
+    escapeKey: (value) => String(value),
+    escapeSelector: (value) => String(value),
+    expandNodePath: () => {},
+  });
+
+  await controller.addManualSelectionNote();
+
+  assert.equal(state.ui.notes.length, 0);
+  assert.equal(state.ui.highlights.length, 0);
+  assert.equal(calls.persisted, 0);
 });
 
 test("selection note controller deletes note and prunes orphan highlight", () => {

@@ -116,6 +116,10 @@ function currentBoard() {
   return boardState.boards.find((item) => item.boardId === boardState.currentBoardId) || null;
 }
 
+function isLockedByAnotherEditor(lock = boardState.currentLock) {
+  return Boolean(lock && String(lock.editorId || "").trim() && String(lock.editorId || "").trim() !== editorId());
+}
+
 function renderBoardSelector() {
   const els = boardElements();
   if (!els.boardSelect) {
@@ -153,6 +157,7 @@ function showBoardScreen() {
   boardState.mode = "list";
   boardState.isDraft = false;
   document.body.dataset.boardMode = "list";
+  document.body.dataset.boardPostId = "";
   boardElements().boardScreen.classList.remove("hidden");
   boardElements().editorScreen.classList.add("hidden");
 }
@@ -494,6 +499,7 @@ async function openDraftPost(options = {}) {
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = true;
+  document.body.dataset.boardPostId = "";
   if (!boardState.currentBoardId) {
     boardState.currentBoardId = "default";
   }
@@ -515,6 +521,7 @@ async function openPostInEditor(post, options = {}) {
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
   boardState.currentLock = post.lock || null;
+  document.body.dataset.boardPostId = post.postId || "";
   boardState.currentBoardId = post.boardId || boardState.currentBoardId || "default";
   renderBoardSelector();
   boardState.isDraft = false;
@@ -544,7 +551,8 @@ async function openPostInViewer(post, options = {}) {
   clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
-  boardState.currentLock = null;
+  boardState.currentLock = post.lock || null;
+  document.body.dataset.boardPostId = post.postId || "";
   boardState.currentBoardId = post.boardId || boardState.currentBoardId || "default";
   renderBoardSelector();
   boardState.isDraft = false;
@@ -569,6 +577,9 @@ async function saveCurrentPost() {
 }
 
 async function persistCurrentPost({ autosave = false } = {}) {
+  if (autosave && boardState.mode === "view" && isLockedByAnotherEditor()) {
+    return;
+  }
   const scope = getBoardScope();
   if (!scope.releaseData || !scope.release) {
     throw new Error("게시글의 Spec Date와 Release를 선택하세요.");
@@ -615,10 +626,16 @@ function scheduleViewAutosave() {
   if (boardState.mode !== "view" || !boardState.currentPostId || boardState.isRestoringRoute) {
     return;
   }
+  if (isLockedByAnotherEditor()) {
+    return;
+  }
   clearAutosaveTimer();
   boardState.autosaveTimerId = window.setTimeout(async () => {
     boardState.autosaveTimerId = 0;
     if (boardState.mode !== "view" || !boardState.currentPostId || boardState.isDraft || boardState.isRestoringRoute) {
+      return;
+    }
+    if (isLockedByAnotherEditor()) {
       return;
     }
     try {
@@ -683,6 +700,7 @@ async function closeEditor() {
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = false;
+  document.body.dataset.boardPostId = "";
   clearBoardEditorSession();
   showBoardScreen();
   navigateBoard("list");
