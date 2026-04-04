@@ -29,6 +29,55 @@ import {
   getAffectedClauseKeysForSelectionArtifacts,
   buildFocusNodeUpdatePlan,
 } from "./utils/tree-update-plan.js";
+import { remapTableAnnotationsForEditorChange } from "./utils/table-annotation-sync.js";
+import {
+  createEmptyWorkspaceSnapshot,
+  createWorkspaceSnapshot,
+  normalizeWorkspacePayload,
+} from "./utils/workspace-state.js";
+import {
+  buildSpecbotExclusions as buildSpecbotExclusionsFromState,
+  dedupeClausePairs,
+  filterSpecbotHitsByExclusions as filterSpecbotHitsByExclusionsFromState,
+  getIterationsForDepth,
+  getNormalizedRejectedClauses,
+  getSpecbotDepthFromSettings,
+  parseSpecbotExcludeClauses,
+  parseSpecbotExcludeSpecs,
+} from "./utils/specbot-state.js";
+import {
+  buildRejectedSpecbotClausesHtml,
+  buildSpecbotDocumentSettingsHtml,
+  buildSpecbotResultsHtml,
+  getSpecbotDocumentSelectionCount,
+  getSpecbotQueryLoadingLabel,
+  normalizeSpecbotDepth,
+} from "./utils/specbot-ui.js";
+import {
+  buildLoadedSpecGroupHtml,
+  buildSelectedClauseCard as buildSelectedClauseCardHtml,
+  buildSelectedClauseListHtml,
+  compareClausePart,
+  compareLoadedNodes,
+  compareMixedToken,
+  groupRootsBySpec,
+} from "./utils/clause-tree-ui.js";
+import { createSpecbotController } from "./controllers/specbot-controller.js";
+import { createEditorDeleteController } from "./controllers/editor-delete-controller.js";
+import { createSelectionNoteController } from "./controllers/selection-note-controller.js";
+import {
+  buildHighlightRowVariants,
+  buildRowVariants,
+  createHighlightEntry as createHighlightEntryFromSelection,
+  normalizeHighlightText,
+  normalizeRowText,
+  normalizeTableDisplayText,
+} from "./utils/selection-highlight.js";
+import {
+  createWorkApi,
+  formatErrorMessage,
+  isAbortedRequestError,
+} from "./utils/work-api.js";
 
 const state = {
   config: null,
@@ -92,8 +141,6 @@ const TRANSLATION_CHUNK_LIMIT = 12000;
 const SPECBOT_QUERY_BUSY_LABEL = "SpecBot query 수행 중입니다.";
 const DOCUMENT_SEARCH_BUSY_LABEL = "문서 검색 중입니다.";
 const DOCUMENT_SELECT_BUSY_LABEL = "문서를 불러오는 중입니다.";
-const activeRequestControllers = new Set();
-const activeLocalWorkSlots = new Set();
 const LOCAL_WORK_SLOT_LIMIT = 7;
 const LOCAL_WORK_SLOT_TTL_MS = 10 * 60 * 1000;
 const LOCAL_WORK_LOCK_TTL_MS = 2000;
@@ -108,6 +155,152 @@ let revealedSelectionTargetTimer = 0;
 let selectionNoteIndexCache = { source: null, index: createSelectionNoteIndex() };
 let highlightIndexCache = { source: null, index: createHighlightIndex() };
 const renderBatcher = createRenderBatcher();
+const workApi = createWorkApi({
+  state,
+  persistSessionState: () => persistSessionState(),
+  renderSpecbotResults: () => renderSpecbotResults(),
+  renderTranslationStatus: () => renderTranslationStatus(),
+  setMessage: (text, isError) => setMessage(text, isError),
+  setSpecbotQueryLoading: (isLoading) => setSpecbotQueryLoading(isLoading),
+  buildSpecbotExclusions: () => buildSpecbotExclusions(),
+  filterSpecbotHitsByExclusions: (hits, exclusions) => filterSpecbotHitsByExclusions(hits, exclusions),
+  compareSpecbotHits,
+  workSlotLimit: LOCAL_WORK_SLOT_LIMIT,
+  workSlotTtlMs: LOCAL_WORK_SLOT_TTL_MS,
+  workStateKey: LOCAL_WORK_STATE_KEY,
+  workLockKey: LOCAL_WORK_LOCK_KEY,
+  workTabId: LOCAL_WORK_TAB_ID,
+  workLockTtlMs: LOCAL_WORK_LOCK_TTL_MS,
+});
+const {
+  apiGet,
+  apiPost,
+  apiPostWork,
+  streamSpecbotQuery,
+  streamLlmAction,
+  abortActiveRequests,
+} = workApi;
+const specbotController = createSpecbotController({
+  state,
+  elements,
+  dedupeClausePairs,
+  getNormalizedRejectedClauses,
+  getIterationsForDepth,
+  getSpecbotDepthFromSettings,
+  parseSpecbotExcludeSpecs,
+  parseSpecbotExcludeClauses,
+  normalizeSpecbotDepth,
+  buildSpecbotExclusionsFromState,
+  filterSpecbotHitsByExclusionsFromState,
+  buildSpecbotResultsHtml,
+  buildSpecbotDocumentSettingsHtml,
+  buildRejectedSpecbotClausesHtml,
+  getSpecbotDocumentSelectionCount,
+  getSpecbotQueryLoadingLabel,
+  compareSpecbotHits,
+  compareMixedToken,
+  escapeHtml,
+  persistSessionState: () => persistSessionState(),
+  setMessage: (text, isError) => setMessage(text, isError),
+  beginBusy: (label, options) => beginBusy(label, options),
+  endBusy: (options) => endBusy(options),
+  getBoardScope: () => getBoardScope(),
+  streamSpecbotQuery: (body) => streamSpecbotQuery(body),
+  isAbortedRequestError,
+  loadClauseFromSpec: (specNo, clauseId) => loadClauseFromSpec(specNo, clauseId),
+  renderLoadedTree: () => renderLoadedTree(),
+});
+const {
+  applySpecbotSettingsToForm,
+  saveSpecbotSettings,
+  runSpecbotQuery: runSpecbotQueryWithController,
+  buildSpecbotExclusions,
+  filterSpecbotHitsByExclusions,
+  pruneSpecbotResultsByCurrentExclusions,
+  getRejectedSpecbotClauses,
+  renderSpecbotResults,
+  renderSpecbotDocumentSettings,
+  renderRejectedSpecbotClauses,
+  getSelectedSpecbotDocuments,
+  updateSpecbotDocumentSelectionCount,
+  setAllSpecbotDocuments,
+  setSpecbotQueryLoading,
+  applySpecbotDepthSelection,
+  getSelectedSpecbotDepth,
+  addRejectedSpecbotClause,
+  removeRejectedSpecbotClause,
+  clearRejectedSpecbotClauses,
+  removeSpecbotResult,
+  clearSpecbotResults,
+} = specbotController;
+const editorDeleteController = createEditorDeleteController({
+  state,
+  elements,
+  updateNodeBlocks: (nodeKey, transform) => updateNodeBlocks(nodeKey, transform),
+  getBlockIdByIndex: (clauseKey, blockIndex) => getBlockIdByIndex(clauseKey, blockIndex),
+  blockReferenceMatches,
+  removeBlockAt,
+  removeTableRow,
+  removeTableColumn,
+  syncClauseAnnotationBlockReferences: (clauseKey) => syncClauseAnnotationBlockReferences(clauseKey),
+  persistSessionState: () => persistSessionState(),
+  rerenderLoadedNode: (key) => rerenderLoadedNode(key),
+  rerenderLoadedNodes: (keys) => rerenderLoadedNodes(keys),
+  clearTreeSelectionState: () => clearTreeSelectionState(),
+});
+const {
+  buildSelectionDeletePlan,
+  applySelectionDeletePlan,
+  deleteImageBlockFromElement,
+} = editorDeleteController;
+const selectionNoteController = createSelectionNoteController({
+  state,
+  elements,
+  getSelectionNoteIndex: () => getSelectionNoteIndex(),
+  getSelectionNotesForClauseFromIndex,
+  getSelectionNotesForTarget: (...args) => getSelectionNotesForTarget(...args),
+  getResolvedBlockIndexForReference,
+  getBlockIdByIndex,
+  getCurrentSelectionTargets: () => getCurrentSelectionTargets(),
+  getEffectiveSelection: () => getEffectiveSelection(),
+  getLabelForKey: (key) => getLabelForKey(key),
+  createHighlightEntry: (entry) => createHighlightEntry(entry),
+  ensureHighlightEntry: (entry) => ensureHighlightEntry(entry),
+  getAffectedClauseKeysForSelectionArtifacts,
+  persistSessionState: () => persistSessionState(),
+  rerenderLoadedNodes: (keys) => rerenderLoadedNodes(keys),
+  rerenderLoadedNode: (key) => rerenderLoadedNode(key),
+  renderLoadedTree: () => renderLoadedTree(),
+  requestSelectionSidebarRender: () => requestSelectionSidebarRender(),
+  focusNode: (key) => focusNode(key),
+  setMessage: (text, isError) => setMessage(text, isError),
+  inferSourceLanguage: (text) => inferSourceLanguage(text),
+  escapeHtml,
+  escapeKey,
+  escapeSelector,
+  expandNodePath: (key) => expandNodePath(key),
+});
+const {
+  isSelectionNoteOpen,
+  getHighlightEntriesForSelectionNote,
+  getSelectionNoteAnchor,
+  findSelectionNoteTargetElement,
+  renderSelectionSidebar,
+  syncEditorNoteRailPositions,
+  upsertNote,
+  updateNoteField,
+  toggleSelectionNotes,
+  toggleSelectionNotesByIds,
+  collapseAllSelectionNotes,
+  closeSelectionNoteById,
+  syncSelectionNoteToggleButtons,
+  toggleSelectionNoteCard,
+  revealSelectionNoteTarget,
+  deleteNote,
+  addManualSelectionNote,
+  clearSelectionNoteUiState,
+  renderEditorNoteRail: buildEditorNoteRailAnchors,
+} = selectionNoteController;
 
 function getSelectionNoteIndex() {
   const notes = state.ui.notes || [];
@@ -369,14 +562,11 @@ function closePicker() {
 }
 
 async function openSpecbotSettings() {
-  applySpecbotSettingsToForm();
-  state.ui.isSpecbotSettingsOpen = true;
+  specbotController.openSpecbotSettings();
   state.ui.specbotDocumentSettingsLoading = true;
   renderSpecbotDocumentSettings();
   renderRejectedSpecbotClauses();
   persistSessionState();
-  elements.specbotSettingsModal.classList.remove("hidden");
-  elements.specbotSettingsModal.setAttribute("aria-hidden", "false");
   try {
     await refreshDocuments({ silent: true, forSpecbotSettings: true });
   } catch (error) {
@@ -387,11 +577,9 @@ async function openSpecbotSettings() {
 }
 
 function closeSpecbotSettings() {
-  state.ui.isSpecbotSettingsOpen = false;
+  specbotController.closeSpecbotSettings();
   state.ui.specbotDocumentSettingsLoading = false;
   persistSessionState();
-  elements.specbotSettingsModal.classList.add("hidden");
-  elements.specbotSettingsModal.setAttribute("aria-hidden", "true");
 }
 
 function openNoticeModal(text) {
@@ -486,55 +674,6 @@ function bindClauseNoteModalEvents() {
       deleteNote(button.dataset.noteId || "");
     });
   });
-}
-
-function applySpecbotSettingsToForm() {
-  const settings = state.ui.specbotSettings;
-  elements.settingBaseUrl.value = settings.baseUrl || "";
-  elements.settingConfigBaseUrl.value = settings.configBaseUrl || "";
-  elements.settingLimit.value = settings.limit ?? 4;
-  elements.settingIterations.value = settings.iterations ?? 1;
-  elements.settingNextIterationLimit.value = settings.nextIterationLimit ?? 2;
-  elements.settingFollowupMode.value = settings.followupMode || "sentence-summary";
-  elements.settingSummary.value = settings.summary || "short";
-  elements.settingRegistry.value = settings.registry || "";
-  elements.settingLocalModelDir.value = settings.localModelDir || "";
-  elements.settingDevice.value = settings.device || "cuda";
-  elements.settingSparseBoost.value = settings.sparseBoost ?? 0;
-  elements.settingVectorBoost.value = settings.vectorBoost ?? 1;
-  elements.settingExcludeSpecs.value = Array.isArray(settings.excludeSpecs) ? settings.excludeSpecs.join("\n") : "";
-  elements.settingExcludeClauses.value = Array.isArray(settings.excludeClauses)
-    ? settings.excludeClauses.map((item) => `${item.specNo}:${item.clauseId}`).join("\n")
-    : "";
-  applySpecbotDepthSelection(getSpecbotDepthFromSettings(settings));
-}
-
-function saveSpecbotSettings() {
-  const rejectedClauses = getRejectedSpecbotClauses();
-  const queryDepth = getSelectedSpecbotDepth();
-  state.ui.specbotSettings = {
-    baseUrl: elements.settingBaseUrl.value.trim(),
-    configBaseUrl: elements.settingConfigBaseUrl.value.trim(),
-    limit: Number(elements.settingLimit.value),
-    iterations: getIterationsForDepth(queryDepth),
-    nextIterationLimit: Number(elements.settingNextIterationLimit.value),
-    followupMode: elements.settingFollowupMode.value,
-    summary: elements.settingSummary.value.trim(),
-    registry: elements.settingRegistry.value.trim(),
-    localModelDir: elements.settingLocalModelDir.value.trim(),
-    device: elements.settingDevice.value.trim(),
-    sparseBoost: Number(elements.settingSparseBoost.value),
-    vectorBoost: Number(elements.settingVectorBoost.value),
-    includedSpecs: getSelectedSpecbotDocuments(),
-    excludeSpecs: parseSpecbotExcludeSpecs(elements.settingExcludeSpecs.value),
-    excludeClauses: parseSpecbotExcludeClauses(elements.settingExcludeClauses.value),
-    rejectedClauses,
-    queryDepth,
-  };
-  pruneSpecbotResultsByCurrentExclusions();
-  persistSessionState();
-  renderSpecbotResults();
-  closeSpecbotSettings();
 }
 
 function renderDocuments() {
@@ -889,22 +1028,14 @@ function updateLoadedTreeFocusedState(previousFocusedKey = "", nextFocusedKey = 
 function renderLoadedSpecGroup(specNo, nodes) {
   const collapsed = state.ui.collapsedLoadedSpecs.has(specNo);
   const clauseCount = countNodes(nodes);
-  return `
-    <section class="tree-spec-group">
-      <article class="tree-node tree-spec-root">
-        <div class="tree-header tree-spec-header">
-          <div class="tree-title">
-            <button data-action="toggle-loaded-spec" data-spec-no="${escapeHtml(specNo)}">${collapsed ? "+" : "−"}</button>
-            <div class="tree-title-text">
-              <h3>${escapeHtml(specNo)}</h3>
-              <div class="tree-meta">${clauseCount} clauses loaded</div>
-            </div>
-          </div>
-        </div>
-        ${collapsed ? "" : `<div class="tree-body tree-spec-body"><div class="tree-spec-children">${nodes.map((node) => renderNode(node)).join("")}</div></div>`}
-      </article>
-    </section>
-  `;
+  return buildLoadedSpecGroupHtml({
+    specNo,
+    nodes,
+    collapsed,
+    clauseCount,
+    escapeHtml,
+    renderNode,
+  });
 }
 
 function renderNode(node) {
@@ -983,43 +1114,10 @@ function renderEditorHost(node, blocks = ensureBlocksHaveStableIds(Array.isArray
 }
 
 function renderEditorNoteRail(node, blocks) {
-  const selectionNotes = getSelectionNotesForClauseFromIndex(getSelectionNoteIndex(), node.key)
-    .sort((left, right) =>
-      getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId) - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
-      Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
-      Number(left.cellIndex ?? -1) - Number(right.cellIndex ?? -1)
-    );
-  if (!selectionNotes.length) {
+  const anchors = buildEditorNoteRailAnchors(node, blocks);
+  if (!anchors.length) {
     return "";
   }
-  const seen = new Set();
-  const anchors = selectionNotes.flatMap((note) => {
-    const anchor = getSelectionNoteAnchor(note) || note;
-    const blockIndex = getResolvedBlockIndexForReference(anchor.clauseKey || note.clauseKey, anchor.blockIndex, anchor.blockId);
-    const blockId = String(anchor.blockId || note.blockId || getBlockIdByIndex(note.clauseKey, blockIndex) || "");
-    const rowIndex = Number(anchor.rowIndex ?? -1);
-    const cellIndex = Number(anchor.cellIndex ?? -1);
-    const cellId = String(anchor.cellId || "").trim();
-    const anchorKey = [note.clauseKey, blockId, rowIndex, cellId || cellIndex].join(":");
-    if (seen.has(anchorKey)) {
-      return [];
-    }
-    seen.add(anchorKey);
-    return [{
-      clauseKey: note.clauseKey,
-      blockIndex,
-      blockId,
-      rowIndex,
-      cellIndex,
-      cellId,
-      label:
-        rowIndex >= 0
-          ? cellIndex >= 0
-            ? `R${rowIndex + 1} C${cellIndex + 1}`
-            : `R${rowIndex + 1}`
-          : `P${blockIndex + 1}`,
-    }];
-  });
   return `
     <div class="editor-note-rail">
       ${anchors
@@ -1050,261 +1148,6 @@ function renderEditorNoteRail(node, blocks) {
   `;
 }
 
-function syncEditorNoteRailPositions() {
-  window.requestAnimationFrame(() => {
-    document.querySelectorAll(".editor-section-with-rail").forEach((section) => {
-      const rail = section.querySelector(".editor-note-rail");
-      const host = section.querySelector(".clause-editor-host");
-      if (!(rail instanceof HTMLElement) || !(host instanceof HTMLElement)) {
-        return;
-      }
-      const hostRect = host.getBoundingClientRect();
-      rail.style.minHeight = `${Math.ceil(host.scrollHeight || hostRect.height || 0)}px`;
-      rail.querySelectorAll(".editor-note-anchor").forEach((anchor) => {
-        const button = anchor.querySelector("[data-action='toggle-selection-notes']");
-        if (!(anchor instanceof HTMLElement) || !(button instanceof HTMLElement)) {
-          return;
-        }
-        const pseudoNote = {
-          clauseKey: button.dataset.clauseKey || "",
-          blockId: button.dataset.blockId || "",
-          blockIndex: Number(button.dataset.blockIndex || -1),
-          rowIndex: Number(button.dataset.rowIndex || -1),
-          cellIndex: Number(button.dataset.cellIndex || -1),
-          cellId: button.dataset.cellId || "",
-        };
-        const target = findSelectionNoteTargetElement(pseudoNote);
-        if (!(target instanceof HTMLElement)) {
-          return;
-        }
-        const targetRect = target.getBoundingClientRect();
-        anchor.style.top = `${Math.max(0, Math.round(targetRect.top - hostRect.top - 2))}px`;
-      });
-    });
-  });
-}
-
-function renderSelectionSidebar() {
-  if (!elements.selectionNotePanel) {
-    return;
-  }
-  elements.selectionNotePanel.innerHTML = "";
-  elements.selectionNotePanel.classList.add("hidden");
-  elements.selectionNotePanel.setAttribute("aria-hidden", "true");
-  renderSelectionNoteOverlay();
-}
-
-function bindSelectionSidebarEvents() {
-  if (!elements.selectionNoteOverlay) {
-    return;
-  }
-  elements.selectionNoteOverlay.querySelectorAll("[data-action='edit-note-translation']").forEach((textarea) => {
-    textarea.addEventListener("input", (event) => {
-      updateNoteField(textarea.dataset.noteId || "", "translation", event.target.value);
-    });
-  });
-  elements.selectionNoteOverlay.querySelectorAll("[data-action='delete-note']").forEach((button) => {
-    button.addEventListener("click", () => {
-      deleteNote(button.dataset.noteId || "");
-    });
-  });
-  elements.selectionNoteOverlay.querySelectorAll("[data-action='toggle-selection-note-card']").forEach((button) => {
-    button.addEventListener("click", () => {
-      closeSelectionNoteById(button.dataset.noteId || "");
-    });
-  });
-}
-
-function renderSelectionNoteOverlay() {
-  if (!elements.selectionNoteOverlay) {
-    return;
-  }
-  const overlayNotes = (state.ui.notes || []).filter((note) => note.type === "selection" && isSelectionNoteOpen(note));
-  console.debug("[selection-note] render overlay", {
-    openIds: [...(state.ui.openSelectionNoteIds || [])],
-    overlayNoteIds: overlayNotes.map((note) => note.id),
-    storedPositions: state.ui.selectionNoteOverlayPositions || {},
-  });
-  if (!overlayNotes.length) {
-    elements.selectionNoteOverlay.innerHTML = "";
-    elements.selectionNoteOverlay.classList.add("hidden");
-    elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
-    return;
-  }
-  const cards = overlayNotes.flatMap((note) => {
-    const position = getSelectionNoteOverlayPosition(note) || state.ui.selectionNoteOverlayPositions?.[String(note.id || "")] || null;
-    if (!position) {
-      console.debug("[selection-note] missing overlay position", {
-        noteId: note.id,
-        note,
-        storedPosition: state.ui.selectionNoteOverlayPositions?.[String(note.id || "")] || null,
-      });
-      return [];
-    }
-    return [`
-      <article
-        class="clause-note-card selection-note-floating-card"
-        data-note-id="${escapeHtml(note.id)}"
-        style="top:${Math.round(position.top)}px; left:${Math.round(position.left)}px; width:${Math.round(position.width)}px;"
-      >
-        <div class="clause-note-meta">
-          <div class="clause-note-meta-main">
-            <strong class="note-kind">${escapeHtml(note.clauseLabel || "선택 메모")}</strong>
-          </div>
-          <div class="clause-note-meta-actions">
-            <button
-              class="icon-button ghost note-collapse-button"
-              title="접기"
-              aria-label="접기"
-              data-action="toggle-selection-note-card"
-              data-note-id="${escapeHtml(note.id)}"
-              data-clause-key="${escapeHtml(note.clauseKey || "")}"
-              data-block-id="${escapeHtml(note.blockId || "")}"
-              data-block-index="${Number(note.blockIndex ?? -1)}"
-              data-row-index="${Number(note.rowIndex ?? -1)}"
-              data-cell-index="${Number(note.cellIndex ?? -1)}"
-              data-cell-id="${escapeHtml(note.cellId || "")}"
-            >−</button>
-            <button class="icon-button ghost note-delete-button" title="삭제" aria-label="삭제" data-action="delete-note" data-note-id="${escapeHtml(note.id)}">✕</button>
-          </div>
-        </div>
-        <div class="clause-note-body">
-          <label class="field">
-            <textarea class="clause-note-textarea" data-action="edit-note-translation" data-note-id="${escapeHtml(note.id)}" rows="6" placeholder="메모를 입력하세요.">${escapeHtml(note.translation || "")}</textarea>
-          </label>
-        </div>
-      </article>
-    `];
-  });
-  elements.selectionNoteOverlay.innerHTML = cards.join("");
-  elements.selectionNoteOverlay.classList.toggle("hidden", !cards.length);
-  elements.selectionNoteOverlay.setAttribute("aria-hidden", cards.length ? "false" : "true");
-  bindSelectionSidebarEvents();
-}
-
-function getSelectionNoteOverlayPosition(note) {
-  const target = findSelectionNoteTargetElement(note) || findSelectionNoteAnchorElement(note);
-  if (!(target instanceof HTMLElement)) {
-    return null;
-  }
-  const rect = findSelectionNoteTextRect(target, note) || target.getBoundingClientRect();
-  const width = Math.min(620, Math.max(320, Math.floor(window.innerWidth * 0.28)));
-  const top = Math.min(window.innerHeight - 260, Math.max(16, rect.top - 8));
-  const left = Math.max(16, rect.left - width - 12);
-  return { top, left, width };
-}
-
-function findSelectionNoteTextRect(target, note) {
-  const sourceText = String(note?.sourceText || "").trim();
-  if (!sourceText) {
-    return null;
-  }
-  const targetText = String(target.textContent || "");
-  const startIndex = targetText.indexOf(sourceText);
-  if (startIndex < 0) {
-    return null;
-  }
-  const endIndex = startIndex + sourceText.length;
-  const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
-  let currentOffset = 0;
-  let startNode = null;
-  let startNodeOffset = 0;
-  let endNode = null;
-  let endNodeOffset = 0;
-  while (walker.nextNode()) {
-    const textNode = walker.currentNode;
-    const textValue = String(textNode.textContent || "");
-    const nextOffset = currentOffset + textValue.length;
-    if (!startNode && startIndex >= currentOffset && startIndex <= nextOffset) {
-      startNode = textNode;
-      startNodeOffset = Math.max(0, startIndex - currentOffset);
-    }
-    if (endIndex >= currentOffset && endIndex <= nextOffset) {
-      endNode = textNode;
-      endNodeOffset = Math.max(0, endIndex - currentOffset);
-      break;
-    }
-    currentOffset = nextOffset;
-  }
-  if (!startNode || !endNode) {
-    return null;
-  }
-  try {
-    const range = document.createRange();
-    range.setStart(startNode, startNodeOffset);
-    range.setEnd(endNode, endNodeOffset);
-    const rects = [...range.getClientRects()].filter((item) => item.width > 0 || item.height > 0);
-    return rects[0] || range.getBoundingClientRect();
-  } catch (_error) {
-    return null;
-  }
-}
-
-function findSelectionNoteTargetElement(note) {
-  const anchor = getSelectionNoteAnchor(note);
-  const clauseKey = String(anchor?.clauseKey || note?.clauseKey || "").trim();
-  const blockId = String(anchor?.blockId || note?.blockId || "").trim();
-  const cellId = String(anchor?.cellId || note?.cellId || "").trim();
-  const rowIndex = Number(anchor?.rowIndex ?? note?.rowIndex ?? -1);
-  if (!clauseKey || !blockId) {
-    return null;
-  }
-  const host = document.querySelector(
-    `.clause-editor-host[data-editor-node-key="${escapeSelector(clauseKey)}"]`
-  );
-  if (!(host instanceof HTMLElement)) {
-    return null;
-  }
-  if (cellId) {
-    return host.querySelector(
-      `[data-editor-block-id="${escapeSelector(blockId)}"] [data-editor-cell-id="${escapeSelector(cellId)}"]`
-    );
-  }
-  const blockElement = host.querySelector(`[data-editor-block-id="${escapeSelector(blockId)}"]`);
-  if (!(blockElement instanceof HTMLElement)) {
-    return null;
-  }
-  if (rowIndex >= 0 && blockElement.tagName.toLowerCase() === "table") {
-    const row = blockElement.querySelectorAll("tr")[rowIndex];
-    if (row instanceof HTMLElement) {
-      return row;
-    }
-  }
-  return blockElement;
-}
-
-function findSelectionNoteAnchorElement(note) {
-  const anchor = getSelectionNoteAnchor(note);
-  const clauseKey = String(anchor?.clauseKey || note?.clauseKey || "").trim();
-  const blockId = String(anchor?.blockId || note?.blockId || "").trim();
-  const cellId = String(anchor?.cellId || note?.cellId || "").trim();
-  const rowIndex = Number(anchor?.rowIndex ?? note?.rowIndex ?? -1);
-  const blockIndex = getResolvedBlockIndexForReference(clauseKey, anchor?.blockIndex ?? note?.blockIndex, blockId);
-  const selector = [
-    `[data-action="toggle-selection-notes"]`,
-    `[data-clause-key="${escapeSelector(clauseKey)}"]`,
-    `[data-block-index="${blockIndex}"]`,
-    `[data-row-index="${rowIndex}"]`,
-    `[data-block-id="${escapeSelector(blockId)}"]`,
-    cellId ? `[data-cell-id="${escapeSelector(cellId)}"]` : "",
-  ].join("");
-  return document.querySelector(selector);
-}
-
-function getSelectionNoteAnchor(note) {
-  const noteTargets = Array.isArray(note?.targets) ? note.targets.filter(Boolean) : [];
-  if (!noteTargets.length) {
-    return null;
-  }
-  const sortedTargets = [...noteTargets].sort((left, right) =>
-    String(left.clauseKey || "").localeCompare(String(right.clauseKey || "")) ||
-    getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId)
-      - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
-    Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
-    Number(left.cellIndex ?? -1) - Number(right.cellIndex ?? -1)
-  );
-  return sortedTargets[0] || null;
-}
 
 function renderTranslationStatus() {
   const job = state.ui.translationJob;
@@ -1577,7 +1420,7 @@ function getResolvedBlockIndexForReference(clauseKey, blockIndex, blockId = "") 
   return resolvedFromId >= 0 ? resolvedFromId : Number(blockIndex ?? -1);
 }
 
-function syncBlockReferenceForItem(item) {
+function syncSingleBlockReference(item) {
   const normalizedClauseKey = String(item?.clauseKey || "").trim();
   if (!normalizedClauseKey) {
     return item;
@@ -1628,6 +1471,46 @@ function syncBlockReferenceForItem(item) {
     };
   }
   return nextItem;
+}
+
+function syncBlockReferenceForItem(item) {
+  const syncedItem = syncSingleBlockReference(item);
+  if (!syncedItem) {
+    return null;
+  }
+  const noteTargets = Array.isArray(item?.targets) ? item.targets.filter(Boolean) : [];
+  if (!noteTargets.length) {
+    return syncedItem;
+  }
+  const syncedTargets = noteTargets.flatMap((target) => {
+    const syncedTarget = syncSingleBlockReference(target);
+    return syncedTarget ? [syncedTarget] : [];
+  });
+  if (!syncedTargets.length) {
+    return null;
+  }
+  const sortedTargets = [...syncedTargets].sort((left, right) =>
+    String(left.clauseKey || "").localeCompare(String(right.clauseKey || "")) ||
+    getResolvedBlockIndexForReference(left.clauseKey, left.blockIndex, left.blockId)
+      - getResolvedBlockIndexForReference(right.clauseKey, right.blockIndex, right.blockId) ||
+    Number(left.rowIndex ?? -1) - Number(right.rowIndex ?? -1) ||
+    Number(left.cellIndex ?? -1) - Number(right.cellIndex ?? -1)
+  );
+  const anchorTarget = sortedTargets[0] || null;
+  if (!anchorTarget) {
+    return null;
+  }
+  return {
+    ...syncedItem,
+    clauseKey: String(anchorTarget.clauseKey || syncedItem.clauseKey || ""),
+    blockIndex: Number(anchorTarget.blockIndex ?? syncedItem.blockIndex ?? -1),
+    blockId: String(anchorTarget.blockId || syncedItem.blockId || ""),
+    rowIndex: Number(anchorTarget.rowIndex ?? syncedItem.rowIndex ?? -1),
+    cellIndex: Number(anchorTarget.cellIndex ?? syncedItem.cellIndex ?? -1),
+    cellId: String(anchorTarget.cellId || syncedItem.cellId || ""),
+    rowText: String(anchorTarget.rowText || syncedItem.rowText || ""),
+    targets: sortedTargets,
+  };
 }
 
 function syncClauseAnnotationBlockReferences(clauseKey) {
@@ -1954,66 +1837,6 @@ function renderSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = 
   return "";
 }
 
-function normalizeRowText(parts) {
-  return String((parts || []).map((item) => String(item || "").trim()).filter(Boolean).join(" | "))
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function normalizeTableDisplayText(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeHighlightText(value) {
-  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function buildRowVariants(parts) {
-  const normalizedParts = (parts || []).map((item) => normalizeTableDisplayText(item)).filter(Boolean);
-  const variants = new Set();
-  if (!normalizedParts.length) {
-    return variants;
-  }
-  variants.add(normalizeHighlightText(normalizedParts.join(" | ")));
-  variants.add(normalizeHighlightText(normalizedParts.join("; ")));
-  if (normalizedParts.length > 1) {
-    variants.add(normalizeHighlightText(normalizedParts.slice(1).join(" | ")));
-    variants.add(normalizeHighlightText(normalizedParts.slice(1).join("; ")));
-  }
-  return variants;
-}
-
-function buildHighlightRowVariants(value) {
-  const normalized = normalizeHighlightText(value);
-  const variants = new Set();
-  if (!normalized) {
-    return variants;
-  }
-  variants.add(normalized);
-  const pipeParts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
-  if (pipeParts.length) {
-    variants.add(normalizeHighlightText(pipeParts.join(" | ")));
-    variants.add(normalizeHighlightText(pipeParts.join("; ")));
-    if (pipeParts.length > 1) {
-      variants.add(normalizeHighlightText(pipeParts.slice(1).join(" | ")));
-      variants.add(normalizeHighlightText(pipeParts.slice(1).join("; ")));
-    }
-  }
-  const semicolonParts = normalized.split(";").map((item) => item.trim()).filter(Boolean);
-  if (semicolonParts.length) {
-    variants.add(normalizeHighlightText(semicolonParts.join(" | ")));
-    variants.add(normalizeHighlightText(semicolonParts.join("; ")));
-    if (semicolonParts.length > 1) {
-      variants.add(normalizeHighlightText(semicolonParts.slice(1).join(" | ")));
-      variants.add(normalizeHighlightText(semicolonParts.slice(1).join("; ")));
-    }
-  }
-  return variants;
-}
-
 function getHighlightsForBlock(clauseKey, blockIndex, blockId = getBlockIdByIndex(clauseKey, blockIndex)) {
   return getHighlightsForBlockFromIndex(getHighlightIndex(), clauseKey, blockIndex, blockId, getResolvedBlockIndexForReference);
 }
@@ -2246,7 +2069,9 @@ function bindTreeEvents(scope = elements.treeContainer) {
 
 function syncEditorHtmlToNode(nodeKey, html) {
   const nextBlocks = parseEditorHtmlToBlocks(html);
+  let previousBlocks = null;
   const changed = updateNodeBlocks(nodeKey, (blocks) => {
+    previousBlocks = blocks;
     const current = JSON.stringify(blocks || []);
     const next = JSON.stringify(nextBlocks);
     if (current === next) {
@@ -2256,6 +2081,22 @@ function syncEditorHtmlToNode(nodeKey, html) {
   });
   if (!changed) {
     return;
+  }
+  if (Array.isArray(previousBlocks)) {
+    state.ui.notes = remapTableAnnotationsForEditorChange(
+      state.ui.notes || [],
+      nodeKey,
+      previousBlocks,
+      nextBlocks,
+      { normalizeRowText, normalizeTableDisplayText }
+    );
+    state.ui.highlights = remapTableAnnotationsForEditorChange(
+      state.ui.highlights || [],
+      nodeKey,
+      previousBlocks,
+      nextBlocks,
+      { normalizeRowText, normalizeTableDisplayText }
+    );
   }
   const annotationSyncResult = syncClauseAnnotationBlockReferences(nodeKey);
   persistSessionState();
@@ -2325,384 +2166,9 @@ function isRangeInsideTree(range) {
   );
 }
 
-function deleteImageBlockFromElement(element) {
-  const clauseKey = element.dataset.clauseKey || "";
-  const blockIndex = Number(element.dataset.blockIndex || -1);
-  if (!clauseKey || blockIndex < 0) {
-    return;
-  }
-  const changed = updateNodeBlocks(clauseKey, (blocks) => removeBlockAt(blocks, blockIndex));
-  if (!changed) {
-    return;
-  }
-  remapAnnotationsForBlockRemoval(clauseKey, blockIndex);
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNode(clauseKey);
-}
-
 function clearTreeSelectionState() {
   updateSelectionState("", "", "", -1, -1, -1, "", false);
   hideSelectionMenu();
-}
-
-function buildSelectionDeletePlan(range) {
-  const paragraphs = getIntersectedElements(range, ".docx-paragraph[data-clause-key]");
-  const cells = getIntersectedElements(range, ".table-cell-content[data-clause-key]");
-  if (paragraphs.length && cells.length) {
-    return {
-      type: "remove-blocks",
-      blockTargets: [
-        ...paragraphs.map((element) => ({
-          clauseKey: element.dataset.clauseKey || "",
-          blockIndex: Number(element.dataset.blockIndex || -1),
-        })),
-        ...cells.map((element) => ({
-          clauseKey: element.dataset.clauseKey || "",
-          blockIndex: Number(element.dataset.blockIndex || -1),
-        })),
-      ],
-    };
-  }
-  if (paragraphs.length === 1 && !cells.length) {
-    return buildParagraphDeletePlan(range, paragraphs[0]);
-  }
-  if (cells.length) {
-    return buildTableDeletePlan(range, cells);
-  }
-  if (paragraphs.length > 1) {
-    return buildMultiParagraphDeletePlan(paragraphs);
-  }
-  return null;
-}
-
-function getIntersectedElements(range, selector) {
-  return [...elements.treeContainer.querySelectorAll(selector)].filter((element) => {
-    try {
-      const elementRange = document.createRange();
-      elementRange.selectNodeContents(element);
-      const startsBeforeElementEnds = range.compareBoundaryPoints(Range.START_TO_END, elementRange) < 0;
-      const endsAfterElementStarts = range.compareBoundaryPoints(Range.END_TO_START, elementRange) > 0;
-      return startsBeforeElementEnds && endsAfterElementStarts;
-    } catch (_error) {
-      return false;
-    }
-  });
-}
-
-function buildParagraphDeletePlan(range, paragraph) {
-  const clauseKey = paragraph.dataset.clauseKey || "";
-  const blockIndex = Number(paragraph.dataset.blockIndex || -1);
-  const offsets = getRangeOffsetsWithinElement(range, paragraph);
-  if (!clauseKey || blockIndex < 0 || !offsets || offsets.end <= offsets.start) {
-    return null;
-  }
-  return {
-    type: "paragraph-text",
-    clauseKey,
-    blockIndex,
-    start: offsets.start,
-    end: offsets.end,
-  };
-}
-
-function buildMultiParagraphDeletePlan(paragraphs) {
-  const blockTargets = paragraphs
-    .map((element) => ({
-      clauseKey: element.dataset.clauseKey || "",
-      blockIndex: Number(element.dataset.blockIndex || -1),
-    }))
-    .filter((item) => item.clauseKey && item.blockIndex >= 0);
-  if (!blockTargets.length) {
-    return null;
-  }
-  return { type: "remove-blocks", blockTargets };
-}
-
-function buildTableDeletePlan(range, cells) {
-  const first = cells[0];
-  const clauseKey = first.dataset.clauseKey || "";
-  const blockIndex = Number(first.dataset.blockIndex || -1);
-  const multipleBlocks = cells.some(
-    (cell) => cell.dataset.clauseKey !== clauseKey || Number(cell.dataset.blockIndex || -1) !== blockIndex
-  );
-  if (multipleBlocks) {
-    return {
-      type: "remove-blocks",
-      blockTargets: cells.map((cell) => ({
-        clauseKey: cell.dataset.clauseKey || "",
-        blockIndex: Number(cell.dataset.blockIndex || -1),
-      })),
-    };
-  }
-  const sameBlockCells = cells.filter(
-    (cell) => cell.dataset.clauseKey === clauseKey && Number(cell.dataset.blockIndex || -1) === blockIndex
-  );
-  const allCells = [...elements.treeContainer.querySelectorAll(".table-cell-content[data-clause-key]")]
-    .filter((cell) => cell.dataset.clauseKey === clauseKey && Number(cell.dataset.blockIndex || -1) === blockIndex);
-  if (sameBlockCells.length === allCells.length) {
-    return { type: "remove-blocks", blockTargets: [{ clauseKey, blockIndex }] };
-  }
-
-  const selectedByRow = groupCellsByRow(sameBlockCells);
-  const allByRow = groupCellsByRow(allCells);
-  const selectedRows = [...selectedByRow.keys()].filter((rowIndex) => {
-    const selectedCols = selectedByRow.get(rowIndex) || new Set();
-    const allCols = allByRow.get(rowIndex) || new Set();
-    return selectedCols.size > 0 && selectedCols.size === allCols.size;
-  });
-  if (selectedRows.length) {
-    return { type: "delete-table-rows", clauseKey, blockIndex, rowIndexes: selectedRows.sort((a, b) => b - a) };
-  }
-
-  const selectedByColumn = groupCellsByColumn(sameBlockCells);
-  const allByColumn = groupCellsByColumn(allCells);
-  const selectedColumns = [...selectedByColumn.keys()].filter((columnIndex) => {
-    const selectedRowsForColumn = selectedByColumn.get(columnIndex) || new Set();
-    const allRowsForColumn = allByColumn.get(columnIndex) || new Set();
-    return selectedRowsForColumn.size > 0 && selectedRowsForColumn.size === allRowsForColumn.size;
-  });
-  if (selectedColumns.length) {
-    return { type: "delete-table-columns", clauseKey, blockIndex, columnIndexes: selectedColumns.sort((a, b) => b - a) };
-  }
-
-  if (sameBlockCells.length === 1) {
-    const textHolder = sameBlockCells[0].querySelector(".table-cell-text");
-    if (textHolder) {
-      const offsets = getRangeOffsetsWithinElement(range, textHolder);
-      if (offsets && offsets.end > offsets.start) {
-        return {
-          type: "table-cell-text",
-          clauseKey,
-          blockIndex,
-          rowIndex: Number(sameBlockCells[0].dataset.rowIndex || -1),
-          cellIndex: Number(sameBlockCells[0].dataset.cellIndex || -1),
-          start: offsets.start,
-          end: offsets.end,
-        };
-      }
-    }
-  }
-  return { type: "remove-blocks", blockTargets: [{ clauseKey, blockIndex }] };
-}
-
-function groupCellsByRow(cells) {
-  return cells.reduce((map, cell) => {
-    const rowIndex = Number(cell.dataset.rowIndex || -1);
-    const cellIndex = Number(cell.dataset.cellIndex || -1);
-    if (rowIndex < 0 || cellIndex < 0) {
-      return map;
-    }
-    const existing = map.get(rowIndex) || new Set();
-    existing.add(cellIndex);
-    map.set(rowIndex, existing);
-    return map;
-  }, new Map());
-}
-
-function groupCellsByColumn(cells) {
-  return cells.reduce((map, cell) => {
-    const columnIndex = Number(cell.dataset.colIndex || -1);
-    const rowIndex = Number(cell.dataset.rowIndex || -1);
-    if (columnIndex < 0 || rowIndex < 0) {
-      return map;
-    }
-    const existing = map.get(columnIndex) || new Set();
-    existing.add(rowIndex);
-    map.set(columnIndex, existing);
-    return map;
-  }, new Map());
-}
-
-function getRangeOffsetsWithinElement(range, element) {
-  try {
-    const startRange = range.cloneRange();
-    startRange.selectNodeContents(element);
-    startRange.setEnd(range.startContainer, range.startOffset);
-    const endRange = range.cloneRange();
-    endRange.selectNodeContents(element);
-    endRange.setEnd(range.endContainer, range.endOffset);
-    return {
-      start: startRange.toString().length,
-      end: endRange.toString().length,
-    };
-  } catch (_error) {
-    return null;
-  }
-}
-
-function applySelectionDeletePlan(plan) {
-  if (plan.type === "paragraph-text") {
-    deleteParagraphText(plan);
-    return;
-  }
-  if (plan.type === "table-cell-text") {
-    deleteTableCellText(plan);
-    return;
-  }
-  if (plan.type === "delete-table-rows") {
-    deleteSelectedTableRows(plan);
-    return;
-  }
-  if (plan.type === "delete-table-columns") {
-    deleteSelectedTableColumns(plan);
-    return;
-  }
-  if (plan.type === "remove-blocks") {
-    removeSelectedBlocks(plan.blockTargets);
-  }
-}
-
-function deleteParagraphText(plan) {
-  let removedBlock = false;
-  const changed = updateNodeBlocks(plan.clauseKey, (blocks) => {
-    const block = blocks[plan.blockIndex];
-    if (!block || block.type !== "paragraph") {
-      return blocks;
-    }
-    const text = String(block.text || "");
-    const nextText = `${text.slice(0, plan.start)}${text.slice(plan.end)}`;
-    if (!nextText.trim()) {
-      removedBlock = true;
-      return removeBlockAt(blocks, plan.blockIndex);
-    }
-    return blocks.map((item, index) => (index === plan.blockIndex ? { ...item, text: nextText } : item));
-  });
-  if (!changed) {
-    return;
-  }
-  if (removedBlock) {
-    remapAnnotationsForBlockRemoval(plan.clauseKey, plan.blockIndex);
-  }
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNode(plan.clauseKey);
-}
-
-function deleteTableCellText(plan) {
-  const changed = updateNodeBlocks(plan.clauseKey, (blocks) => {
-    const block = blocks[plan.blockIndex];
-    if (!block || block.type !== "table") {
-      return blocks;
-    }
-    if (Array.isArray(block.cells) && block.cells.length) {
-      const nextCells = block.cells.map((row, rowIndex) =>
-        row.map((cell, cellIndex) => {
-          if (rowIndex !== plan.rowIndex || cellIndex !== plan.cellIndex) {
-            return cell;
-          }
-          const text = String(cell.text || "");
-          return { ...cell, text: `${text.slice(0, plan.start)}${text.slice(plan.end)}` };
-        })
-      );
-      return blocks.map((item, index) => (index === plan.blockIndex ? { ...item, cells: nextCells } : item));
-    }
-    const nextRows = (block.rows || []).map((row, rowIndex) =>
-      row.map((cell, cellIndex) => {
-        if (rowIndex !== plan.rowIndex || cellIndex !== plan.cellIndex) {
-          return cell;
-        }
-        const text = String(cell || "");
-        return `${text.slice(0, plan.start)}${text.slice(plan.end)}`;
-      })
-    );
-    return blocks.map((item, index) => (index === plan.blockIndex ? { ...item, rows: nextRows } : item));
-  });
-  if (!changed) {
-    return;
-  }
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNode(plan.clauseKey);
-}
-
-function deleteSelectedTableRows(plan) {
-  let removedBlock = false;
-  const changed = updateNodeBlocks(plan.clauseKey, (blocks) => {
-    const block = blocks[plan.blockIndex];
-    if (!block || block.type !== "table") {
-      return blocks;
-    }
-    let nextBlock = block;
-    for (const rowIndex of plan.rowIndexes) {
-      nextBlock = removeTableRow(nextBlock, rowIndex);
-      if (!nextBlock) {
-        removedBlock = true;
-        return removeBlockAt(blocks, plan.blockIndex);
-      }
-    }
-    return blocks.map((item, index) => (index === plan.blockIndex ? nextBlock : item));
-  });
-  if (!changed) {
-    return;
-  }
-  if (removedBlock) {
-    remapAnnotationsForBlockRemoval(plan.clauseKey, plan.blockIndex);
-  } else {
-    plan.rowIndexes.forEach((rowIndex) => remapAnnotationsForRowRemoval(plan.clauseKey, plan.blockIndex, rowIndex));
-  }
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNode(plan.clauseKey);
-}
-
-function deleteSelectedTableColumns(plan) {
-  let removedBlock = false;
-  const changed = updateNodeBlocks(plan.clauseKey, (blocks) => {
-    const block = blocks[plan.blockIndex];
-    if (!block || block.type !== "table") {
-      return blocks;
-    }
-    let nextBlock = block;
-    for (const columnIndex of plan.columnIndexes) {
-      nextBlock = removeTableColumn(nextBlock, columnIndex);
-      if (!nextBlock) {
-        removedBlock = true;
-        return removeBlockAt(blocks, plan.blockIndex);
-      }
-    }
-    return blocks.map((item, index) => (index === plan.blockIndex ? nextBlock : item));
-  });
-  if (!changed) {
-    return;
-  }
-  if (removedBlock) {
-    remapAnnotationsForBlockRemoval(plan.clauseKey, plan.blockIndex);
-  } else {
-    plan.columnIndexes.forEach((columnIndex) => remapAnnotationsForColumnRemoval(plan.clauseKey, plan.blockIndex, columnIndex));
-  }
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNode(plan.clauseKey);
-}
-
-function removeSelectedBlocks(blockTargets) {
-  const grouped = blockTargets.reduce((map, item) => {
-    const key = item.clauseKey;
-    const existing = map.get(key) || [];
-    existing.push(Number(item.blockIndex));
-    map.set(key, existing);
-    return map;
-  }, new Map());
-
-  grouped.forEach((indexes, clauseKey) => {
-    const uniqueIndexes = [...new Set(indexes)].sort((a, b) => b - a);
-    const changed = updateNodeBlocks(clauseKey, (blocks) => {
-      let nextBlocks = blocks;
-      uniqueIndexes.forEach((blockIndex) => {
-        nextBlocks = removeBlockAt(nextBlocks, blockIndex);
-      });
-      return nextBlocks;
-    });
-    if (!changed) {
-      return;
-    }
-    uniqueIndexes.forEach((blockIndex) => remapAnnotationsForBlockRemoval(clauseKey, blockIndex));
-  });
-
-  clearTreeSelectionState();
-  persistSessionState();
-  rerenderLoadedNodes([...grouped.keys()]);
 }
 
 function findNodeByKey(key, nodes = state.loadedRoots) {
@@ -2761,124 +2227,6 @@ function updateNodeBlocks(nodeKey, transform) {
   return changed;
 }
 
-function remapAnnotationsForBlockRemoval(clauseKey, blockIndex) {
-  state.ui.notes = (state.ui.notes || []).flatMap((note) => {
-    if (note.type !== "selection" || note.clauseKey !== clauseKey) {
-      return [note];
-    }
-    if (String(note.blockId || "").trim()) {
-      return [note];
-    }
-    const currentBlockIndex = Number(note.blockIndex ?? -1);
-    if (currentBlockIndex === blockIndex) {
-      return [];
-    }
-    if (currentBlockIndex > blockIndex) {
-      return [{ ...note, blockIndex: currentBlockIndex - 1 }];
-    }
-    return [note];
-  });
-  state.ui.highlights = (state.ui.highlights || []).flatMap((item) => {
-    if (item.clauseKey !== clauseKey) {
-      return [item];
-    }
-    if (String(item.blockId || "").trim()) {
-      return [item];
-    }
-    const currentBlockIndex = Number(item.blockIndex ?? -1);
-    if (currentBlockIndex === blockIndex) {
-      return [];
-    }
-    if (currentBlockIndex > blockIndex) {
-      return [{ ...item, blockIndex: currentBlockIndex - 1 }];
-    }
-    return [item];
-  });
-}
-
-function remapAnnotationsForRowRemoval(clauseKey, blockIndex, rowIndex) {
-  const blockId = getBlockIdByIndex(clauseKey, blockIndex);
-  state.ui.notes = (state.ui.notes || []).flatMap((note) => {
-    if (note.type !== "selection" || !blockReferenceMatches(note, clauseKey, blockIndex, blockId)) {
-      return [note];
-    }
-    if (String(note.cellId || "").trim()) {
-      return [note];
-    }
-    const currentRowIndex = Number(note.rowIndex ?? -1);
-    if (currentRowIndex < 0) {
-      return [note];
-    }
-    if (currentRowIndex === rowIndex) {
-      return [];
-    }
-    if (currentRowIndex > rowIndex) {
-      return [{ ...note, rowIndex: currentRowIndex - 1 }];
-    }
-    return [note];
-  });
-  state.ui.highlights = (state.ui.highlights || []).flatMap((item) => {
-    if (!blockReferenceMatches(item, clauseKey, blockIndex, blockId)) {
-      return [item];
-    }
-    if (String(item.cellId || "").trim()) {
-      return [item];
-    }
-    const currentRowIndex = Number(item.rowIndex ?? -1);
-    if (currentRowIndex < 0) {
-      return [item];
-    }
-    if (currentRowIndex === rowIndex) {
-      return [];
-    }
-    if (currentRowIndex > rowIndex) {
-      return [{ ...item, rowIndex: currentRowIndex - 1 }];
-    }
-    return [item];
-  });
-}
-
-function remapAnnotationsForColumnRemoval(clauseKey, blockIndex, columnIndex) {
-  const blockId = getBlockIdByIndex(clauseKey, blockIndex);
-  state.ui.notes = (state.ui.notes || []).flatMap((note) => {
-    if (note.type !== "selection" || !blockReferenceMatches(note, clauseKey, blockIndex, blockId)) {
-      return [note];
-    }
-    if (String(note.cellId || "").trim()) {
-      return [note];
-    }
-    const currentCellIndex = Number(note.cellIndex ?? -1);
-    if (currentCellIndex < 0) {
-      return [note];
-    }
-    if (currentCellIndex === columnIndex) {
-      return [];
-    }
-    if (currentCellIndex > columnIndex) {
-      return [{ ...note, cellIndex: currentCellIndex - 1 }];
-    }
-    return [note];
-  });
-  state.ui.highlights = (state.ui.highlights || []).flatMap((item) => {
-    if (!blockReferenceMatches(item, clauseKey, blockIndex, blockId)) {
-      return [item];
-    }
-    if (String(item.cellId || "").trim()) {
-      return [item];
-    }
-    const currentCellIndex = Number(item.cellIndex ?? -1);
-    if (currentCellIndex < 0) {
-      return [item];
-    }
-    if (currentCellIndex === columnIndex) {
-      return [];
-    }
-    if (currentCellIndex > columnIndex) {
-      return [{ ...item, cellIndex: currentCellIndex - 1 }];
-    }
-    return [item];
-  });
-}
 
 function findLoadedAncestor(specNo, clauseId) {
   const clausePath = String(clauseId || "").split(".").filter(Boolean);
@@ -2981,21 +2329,12 @@ function renderSelectedClauseList() {
     return;
   }
   const grouped = groupRootsBySpec(roots);
-  elements.selectedClauseList.innerHTML = Object.entries(grouped)
-    .map(
-      ([specNo, nodes]) => `
-        <section class="selected-spec-group">
-          <div class="selected-spec-title">
-            <button class="selected-spec-toggle" data-action="toggle-selected-spec" data-spec-no="${escapeHtml(specNo)}">
-              ${state.ui.collapsedSpecs.has(specNo) ? "+" : "−"}
-            </button>
-            <span>${escapeHtml(specNo)}</span>
-          </div>
-          ${state.ui.collapsedSpecs.has(specNo) ? "" : nodes.map((node) => renderSelectedClauseCard(node, 0)).join("")}
-        </section>
-      `
-    )
-    .join("");
+  elements.selectedClauseList.innerHTML = buildSelectedClauseListHtml({
+    groupedRoots: grouped,
+    collapsedSpecs: state.ui.collapsedSpecs,
+    escapeHtml,
+    renderCard: (node, depth) => renderSelectedClauseCard(node, depth),
+  });
   elements.selectedClauseList.querySelectorAll("[data-action='toggle-selected-spec']").forEach((button) => {
     button.addEventListener("click", () => {
       toggleSelectedSpec(button.dataset.specNo);
@@ -3019,44 +2358,13 @@ function updateSelectedClauseActiveState() {
 }
 
 function renderSelectedClauseCard(node, depth) {
-  const isActive = node.key === state.ui.viewportKey || node.key === state.ui.focusedKey;
-  return `
-    <div class="selected-clause-row ${isActive ? "active" : ""}" data-selected-key="${escapeHtml(node.key)}" style="margin-left:${depth * 12}px">
-      <span class="selected-clause-bullet">-</span>
-      <button class="selected-clause-link" data-action="focus-selected" data-node-key="${escapeHtml(node.key)}">
-        ${escapeHtml(node.clauseId)} ${escapeHtml(node.clauseTitle)}
-      </button>
-    </div>
-    ${(node.children || []).map((child) => renderSelectedClauseCard(child, depth + 1)).join("")}
-  `;
-}
-
-function groupRootsBySpec(roots) {
-  return [...roots].sort(compareLoadedNodes).reduce((groups, node) => {
-    const next = { ...groups };
-    const existing = next[node.specNo] || [];
-    next[node.specNo] = [...existing, node];
-    return next;
-  }, {});
-}
-
-function compareLoadedNodes(left, right) {
-  const specCompare = compareMixedToken(String(left.specNo || ""), String(right.specNo || ""));
-  if (specCompare !== 0) {
-    return specCompare;
-  }
-  const leftPath = left.clausePath || [left.clauseId || ""];
-  const rightPath = right.clausePath || [right.clauseId || ""];
-  const pathLength = Math.max(leftPath.length, rightPath.length);
-  for (let index = 0; index < pathLength; index += 1) {
-    const leftPart = leftPath[index] ?? "";
-    const rightPart = rightPath[index] ?? "";
-    const partCompare = compareClausePart(leftPart, rightPart);
-    if (partCompare !== 0) {
-      return partCompare;
-    }
-  }
-  return 0;
+  return buildSelectedClauseCardHtml(node, depth, {
+    escapeHtml,
+    isActive: node.key === state.ui.viewportKey || node.key === state.ui.focusedKey,
+    renderChildren(children, nextDepth) {
+      return children.map((child) => renderSelectedClauseCard(child, nextDepth)).join("");
+    },
+  });
 }
 
 function compareSpecbotHits(left, right) {
@@ -3074,32 +2382,6 @@ function compareSpecbotHits(left, right) {
     }
   }
   return 0;
-}
-
-function compareClausePart(left, right) {
-  const leftTokens = String(left).split(".");
-  const rightTokens = String(right).split(".");
-  const length = Math.max(leftTokens.length, rightTokens.length);
-  for (let index = 0; index < length; index += 1) {
-    const tokenCompare = compareMixedToken(leftTokens[index] ?? "", rightTokens[index] ?? "");
-    if (tokenCompare !== 0) {
-      return tokenCompare;
-    }
-  }
-  return 0;
-}
-
-function compareMixedToken(left, right) {
-  const leftMatch = String(left).match(/^(\d+)(.*)$/);
-  const rightMatch = String(right).match(/^(\d+)(.*)$/);
-  if (leftMatch && rightMatch) {
-    const numberCompare = Number(leftMatch[1]) - Number(rightMatch[1]);
-    if (numberCompare !== 0) {
-      return numberCompare;
-    }
-    return leftMatch[2].localeCompare(rightMatch[2]);
-  }
-  return String(left).localeCompare(String(right), undefined, { numeric: true });
 }
 
 function isCaptionParagraph(text, block = null) {
@@ -3857,82 +3139,6 @@ function getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex = -1, cellIn
   );
 }
 
-function isSelectionNoteOpen(note) {
-  return note?.type === "selection"
-    ? state.ui.openSelectionNoteIds.has(String(note.id || ""))
-    : !note?.collapsed;
-}
-
-function getHighlightEntriesForSelectionNote(note) {
-  const noteTargets = Array.isArray(note?.targets) ? note.targets.filter(Boolean) : [];
-  if (noteTargets.length) {
-    return noteTargets
-      .map((target) =>
-        createHighlightEntry({
-          clauseKey: target.clauseKey,
-          blockId: target.blockId,
-          blockIndex: target.blockIndex,
-          rowIndex: target.rowIndex,
-          cellIndex: target.cellIndex,
-          cellId: target.cellId,
-          rowText: target.rowText,
-        })
-      )
-      .filter(Boolean);
-  }
-  const singleEntry = createHighlightEntry({
-    clauseKey: note.clauseKey,
-    blockId: note.blockId,
-    blockIndex: note.blockIndex,
-    rowIndex: note.rowIndex,
-    cellIndex: note.cellIndex,
-    cellId: note.cellId,
-    rowText: note.rowText,
-  });
-  return singleEntry ? [singleEntry] : [];
-}
-
-function upsertNote(note) {
-  console.debug("[selection-note] upsert note", {
-    noteId: note?.id,
-    noteType: note?.type,
-    clauseKey: note?.clauseKey,
-    beforeIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
-  });
-  const existingIndex = (state.ui.notes || []).findIndex((item) => item.id === note.id);
-  if (existingIndex >= 0) {
-    state.ui.notes = state.ui.notes.map((item, index) => (index === existingIndex ? { ...item, ...note } : item));
-  } else {
-    state.ui.notes = [note, ...(state.ui.notes || [])];
-  }
-  if (note.type === "selection") {
-    const nextOpen = new Set(state.ui.openSelectionNoteIds || []);
-    nextOpen.add(String(note.id || ""));
-    state.ui.openSelectionNoteIds = nextOpen;
-  }
-  if (note.type === "selection") {
-    getHighlightEntriesForSelectionNote(note).forEach((entry) => {
-      ensureHighlightEntry(entry);
-    });
-  }
-  if (note.type === "clause" && note.clauseKey) {
-    expandNodePath(note.clauseKey);
-  }
-  console.debug("[selection-note] upsert note result", {
-    noteId: note?.id,
-    afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
-  });
-  persistSessionState();
-  const affectedClauseKeys = getAffectedClauseKeysForSelectionArtifacts([note]);
-  if (note.type === "selection" && affectedClauseKeys.length) {
-    rerenderLoadedNodes(affectedClauseKeys);
-  } else if (note.type === "clause" && note.clauseKey) {
-    rerenderLoadedNode(note.clauseKey);
-  } else {
-    renderLoadedTree();
-  }
-}
-
 function expandNodePath(targetKey) {
   const keys = new Set(state.ui.expandedKeys || []);
 
@@ -3952,11 +3158,6 @@ function expandNodePath(targetKey) {
   state.ui.expandedKeys = keys;
 }
 
-function updateNoteField(noteId, field, value) {
-  state.ui.notes = (state.ui.notes || []).map((note) => (note.id === noteId ? { ...note, [field]: value } : note));
-  persistSessionState();
-}
-
 function toggleClauseNotes(clauseKey) {
   if (state.ui.clauseNoteModalKey === clauseKey) {
     closeClauseNoteModal();
@@ -3966,285 +3167,6 @@ function toggleClauseNotes(clauseKey) {
   renderLoadedTree();
 }
 
-function toggleSelectionNotes(clauseKey, blockIndex, rowIndex = -1, cellIndex = null, blockId = getBlockIdByIndex(clauseKey, blockIndex), cellId = "") {
-  const notes = getSelectionNotesForTarget(clauseKey, blockIndex, rowIndex, cellIndex, blockId, cellId);
-  toggleSelectionNotesByIds(
-    notes.map((note) => String(note.id || "")).filter(Boolean),
-    { clauseKey, blockIndex, rowIndex, cellIndex: cellIndex === null ? -1 : cellIndex, blockId, cellId }
-  );
-}
-
-function toggleSelectionNotesByIds(noteIds, anchor = {}, triggerElement = null) {
-  const normalizedIds = [...new Set((noteIds || []).map((item) => String(item || "").trim()).filter(Boolean))];
-  if (!normalizedIds.length) {
-    console.debug("[selection-note] toggle skipped empty ids", { noteIds, anchor });
-    return;
-  }
-  let notes = (state.ui.notes || []).filter((note) => normalizedIds.includes(String(note.id || "")));
-  if (!notes.length && anchor?.clauseKey) {
-    notes = getSelectionNotesForTarget(
-      String(anchor.clauseKey || ""),
-      Number(anchor.blockIndex ?? -1),
-      Number(anchor.rowIndex ?? -1),
-      anchor.cellIndex === null || anchor.cellIndex === undefined ? null : Number(anchor.cellIndex),
-      String(anchor.blockId || ""),
-      String(anchor.cellId || "")
-    );
-  }
-  if (!notes.length) {
-    console.debug("[selection-note] toggle skipped notes not found", {
-      normalizedIds,
-      anchor,
-      selectionNotes: (state.ui.notes || []).filter((note) => note.type === "selection").map((note) => note.id),
-    });
-    return;
-  }
-  const effectiveIds = [...new Set(notes.map((note) => String(note.id || "")).filter(Boolean))];
-  const openIds = new Set(state.ui.openSelectionNoteIds || []);
-  const shouldCollapse = notes.some((note) => isSelectionNoteOpen(note));
-  const normalizedBlockId = String(anchor.blockId || "").trim() || getBlockIdByIndex(anchor.clauseKey || "", Number(anchor.blockIndex || -1)) || "";
-  const normalizedCellId = String(anchor.cellId || "").trim();
-  console.debug("[selection-note] toggle start", {
-    normalizedIds,
-    shouldCollapse,
-    openIds: [...openIds],
-    anchor,
-    notes: notes.map((note) => ({
-      id: note.id,
-      clauseKey: note.clauseKey,
-      blockId: note.blockId,
-      blockIndex: note.blockIndex,
-      rowIndex: note.rowIndex,
-      cellIndex: note.cellIndex,
-      cellId: note.cellId,
-      sourceText: note.sourceText,
-    })),
-  });
-  if (!shouldCollapse) {
-    const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
-    const resolvedPosition = getSelectionNoteOverlayPosition({
-      clauseKey: String(anchor.clauseKey || notes[0]?.clauseKey || ""),
-      blockId: normalizedBlockId || String(notes[0]?.blockId || ""),
-      blockIndex: Number(anchor.blockIndex ?? notes[0]?.blockIndex ?? -1),
-      rowIndex: Number(anchor.rowIndex ?? notes[0]?.rowIndex ?? -1),
-      cellIndex: Number(anchor.cellIndex ?? notes[0]?.cellIndex ?? -1),
-      cellId: normalizedCellId || String(notes[0]?.cellId || ""),
-      sourceText: String(notes[0]?.sourceText || ""),
-    }) || getSelectionNoteOverlayPositionFromTrigger(triggerElement);
-    effectiveIds.forEach((id) => {
-      if (resolvedPosition) {
-        nextPositions[id] = resolvedPosition;
-      }
-    });
-    state.ui.selectionNoteOverlayPositions = nextPositions;
-    console.debug("[selection-note] resolved position", {
-      normalizedIds,
-      resolvedPosition,
-      nextPositions,
-    });
-    state.ui.notes = (state.ui.notes || []).map((note) =>
-      effectiveIds.includes(String(note.id || ""))
-        ? {
-            ...note,
-            clauseKey: String(anchor.clauseKey || note.clauseKey || ""),
-            blockIndex: Number(anchor.blockIndex ?? note.blockIndex ?? -1),
-            blockId: normalizedBlockId || String(note.blockId || ""),
-            rowIndex: Number(anchor.rowIndex ?? note.rowIndex ?? -1),
-            cellIndex: Number(anchor.cellIndex ?? note.cellIndex ?? -1),
-            cellId: normalizedCellId || String(note.cellId || ""),
-            rowText: String(anchor.rowText || note.rowText || ""),
-          }
-        : note
-    );
-  }
-  effectiveIds.forEach((id) => {
-    if (shouldCollapse) {
-      openIds.delete(id);
-    } else {
-      openIds.add(id);
-    }
-  });
-  state.ui.openSelectionNoteIds = openIds;
-  console.debug("[selection-note] toggle end", {
-    normalizedIds,
-    effectiveIds,
-    shouldCollapse,
-    openIds: [...state.ui.openSelectionNoteIds],
-  });
-  persistSessionState();
-  requestSelectionSidebarRender();
-  syncSelectionNoteToggleButtons();
-}
-
-function getSelectionNoteOverlayPositionFromTrigger(triggerElement) {
-  if (!(triggerElement instanceof HTMLElement)) {
-    return null;
-  }
-  const rect = triggerElement.getBoundingClientRect();
-  const width = Math.min(620, Math.max(320, Math.floor(window.innerWidth * 0.28)));
-  const top = Math.min(window.innerHeight - 260, Math.max(16, rect.top - 8));
-  const left = Math.max(16, rect.left - width - 12);
-  return { top, left, width };
-}
-
-function collapseAllSelectionNotes() {
-  state.ui.openSelectionNoteIds = new Set();
-  persistSessionState();
-  requestSelectionSidebarRender();
-  syncSelectionNoteToggleButtons();
-}
-
-function closeSelectionNoteById(noteId) {
-  const normalizedNoteId = String(noteId || "").trim();
-  if (!normalizedNoteId) {
-    return;
-  }
-  const openIds = new Set(state.ui.openSelectionNoteIds || []);
-  openIds.delete(normalizedNoteId);
-  state.ui.openSelectionNoteIds = openIds;
-  persistSessionState();
-  requestSelectionSidebarRender();
-  syncSelectionNoteToggleButtons();
-}
-
-function syncSelectionNoteToggleButtons() {
-  document.querySelectorAll("[data-action='toggle-selection-notes']").forEach((button) => {
-    const noteIds = String(button.dataset.noteIds || "").split(",").map((item) => item.trim()).filter(Boolean);
-    const expanded = noteIds.some((id) => state.ui.openSelectionNoteIds.has(id));
-    button.classList.toggle("expanded", expanded);
-  });
-}
-
-function toggleSelectionNoteCard(noteId) {
-  const normalizedNoteId = String(noteId || "").trim();
-  if (!normalizedNoteId) {
-    return;
-  }
-  let openedNote = null;
-  const openIds = new Set(state.ui.openSelectionNoteIds || []);
-  if (openIds.has(normalizedNoteId)) {
-    openIds.delete(normalizedNoteId);
-  } else {
-    openIds.add(normalizedNoteId);
-    openedNote = (state.ui.notes || []).find((note) => note.id === normalizedNoteId) || null;
-  }
-  state.ui.openSelectionNoteIds = openIds;
-  persistSessionState();
-  renderLoadedTree();
-  if (openedNote) {
-    revealSelectionNoteTarget(openedNote);
-  }
-}
-
-function revealSelectionNoteTarget(note) {
-  const noteTargets = Array.isArray(note?.targets) && note.targets.length
-    ? note.targets
-    : [{
-        clauseKey: note?.clauseKey || "",
-        blockId: note?.blockId || "",
-        cellId: note?.cellId || "",
-      }];
-  const primaryTarget = noteTargets.find((target) => String(target?.clauseKey || "").trim()) || null;
-  if (!primaryTarget?.clauseKey) {
-    return;
-  }
-  focusNode(primaryTarget.clauseKey);
-  window.clearTimeout(revealedSelectionTargetTimer);
-  revealedSelectionTargetTimer = window.setTimeout(() => {
-    const targets = noteTargets.flatMap((target) => {
-      const clauseKey = String(target?.clauseKey || "").trim();
-      if (!clauseKey) {
-        return [];
-      }
-      const nodeElement = document.getElementById(`node-${escapeKey(clauseKey)}`);
-      if (!(nodeElement instanceof HTMLElement)) {
-        return [];
-      }
-      const cellId = String(target?.cellId || "").trim();
-      const blockId = String(target?.blockId || "").trim();
-      let element = null;
-      if (cellId) {
-        element = nodeElement.querySelector(`[data-editor-cell-id="${escapeSelector(cellId)}"]`);
-      }
-      if (!element && blockId) {
-        element = nodeElement.querySelector(`[data-editor-block-id="${escapeSelector(blockId)}"]`);
-      }
-      return element ? [element] : [];
-    });
-    if (!targets.length) {
-      return;
-    }
-    const uniqueTargets = [...new Set(targets)];
-    uniqueTargets[0].scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    uniqueTargets.forEach((target) => target.classList.add("note-target-reveal"));
-    window.setTimeout(() => {
-      uniqueTargets.forEach((target) => target.classList.remove("note-target-reveal"));
-    }, 1800);
-  }, 80);
-}
-
-function deleteNote(noteId) {
-  console.debug("[selection-note] delete note", {
-    noteId,
-    beforeIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
-  });
-  const targetNote = (state.ui.notes || []).find((note) => note.id === noteId) || null;
-  state.ui.notes = (state.ui.notes || []).filter((note) => note.id !== noteId);
-  const openIds = new Set(state.ui.openSelectionNoteIds || []);
-  openIds.delete(String(noteId || ""));
-  state.ui.openSelectionNoteIds = openIds;
-  const nextPositions = { ...(state.ui.selectionNoteOverlayPositions || {}) };
-  delete nextPositions[String(noteId || "")];
-  state.ui.selectionNoteOverlayPositions = nextPositions;
-  if (targetNote?.type === "selection") {
-    pruneHighlightForSelectionNote(targetNote);
-  }
-  if (state.ui.clauseNoteModalKey) {
-    const remaining = getNotesForClause(state.ui.clauseNoteModalKey).filter((note) => note.type === "clause" && note.id !== noteId);
-    if (!remaining.length) {
-      state.ui.clauseNoteModalKey = "";
-      elements.clauseNoteModal.classList.add("hidden");
-      elements.clauseNoteModal.setAttribute("aria-hidden", "true");
-    }
-  }
-  console.debug("[selection-note] delete note result", {
-    noteId,
-    afterIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
-  });
-  persistSessionState();
-  const affectedClauseKeys = targetNote ? getAffectedClauseKeysForSelectionArtifacts([targetNote]) : [];
-  if (targetNote?.type === "selection" && affectedClauseKeys.length) {
-    rerenderLoadedNodes(affectedClauseKeys);
-  } else if (targetNote?.clauseKey) {
-    rerenderLoadedNode(targetNote.clauseKey);
-  } else {
-    renderLoadedTree();
-  }
-  if (state.ui.clauseNoteModalKey) {
-    renderClauseNoteModal();
-  }
-}
-
-function pruneHighlightForSelectionNote(note) {
-  const linkedEntries = getHighlightEntriesForSelectionNote(note);
-  if (!linkedEntries.length) {
-    return;
-  }
-  const siblingHighlightIds = new Set(
-    (state.ui.notes || [])
-      .filter((item) => item.type === "selection" && item.id !== note.id)
-      .flatMap((item) => getHighlightEntriesForSelectionNote(item).map((entry) => entry.id))
-  );
-  const removableIds = new Set(
-    linkedEntries
-      .map((entry) => entry.id)
-      .filter((entryId) => !siblingHighlightIds.has(entryId))
-  );
-  if (!removableIds.size) {
-    return;
-  }
-  state.ui.highlights = (state.ui.highlights || []).filter((item) => !removableIds.has(item.id));
-}
 
 function pruneNotesForNodeKey(nodeKey) {
   const node = findNodeByKey(nodeKey);
@@ -4313,27 +3235,7 @@ function getCurrentSelectionHighlightEntries() {
 }
 
 function createHighlightEntry({ clauseKey, blockId = "", blockIndex = -1, rowIndex = -1, cellIndex = -1, cellId = "", rowText = "" }) {
-  const normalizedClauseKey = String(clauseKey || "").trim();
-  const normalizedBlockId = String(blockId || "").trim();
-  const normalizedBlockIndex = Number(blockIndex ?? -1);
-  if (!normalizedClauseKey || (!normalizedBlockId && normalizedBlockIndex < 0)) {
-    return null;
-  }
-  const normalizedRowIndex = Number(rowIndex ?? -1);
-  const normalizedCellIndex = Number(cellIndex ?? -1);
-  const normalizedCellId = String(cellId || "").trim();
-  const normalizedRowText = String(rowText || "").trim();
-  return {
-    id: `manual:${normalizedClauseKey}:${normalizedBlockId || normalizedBlockIndex}:${normalizedCellId || `${normalizedRowIndex}:${normalizedCellIndex}`}:${normalizeHighlightText(normalizedRowText) || "block"}`,
-    type: "manual",
-    clauseKey: normalizedClauseKey,
-    blockId: normalizedBlockId,
-    blockIndex: normalizedBlockIndex,
-    rowIndex: normalizedRowIndex,
-    cellIndex: normalizedCellIndex,
-    cellId: normalizedCellId,
-    rowText: normalizedRowText,
-  };
+  return createHighlightEntryFromSelection({ clauseKey, blockId, blockIndex, rowIndex, cellIndex, cellId, rowText });
 }
 
 function ensureHighlightEntry(entry) {
@@ -4361,116 +3263,8 @@ function toggleSelectionHighlight() {
   rerenderLoadedNodes(getAffectedClauseKeysForSelectionArtifacts(entries));
 }
 
-function addManualSelectionNote() {
-  const selectionTargets = getCurrentSelectionTargets();
-  const selection = getEffectiveSelection();
-  if (!selectionTargets.length) {
-    setMessage("메모를 추가할 문단이나 표 셀을 먼저 선택하세요.", true);
-    return;
-  }
-  const anchorTarget = selectionTargets[0];
-  const sourceText = String(
-    selection?.hasSelection && selection?.text
-      ? selection.text
-      : anchorTarget.rowText || ""
-  ).trim();
-  upsertNote({
-    id: `manual-note:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-    type: "selection",
-    clauseKey: anchorTarget.clauseKey,
-    blockId: anchorTarget.blockId,
-    blockIndex: anchorTarget.blockIndex,
-    rowIndex: anchorTarget.rowIndex,
-    cellIndex: anchorTarget.cellIndex,
-    cellId: anchorTarget.cellId,
-    rowText: anchorTarget.rowText,
-    targets: selectionTargets,
-    clauseLabel: anchorTarget.clauseLabel || getLabelForKey(anchorTarget.clauseKey),
-    sourceText,
-    translation: "",
-    sourceLanguage: inferSourceLanguage(sourceText),
-    targetLanguage: "memo",
-    collapsed: false,
-  });
-}
-
-function renderSpecbotResults() {
-  const collapsed = Boolean(state.ui.specbotResultsCollapsed);
-  if (elements.toggleSpecbotResults) {
-    elements.toggleSpecbotResults.textContent = collapsed ? "+" : "−";
-    elements.toggleSpecbotResults.title = collapsed ? "펼치기" : "접기";
-    elements.toggleSpecbotResults.setAttribute("aria-label", collapsed ? "펼치기" : "접기");
-  }
-  elements.specbotResultList.classList.toggle("hidden", collapsed);
-  elements.specbotResultList.setAttribute("aria-hidden", collapsed ? "true" : "false");
-  if (collapsed) {
-    return;
-  }
-  if (!state.ui.specbotResults.length) {
-    elements.specbotResultList.innerHTML = '<div class="muted">상단 Query로 SpecBot을 실행하면 결과가 여기에 표시됩니다.</div>';
-    return;
-  }
-  elements.specbotResultList.innerHTML = state.ui.specbotResults
-    .map(
-      (item) => `
-        <article class="result-card">
-          <strong>${escapeHtml(item.specNo)} / ${escapeHtml(item.clauseId)}</strong>
-          <div class="muted">${escapeHtml((item.clausePath || []).join(" > "))}</div>
-          <div class="muted">${escapeHtml(item.textPreview || "")}</div>
-          <div class="tree-actions">
-            <button
-              class="success icon-button"
-              type="button"
-              title="이 절 추가"
-              aria-label="이 절 추가"
-              data-action="load-specbot-hit"
-              data-spec-no="${escapeHtml(item.specNo)}"
-              data-clause-id="${escapeHtml(item.clauseId)}"
-            >O</button>
-            <button
-              class="danger icon-button"
-              type="button"
-              title="거절"
-              aria-label="거절"
-              data-action="reject-specbot-hit"
-              data-spec-no="${escapeHtml(item.specNo)}"
-              data-clause-id="${escapeHtml(item.clauseId)}"
-            >✕</button>
-          </div>
-        </article>
-      `
-    )
-    .join("");
-  elements.specbotResultList.querySelectorAll("[data-action='load-specbot-hit']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const hit = state.ui.specbotResults.find(
-        (item) => String(item.specNo || "") === String(button.dataset.specNo || "")
-          && String(item.clauseId || "") === String(button.dataset.clauseId || "")
-      );
-      await loadClauseFromSpec(button.dataset.specNo, button.dataset.clauseId);
-      if (hit) {
-        persistSessionState();
-        renderLoadedTree();
-      }
-      removeSpecbotResult(button.dataset.specNo, button.dataset.clauseId);
-    });
-  });
-  elements.specbotResultList.querySelectorAll("[data-action='reject-specbot-hit']").forEach((button) => {
-    button.addEventListener("click", () => {
-      addRejectedSpecbotClause(button.dataset.specNo, button.dataset.clauseId);
-      removeSpecbotResult(button.dataset.specNo, button.dataset.clauseId);
-      setMessage(
-        `SpecBot 결과에서 ${button.dataset.specNo} / ${button.dataset.clauseId} 절을 거절하고 이후 검색에서도 제외합니다.`,
-        false
-      );
-    });
-  });
-}
-
 function toggleSpecbotResultsPanel() {
-  state.ui.specbotResultsCollapsed = !state.ui.specbotResultsCollapsed;
-  persistSessionState();
-  renderSpecbotResults();
+  specbotController.toggleSpecbotResultsPanel();
 }
 
 function showNodeMenu(x, y, key) {
@@ -4486,358 +3280,7 @@ function hideNodeMenu() {
 }
 
 async function runSpecbotQuery() {
-  if (!beginBusy(SPECBOT_QUERY_BUSY_LABEL)) {
-    return;
-  }
-  const query = elements.specbotQuery.value.trim();
-  state.ui.specbotQueryText = query;
-  persistSessionState();
-  if (!query) {
-    endBusy();
-    setMessage("SpecBot query를 입력하세요.", true);
-    return;
-  }
-  state.ui.specbotQueryStatus = "queued";
-  setSpecbotQueryLoading(true);
-  try {
-    const exclusions = buildSpecbotExclusions();
-    const queryDepth = getSelectedSpecbotDepth();
-    state.ui.specbotResults = [];
-    state.ui.specbotSettings = {
-      ...state.ui.specbotSettings,
-      iterations: getIterationsForDepth(queryDepth),
-      queryDepth,
-    };
-    persistSessionState();
-    renderSpecbotResults();
-    const response = await streamSpecbotQuery({
-      query,
-      releaseData: getBoardScope().releaseData,
-      release: getBoardScope().release,
-      settings: {
-        ...state.ui.specbotSettings,
-        iterations: getIterationsForDepth(queryDepth),
-        queryDepth,
-      },
-      excludeSpecs: exclusions.excludeSpecs,
-      excludeClauses: exclusions.excludeClauses,
-    });
-    state.ui.specbotResults = filterSpecbotHitsByExclusions(response.hits || [], exclusions).sort(compareSpecbotHits);
-    persistSessionState();
-    renderSpecbotResults();
-    setMessage(`SpecBot query 완료: ${query}`, false);
-  } catch (error) {
-    if (!isAbortedRequestError(error)) {
-      setMessage(error.message, true);
-    }
-  } finally {
-    state.ui.specbotQueryStatus = "";
-    setSpecbotQueryLoading(false);
-    endBusy();
-  }
-}
-
-function buildSpecbotExclusions() {
-  const settings = state.ui.specbotSettings || {};
-  const includedSpecs = new Set(
-    Array.isArray(settings.includedSpecs) && settings.includedSpecs.length
-      ? settings.includedSpecs.map((item) => String(item).trim()).filter(Boolean)
-      : (state.documents || []).map((item) => String(item.specNo || "").trim()).filter(Boolean)
-  );
-  const excludeSpecs = new Set(Array.isArray(settings.excludeSpecs) ? settings.excludeSpecs.map((item) => String(item).trim()).filter(Boolean) : []);
-  (state.documents || []).forEach((item) => {
-    const specNo = String(item.specNo || "").trim();
-    if (specNo && !includedSpecs.has(specNo)) {
-      excludeSpecs.add(specNo);
-    }
-  });
-  const excludeClauseMap = new Map();
-
-  const manualClauses = Array.isArray(settings.excludeClauses) ? settings.excludeClauses : [];
-  manualClauses.forEach((item) => {
-    const specNo = String(item.specNo || "").trim();
-    const clauseId = String(item.clauseId || "").trim();
-    if (specNo && clauseId) {
-      excludeClauseMap.set(`${specNo}:${clauseId}`, { specNo, clauseId });
-    }
-  });
-
-  getRejectedSpecbotClauses().forEach((item) => {
-    excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
-  });
-
-  collectLoadedClausePairs(state.loadedRoots).forEach((item) => {
-    excludeClauseMap.set(`${item.specNo}:${item.clauseId}`, item);
-  });
-
-  return {
-    excludeSpecs: [...excludeSpecs].sort(compareMixedToken),
-    excludeClauses: [...excludeClauseMap.values()].sort((left, right) => compareSpecbotHits(left, right)),
-  };
-}
-
-function filterSpecbotHitsByExclusions(hits, exclusions = buildSpecbotExclusions()) {
-  const excludeSpecs = new Set((exclusions.excludeSpecs || []).map((item) => String(item || "").trim()).filter(Boolean));
-  const excludeClausePairs = new Set(
-    (exclusions.excludeClauses || [])
-      .map((item) => {
-        const specNo = String(item.specNo || "").trim();
-        const clauseId = String(item.clauseId || "").trim();
-        return specNo && clauseId ? `${specNo}:${clauseId}` : "";
-      })
-      .filter(Boolean)
-  );
-  return (hits || []).filter((item) => {
-    const specNo = String(item.specNo || "").trim();
-    const clauseId = String(item.clauseId || "").trim();
-    if (!specNo || !clauseId) {
-      return false;
-    }
-    if (excludeSpecs.has(specNo)) {
-      return false;
-    }
-    if (excludeClausePairs.has(`${specNo}:${clauseId}`)) {
-      return false;
-    }
-    return true;
-  });
-}
-
-function pruneSpecbotResultsByCurrentExclusions() {
-  state.ui.specbotResults = filterSpecbotHitsByExclusions(state.ui.specbotResults, buildSpecbotExclusions()).sort(compareSpecbotHits);
-}
-
-function collectLoadedClausePairs(nodes) {
-  return (nodes || []).flatMap((node) => [
-    { specNo: String(node.specNo || "").trim(), clauseId: String(node.clauseId || "").trim() },
-    ...collectLoadedClausePairs(node.children || []),
-  ]).filter((item) => item.specNo && item.clauseId);
-}
-
-function parseSpecbotExcludeSpecs(text) {
-  return String(text || "")
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function parseSpecbotExcludeClauses(text) {
-  return String(text || "")
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => {
-      const [specNo, clauseId] = item.split(":");
-      return { specNo: String(specNo || "").trim(), clauseId: String(clauseId || "").trim() };
-    })
-    .filter((item) => item.specNo && item.clauseId);
-}
-
-function dedupeClausePairs(items) {
-  const pairs = new Map();
-  (items || []).forEach((item) => {
-    const specNo = String(item.specNo || "").trim();
-    const clauseId = String(item.clauseId || "").trim();
-    if (specNo && clauseId) {
-      pairs.set(`${specNo}:${clauseId}`, { specNo, clauseId });
-    }
-  });
-  return [...pairs.values()];
-}
-
-function getNormalizedRejectedClauses(items) {
-  return dedupeClausePairs(Array.isArray(items) ? items : []);
-}
-
-function getRejectedSpecbotClauses() {
-  return getNormalizedRejectedClauses(state.ui.specbotSettings?.rejectedClauses);
-}
-
-function renderSpecbotDocumentSettings() {
-  const docs = state.documents || [];
-  if (state.ui.specbotDocumentSettingsLoading) {
-    elements.settingDocumentList.innerHTML = '<div class="muted">문서 목록을 불러오는 중입니다.</div>';
-    elements.settingDocumentSelectionCount.textContent = "0 / 0 selected";
-    return;
-  }
-  if (!docs.length) {
-    elements.settingDocumentList.innerHTML = '<div class="muted">선택 가능한 문서가 없습니다.</div>';
-    elements.settingDocumentSelectionCount.textContent = "0 / 0 selected";
-    return;
-  }
-  const selectedSpecs = new Set(
-    Array.isArray(state.ui.specbotSettings?.includedSpecs) && state.ui.specbotSettings.includedSpecs.length
-      ? state.ui.specbotSettings.includedSpecs.map((item) => String(item).trim()).filter(Boolean)
-      : docs.map((item) => String(item.specNo || "").trim()).filter(Boolean)
-  );
-  elements.settingDocumentList.innerHTML = docs
-    .map(
-      (item) => `
-        <label class="settings-document-row">
-          <input type="checkbox" data-action="toggle-specbot-doc" value="${escapeHtml(item.specNo)}" ${selectedSpecs.has(item.specNo) ? "checked" : ""} />
-          <span class="settings-document-text">
-            <strong>${escapeHtml(item.specNo)}</strong>
-            <span class="muted">${escapeHtml(item.specTitle || "")}</span>
-          </span>
-        </label>
-      `
-    )
-    .join("");
-  elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']").forEach((input) => {
-    input.addEventListener("change", updateSpecbotDocumentSelectionCount);
-  });
-  updateSpecbotDocumentSelectionCount();
-}
-
-function renderRejectedSpecbotClauses() {
-  const rejectedClauses = getRejectedSpecbotClauses();
-  if (!rejectedClauses.length) {
-    elements.settingRejectedClauseList.innerHTML = '<div class="muted">거절로 제외된 절이 없습니다.</div>';
-    elements.settingClearRejectedClauses.disabled = true;
-    return;
-  }
-
-  elements.settingClearRejectedClauses.disabled = false;
-  elements.settingRejectedClauseList.innerHTML = rejectedClauses
-    .sort(compareSpecbotHits)
-    .map(
-      (item) => `
-        <div class="settings-rejected-row">
-          <div class="settings-rejected-text">
-            <strong>${escapeHtml(item.specNo)}</strong>
-            <span>${escapeHtml(item.clauseId)}</span>
-          </div>
-          <button
-            class="ghost"
-            type="button"
-            data-action="remove-rejected-clause"
-            data-spec-no="${escapeHtml(item.specNo)}"
-            data-clause-id="${escapeHtml(item.clauseId)}"
-          >
-            해제
-          </button>
-        </div>
-      `
-    )
-    .join("");
-
-  elements.settingRejectedClauseList.querySelectorAll("[data-action='remove-rejected-clause']").forEach((button) => {
-    button.addEventListener("click", () => {
-      removeRejectedSpecbotClause(button.dataset.specNo, button.dataset.clauseId);
-    });
-  });
-}
-
-function getSelectedSpecbotDocuments() {
-  return [...elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']:checked")]
-    .map((input) => String(input.value || "").trim())
-    .filter(Boolean);
-}
-
-function updateSpecbotDocumentSelectionCount() {
-  const selectedCount = getSelectedSpecbotDocuments().length;
-  const totalCount = (state.documents || []).length;
-  elements.settingDocumentSelectionCount.textContent = `${selectedCount} / ${totalCount} selected`;
-}
-
-function setAllSpecbotDocuments(checked) {
-  elements.settingDocumentList.querySelectorAll("[data-action='toggle-specbot-doc']").forEach((input) => {
-    input.checked = checked;
-  });
-  updateSpecbotDocumentSelectionCount();
-}
-
-function setSpecbotQueryLoading(isLoading) {
-  const queryStatus = String(state.ui.specbotQueryStatus || "").trim();
-  const label = !isLoading ? "" : queryStatus === "queued" ? "대기 중" : queryStatus === "started" ? "실행 중" : "수행 중";
-  elements.specbotQuery.disabled = isLoading;
-  elements.specbotSpinner.classList.toggle("hidden", !isLoading);
-  elements.runSpecbotLabel.textContent = label;
-  elements.specbotQueryStatus.classList.toggle("hidden", !isLoading);
-}
-
-function getIterationsForDepth(depth) {
-  if (depth === "short") {
-    return 0;
-  }
-  if (depth === "long") {
-    return 2;
-  }
-  return 1;
-}
-
-function getSpecbotDepthFromSettings(settings = {}) {
-  if (settings.queryDepth === "short" || settings.queryDepth === "medium" || settings.queryDepth === "long") {
-    return settings.queryDepth;
-  }
-  const iterations = Number(settings.iterations);
-  if (iterations <= 0) {
-    return "short";
-  }
-  if (iterations >= 2) {
-    return "long";
-  }
-  return "medium";
-}
-
-function applySpecbotDepthSelection(depth) {
-  const normalizedDepth = depth === "short" || depth === "long" ? depth : "medium";
-  (elements.specbotDepthOptions || []).forEach((input) => {
-    input.checked = input.value === normalizedDepth;
-  });
-}
-
-function getSelectedSpecbotDepth() {
-  const selected = (elements.specbotDepthOptions || []).find((input) => input.checked);
-  return selected?.value === "short" || selected?.value === "long" ? selected.value : "medium";
-}
-
-function addRejectedSpecbotClause(specNo, clauseId) {
-  state.ui.specbotSettings = {
-    ...state.ui.specbotSettings,
-    rejectedClauses: dedupeClausePairs([...getRejectedSpecbotClauses(), { specNo, clauseId }]),
-  };
-  persistSessionState();
-  if (state.ui.isSpecbotSettingsOpen) {
-    renderRejectedSpecbotClauses();
-  }
-}
-
-function removeRejectedSpecbotClause(specNo, clauseId) {
-  state.ui.specbotSettings = {
-    ...state.ui.specbotSettings,
-    rejectedClauses: getRejectedSpecbotClauses().filter(
-      (item) => !(item.specNo === specNo && item.clauseId === clauseId)
-    ),
-  };
-  persistSessionState();
-  renderRejectedSpecbotClauses();
-  setMessage(`거절 제외를 해제했습니다: ${specNo} / ${clauseId}`, false);
-}
-
-function clearRejectedSpecbotClauses() {
-  state.ui.specbotSettings = {
-    ...state.ui.specbotSettings,
-    rejectedClauses: [],
-  };
-  persistSessionState();
-  renderRejectedSpecbotClauses();
-  setMessage("거절하여 제외한 절을 모두 해제했습니다.", false);
-}
-
-function removeSpecbotResult(specNo, clauseId) {
-  state.ui.specbotResults = state.ui.specbotResults.filter(
-    (item) => !(item.specNo === specNo && item.clauseId === clauseId)
-  );
-  persistSessionState();
-  renderSpecbotResults();
-}
-
-function clearSpecbotResults() {
-  state.ui.specbotResults = [];
-  persistSessionState();
-  renderSpecbotResults();
-  setMessage("SpecBot 결과를 비웠습니다.", false);
+  await runSpecbotQueryWithController(SPECBOT_QUERY_BUSY_LABEL);
 }
 
 async function exportDocx() {
@@ -4978,368 +3421,6 @@ function clearMessage() {
   }
 }
 
-function clearSelectionNoteUiState() {
-  state.ui.openSelectionNoteIds = new Set();
-  state.ui.selectionNoteOverlayPositions = {};
-  state.ui.selectionSnapshot = null;
-  if (elements.selectionNoteOverlay) {
-    elements.selectionNoteOverlay.innerHTML = "";
-    elements.selectionNoteOverlay.classList.add("hidden");
-    elements.selectionNoteOverlay.setAttribute("aria-hidden", "true");
-  }
-  syncSelectionNoteToggleButtons();
-}
-
-async function apiGet(url) {
-  const { signal, release } = registerRequestController();
-  let response;
-  try {
-    response = await fetch(url, { signal });
-  } catch (error) {
-    release();
-    throw normalizeRequestError(error);
-  }
-  const payload = await parseResponse(response);
-  release();
-  if (!response.ok) {
-    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
-  }
-  return payload;
-}
-
-async function apiPost(url, body) {
-  const { signal, release } = registerRequestController();
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (error) {
-    release();
-    throw normalizeRequestError(error);
-  }
-  const payload = await parseResponse(response);
-  release();
-  if (!response.ok) {
-    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
-  }
-  return payload;
-}
-
-async function apiPostWork(url, body) {
-  const targetUrl = resolveWorkApiUrl(url);
-  const slotId = await reserveLocalWorkSlot();
-  activeLocalWorkSlots.add(slotId);
-  try {
-    const payload = await apiPost(targetUrl, body);
-    if (payload && Object.prototype.hasOwnProperty.call(payload, "success")) {
-      return payload;
-    }
-    return { success: true, data: payload };
-  } finally {
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-  }
-}
-
-async function streamSpecbotQuery(body) {
-  const targetUrl = resolveWorkApiUrl("/api/clause-browser/specbot/query").replace(/\/query$/, "/query-stream");
-  const slotId = await reserveLocalWorkSlot();
-  activeLocalWorkSlots.add(slotId);
-  const { signal, release } = registerRequestController();
-  let response;
-  try {
-    response = await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (error) {
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-    throw normalizeRequestError(error);
-  }
-  if (!response.ok) {
-    const payload = await parseResponse(response);
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
-  }
-
-  const reader = response.body?.getReader();
-  if (!reader) {
-    release();
-    throw new Error("SpecBot query stream is unavailable.");
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalPayload = { hits: [] };
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      let lineBreak = buffer.indexOf("\n");
-      while (lineBreak >= 0) {
-        const line = buffer.slice(0, lineBreak).trim();
-        buffer = buffer.slice(lineBreak + 1);
-        if (line) {
-          const event = JSON.parse(line);
-          finalPayload = applySpecbotStreamEvent(event, finalPayload);
-        }
-        lineBreak = buffer.indexOf("\n");
-      }
-    }
-    const trailing = buffer.trim();
-    if (trailing) {
-      finalPayload = applySpecbotStreamEvent(JSON.parse(trailing), finalPayload);
-    }
-  } catch (error) {
-    throw normalizeRequestError(error);
-  } finally {
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-  }
-  return finalPayload;
-}
-
-async function streamLlmAction(url, body) {
-  const slotId = await reserveLocalWorkSlot();
-  activeLocalWorkSlots.add(slotId);
-  const { signal, release } = registerRequestController();
-  const response = await fetch(resolveWorkApiUrl(`${url}-stream`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  }).catch((error) => {
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    releaseLocalWorkSlot(slotId);
-    throw normalizeRequestError(error);
-  });
-  if (!response.ok) {
-    const payload = await parseResponse(response);
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-    throw new Error(formatErrorMessage(payload.detail || payload || "Request failed"));
-  }
-  const reader = response.body?.getReader();
-  if (!reader) {
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-    throw new Error("LLM action stream is unavailable.");
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalPayload = {};
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      let lineBreak = buffer.indexOf("\n");
-      while (lineBreak >= 0) {
-        const line = buffer.slice(0, lineBreak).trim();
-        buffer = buffer.slice(lineBreak + 1);
-        if (line) {
-          finalPayload = applyLlmActionStreamEvent(JSON.parse(line), finalPayload);
-        }
-        lineBreak = buffer.indexOf("\n");
-      }
-    }
-    const trailing = buffer.trim();
-    if (trailing) {
-      finalPayload = applyLlmActionStreamEvent(JSON.parse(trailing), finalPayload);
-    }
-  } catch (error) {
-    throw normalizeRequestError(error);
-  } finally {
-    release();
-    activeLocalWorkSlots.delete(slotId);
-    await releaseLocalWorkSlot(slotId);
-  }
-  return finalPayload;
-}
-
-function applySpecbotStreamEvent(event, finalPayload) {
-  if (!event || typeof event !== "object") {
-    return finalPayload;
-  }
-  if (event.type === "status") {
-    if (event.status === "queued") {
-      state.ui.specbotQueryStatus = "queued";
-      setSpecbotQueryLoading(true);
-      const queuedPosition = Number(event.queuedPosition || 0);
-      setMessage(
-        queuedPosition > 0
-          ? `SpecBot query 대기 중: 대기열 ${queuedPosition}번째`
-          : "SpecBot query 대기 중입니다.",
-        false
-      );
-    } else if (event.status === "started") {
-      state.ui.specbotQueryStatus = "started";
-      setSpecbotQueryLoading(true);
-      setMessage("SpecBot query 실행 중입니다.", false);
-    }
-    return finalPayload;
-  }
-  if (event.type === "hit") {
-    const exclusions = buildSpecbotExclusions();
-    state.ui.specbotResults = mergeSpecbotHits(state.ui.specbotResults, [event.hit], exclusions);
-    persistSessionState();
-    renderSpecbotResults();
-    state.ui.specbotQueryStatus = "started";
-    setSpecbotQueryLoading(true);
-    setMessage(`SpecBot query 진행 중: ${event.hit?.specNo || ""} / ${event.hit?.clauseId || ""}`, false);
-    return {
-      ...finalPayload,
-      hits: mergeSpecbotHits(finalPayload.hits || [], [event.hit], exclusions),
-    };
-  }
-  if (event.type === "hits") {
-    const exclusions = buildSpecbotExclusions();
-    state.ui.specbotResults = mergeSpecbotHits(state.ui.specbotResults, event.hits || [], exclusions);
-    persistSessionState();
-    renderSpecbotResults();
-    state.ui.specbotQueryStatus = "started";
-    setSpecbotQueryLoading(true);
-    setMessage(`SpecBot query 진행 중: iteration ${event.iteration}`, false);
-    return {
-      ...finalPayload,
-      hits: mergeSpecbotHits(finalPayload.hits || [], event.hits || [], exclusions),
-    };
-  }
-  if (event.type === "done") {
-    return { ...finalPayload, ...event };
-  }
-  if (event.type === "error") {
-    throw new Error(formatErrorMessage(event.detail || `Request failed (${event.status || "error"})`));
-  }
-  return finalPayload;
-}
-
-function applyLlmActionStreamEvent(event, finalPayload) {
-  if (!event || typeof event !== "object") {
-    return finalPayload;
-  }
-  if (event.type === "status") {
-    state.ui.translationTask = {
-      ...(state.ui.translationTask || {}),
-      status: String(event.status || ""),
-      queuedPosition: Number(event.queuedPosition || 0),
-    };
-    renderTranslationStatus();
-    return finalPayload;
-  }
-  if (event.type === "done") {
-    state.ui.translationTask = {
-      ...(state.ui.translationTask || {}),
-      status: "done",
-      queuedPosition: 0,
-    };
-    renderTranslationStatus();
-    return event.result || finalPayload;
-  }
-  if (event.type === "error") {
-    throw new Error(formatErrorMessage(event.detail || `Request failed (${event.status || "error"})`));
-  }
-  return finalPayload;
-}
-
-function mergeSpecbotHits(existingHits, incomingHits, exclusions = buildSpecbotExclusions()) {
-  const merged = new Map(((existingHits || []).map((item) => [`${item.specNo}:${item.clauseId}`, item])));
-  for (const hit of filterSpecbotHitsByExclusions(incomingHits || [], exclusions)) {
-    const key = `${hit.specNo}:${hit.clauseId}`;
-    if (!merged.has(key)) {
-      merged.set(key, hit);
-    }
-  }
-  return [...merged.values()].sort(compareSpecbotHits);
-}
-
-function resolveWorkApiUrl(url) {
-  const baseUrl = String(state.config?.queryApiUrl || "").trim();
-  if (!baseUrl) {
-    throw new Error("Query API URL is not configured.");
-  }
-  if (url === "/api/clause-browser/specbot/query") {
-    return `${baseUrl}/query`;
-  }
-  if (url === "/api/clause-browser/llm-actions") {
-    return `${baseUrl}/llm-actions`;
-  }
-  if (url === "/api/clause-browser/llm-actions-stream") {
-    return `${baseUrl}/llm-actions-stream`;
-  }
-  return url;
-}
-
-async function parseResponse(response) {
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return await response.json();
-  }
-  const text = await response.text();
-  return { detail: text || `HTTP ${response.status}` };
-}
-
-function formatErrorMessage(value) {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return "Request failed";
-    }
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try {
-        return formatErrorMessage(JSON.parse(trimmed));
-      } catch (_error) {
-        return trimmed;
-      }
-    }
-    return trimmed;
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => formatErrorMessage(item)).filter(Boolean).join("; ") || "Request failed";
-  }
-  if (value && typeof value === "object") {
-    if ("detail" in value) {
-      return formatErrorMessage(value.detail);
-    }
-    if ("msg" in value) {
-      const location = Array.isArray(value.loc) ? value.loc.join(".") : "";
-      const prefix = location ? `${location}: ` : "";
-      return `${prefix}${String(value.msg)}`;
-    }
-    if ("message" in value) {
-      return formatErrorMessage(value.message);
-    }
-    const parts = Object.entries(value)
-      .map(([key, item]) => `${key}: ${formatErrorMessage(item)}`)
-      .filter((item) => item && !item.endsWith(": "));
-    return parts.join("; ") || "Request failed";
-  }
-  if (value == null) {
-    return "Request failed";
-  }
-  return String(value);
-}
-
 function populateSelect(element, items) {
   element.innerHTML = items.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("");
 }
@@ -5369,123 +3450,6 @@ function debounce(fn, wait) {
   };
 }
 
-function registerRequestController() {
-  const controller = new AbortController();
-  activeRequestControllers.add(controller);
-  return {
-    signal: controller.signal,
-    release: () => activeRequestControllers.delete(controller),
-  };
-}
-
-function abortActiveRequests() {
-  activeRequestControllers.forEach((controller) => controller.abort());
-  activeRequestControllers.clear();
-  const slotIds = [...activeLocalWorkSlots];
-  activeLocalWorkSlots.clear();
-  slotIds.forEach((slotId) => {
-    void releaseLocalWorkSlot(slotId);
-  });
-}
-
-function normalizeRequestError(error) {
-  if (error?.name === "AbortError") {
-    return new Error("__REQUEST_ABORTED__");
-  }
-  return error;
-}
-
-function isAbortedRequestError(error) {
-  return error instanceof Error && error.message === "__REQUEST_ABORTED__";
-}
-
-async function reserveLocalWorkSlot() {
-  return await withLocalWorkLock(() => {
-    const entries = readLocalWorkSlots();
-    if (entries.length >= LOCAL_WORK_SLOT_LIMIT) {
-      throw new Error("현재 브라우저 작업 대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.");
-    }
-    const slotId = `${LOCAL_WORK_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-    entries.push({ id: slotId, tabId: LOCAL_WORK_TAB_ID, createdAt: Date.now() });
-    writeLocalWorkSlots(entries);
-    return slotId;
-  });
-}
-
-async function releaseLocalWorkSlot(slotId) {
-  await withLocalWorkLock(() => {
-    const entries = readLocalWorkSlots().filter((entry) => entry.id !== slotId);
-    writeLocalWorkSlots(entries);
-    return null;
-  });
-}
-
-function readLocalWorkSlots() {
-  const raw = localStorage.getItem(LOCAL_WORK_STATE_KEY);
-  let entries = [];
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        entries = parsed;
-      }
-    } catch (_error) {
-      entries = [];
-    }
-  }
-  const now = Date.now();
-  return entries.filter((entry) => entry && entry.id && Number(entry.createdAt) > now - LOCAL_WORK_SLOT_TTL_MS);
-}
-
-function writeLocalWorkSlots(entries) {
-  localStorage.setItem(LOCAL_WORK_STATE_KEY, JSON.stringify(entries));
-}
-
-async function withLocalWorkLock(fn) {
-  const lockId = `${LOCAL_WORK_TAB_ID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  while (true) {
-    const now = Date.now();
-    const raw = localStorage.getItem(LOCAL_WORK_LOCK_KEY);
-    if (raw) {
-      try {
-        const lock = JSON.parse(raw);
-        if (lock && Number(lock.expiresAt) > now && lock.id !== lockId) {
-          await wait(25);
-          continue;
-        }
-      } catch (_error) {
-        // Ignore malformed lock and take over below.
-      }
-    }
-    localStorage.setItem(
-      LOCAL_WORK_LOCK_KEY,
-      JSON.stringify({ id: lockId, expiresAt: now + LOCAL_WORK_LOCK_TTL_MS })
-    );
-    try {
-      const verify = JSON.parse(localStorage.getItem(LOCAL_WORK_LOCK_KEY) || "{}");
-      if (verify.id !== lockId) {
-        await wait(25);
-        continue;
-      }
-      return fn();
-    } finally {
-      const current = localStorage.getItem(LOCAL_WORK_LOCK_KEY);
-      try {
-        const parsed = current ? JSON.parse(current) : {};
-        if (parsed.id === lockId) {
-          localStorage.removeItem(LOCAL_WORK_LOCK_KEY);
-        }
-      } catch (_error) {
-        localStorage.removeItem(LOCAL_WORK_LOCK_KEY);
-      }
-    }
-  }
-}
-
-function wait(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function persistSessionState() {
   if (sessionPersistTimer) {
     window.clearTimeout(sessionPersistTimer);
@@ -5501,7 +3465,7 @@ function flushPersistSessionState() {
     window.clearTimeout(sessionPersistTimer);
     sessionPersistTimer = 0;
   }
-  const payload = getWorkspaceSnapshot();
+  const payload = createWorkspaceSnapshot(state);
   try {
     window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(payload));
   } catch (_error) {
@@ -5511,23 +3475,7 @@ function flushPersistSessionState() {
 }
 
 function getWorkspaceSnapshot() {
-  return {
-    activeSpecNo: state.activeSpecNo,
-    loadedRoots: state.loadedRoots,
-    expandedKeys: [...state.ui.expandedKeys],
-    focusedKey: state.ui.focusedKey,
-    viewportKey: state.ui.viewportKey,
-    collapsedSpecs: [...state.ui.collapsedSpecs],
-    collapsedLoadedSpecs: [...state.ui.collapsedLoadedSpecs],
-    clauseQuery: state.ui.clauseQuery,
-    specbotQueryText: state.ui.specbotQueryText || "",
-    specbotSettings: state.ui.specbotSettings,
-    boardScope: state.ui.boardScope,
-    specbotResults: state.ui.specbotResults,
-    specbotResultsCollapsed: Boolean(state.ui.specbotResultsCollapsed),
-    notes: state.ui.notes || [],
-    highlights: state.ui.highlights || [],
-  };
+  return createWorkspaceSnapshot(state);
 }
 
 function restoreSessionState() {
@@ -5536,38 +3484,32 @@ function restoreSessionState() {
     if (!raw) {
       return;
     }
-    const payload = JSON.parse(raw);
-    state.activeSpecNo = payload.activeSpecNo || "";
-    state.loadedRoots = ensureForestStableBlockIds(Array.isArray(payload.loadedRoots) ? payload.loadedRoots : []);
-    state.ui.expandedKeys = new Set(Array.isArray(payload.expandedKeys) ? payload.expandedKeys : []);
-    state.ui.focusedKey = payload.focusedKey || "";
-    state.ui.viewportKey = payload.viewportKey || "";
-    state.ui.collapsedSpecs = new Set(Array.isArray(payload.collapsedSpecs) ? payload.collapsedSpecs : []);
-    state.ui.collapsedLoadedSpecs = new Set(
-      Array.isArray(payload.collapsedLoadedSpecs) ? payload.collapsedLoadedSpecs : []
-    );
-    state.ui.clauseQuery = payload.clauseQuery || "";
-    state.ui.specbotQueryText = payload.specbotQueryText || "";
-    state.ui.specbotResultsCollapsed = Boolean(payload.specbotResultsCollapsed);
-    state.ui.notes = Array.isArray(payload.notes) ? payload.notes : [];
+    const payload = normalizeWorkspacePayload(JSON.parse(raw), {
+      ensureForestStableBlockIds,
+      normalizeRejectedClauses: getNormalizedRejectedClauses,
+      sortSpecbotHits: (items) => [...items].sort(compareSpecbotHits),
+    });
+    state.activeSpecNo = payload.activeSpecNo;
+    state.loadedRoots = payload.loadedRoots;
+    state.ui.expandedKeys = payload.expandedKeys;
+    state.ui.focusedKey = payload.focusedKey;
+    state.ui.viewportKey = payload.viewportKey;
+    state.ui.collapsedSpecs = payload.collapsedSpecs;
+    state.ui.collapsedLoadedSpecs = payload.collapsedLoadedSpecs;
+    state.ui.clauseQuery = payload.clauseQuery;
+    state.ui.specbotQueryText = payload.specbotQueryText;
+    state.ui.specbotResultsCollapsed = payload.specbotResultsCollapsed;
+    state.ui.notes = payload.notes;
     console.debug("[selection-note] restore session state", {
       noteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
     });
-    state.ui.highlights = Array.isArray(payload.highlights) ? payload.highlights : [];
+    state.ui.highlights = payload.highlights;
     syncAllAnnotationBlockReferences();
-    if (payload.specbotSettings && typeof payload.specbotSettings === "object") {
-      state.ui.specbotSettings = {
-        ...payload.specbotSettings,
-        rejectedClauses: getNormalizedRejectedClauses(payload.specbotSettings.rejectedClauses),
-      };
+    if (payload.specbotSettings) {
+      state.ui.specbotSettings = payload.specbotSettings;
     }
-    if (payload.boardScope && typeof payload.boardScope === "object") {
-      state.ui.boardScope = {
-        releaseData: String(payload.boardScope.releaseData || "").trim(),
-        release: String(payload.boardScope.release || "").trim(),
-      };
-    }
-    state.ui.specbotResults = Array.isArray(payload.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
+    state.ui.boardScope = payload.boardScope;
+    state.ui.specbotResults = payload.specbotResults;
   } catch (_error) {
     // Ignore malformed saved state.
   }
@@ -5578,33 +3520,32 @@ async function applyWorkspaceSnapshot(payload) {
     incomingNoteIds: Array.isArray(payload?.notes) ? payload.notes.filter((item) => item?.type === "selection").map((item) => item.id) : [],
     currentNoteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
   });
-  state.activeSpecNo = payload?.activeSpecNo || "";
-  state.loadedRoots = ensureForestStableBlockIds(Array.isArray(payload?.loadedRoots) ? payload.loadedRoots : []);
-  state.ui.expandedKeys = new Set(Array.isArray(payload?.expandedKeys) ? payload.expandedKeys : []);
-  state.ui.focusedKey = payload?.focusedKey || "";
-  state.ui.viewportKey = payload?.viewportKey || "";
-  state.ui.collapsedSpecs = new Set(Array.isArray(payload?.collapsedSpecs) ? payload.collapsedSpecs : []);
-  state.ui.collapsedLoadedSpecs = new Set(Array.isArray(payload?.collapsedLoadedSpecs) ? payload.collapsedLoadedSpecs : []);
-  state.ui.clauseQuery = payload?.clauseQuery || "";
-  state.ui.specbotQueryText = payload?.specbotQueryText || "";
-  state.ui.specbotResultsCollapsed = Boolean(payload?.specbotResultsCollapsed);
-  state.ui.notes = Array.isArray(payload?.notes) ? payload.notes : [];
+  const normalizedPayload = normalizeWorkspacePayload(payload, {
+    ensureForestStableBlockIds,
+    normalizeRejectedClauses: getNormalizedRejectedClauses,
+    sortSpecbotHits: (items) => [...items].sort(compareSpecbotHits),
+  });
+  state.activeSpecNo = normalizedPayload.activeSpecNo;
+  state.loadedRoots = normalizedPayload.loadedRoots;
+  state.ui.expandedKeys = normalizedPayload.expandedKeys;
+  state.ui.focusedKey = normalizedPayload.focusedKey;
+  state.ui.viewportKey = normalizedPayload.viewportKey;
+  state.ui.collapsedSpecs = normalizedPayload.collapsedSpecs;
+  state.ui.collapsedLoadedSpecs = normalizedPayload.collapsedLoadedSpecs;
+  state.ui.clauseQuery = normalizedPayload.clauseQuery;
+  state.ui.specbotQueryText = normalizedPayload.specbotQueryText;
+  state.ui.specbotResultsCollapsed = normalizedPayload.specbotResultsCollapsed;
+  state.ui.notes = normalizedPayload.notes;
   clearSelectionNoteUiState();
   console.debug("[selection-note] apply workspace snapshot result", {
     appliedNoteIds: (state.ui.notes || []).filter((item) => item.type === "selection").map((item) => item.id),
   });
-  state.ui.highlights = Array.isArray(payload?.highlights) ? payload.highlights : [];
+  state.ui.highlights = normalizedPayload.highlights;
   syncAllAnnotationBlockReferences();
-  state.ui.specbotResults = Array.isArray(payload?.specbotResults) ? [...payload.specbotResults].sort(compareSpecbotHits) : [];
-  state.ui.boardScope = {
-    releaseData: String(payload?.boardScope?.releaseData || "").trim(),
-    release: String(payload?.boardScope?.release || "").trim(),
-  };
-  if (payload?.specbotSettings && typeof payload.specbotSettings === "object") {
-    state.ui.specbotSettings = {
-      ...payload.specbotSettings,
-      rejectedClauses: getNormalizedRejectedClauses(payload.specbotSettings.rejectedClauses),
-    };
+  state.ui.specbotResults = normalizedPayload.specbotResults;
+  state.ui.boardScope = normalizedPayload.boardScope;
+  if (normalizedPayload.specbotSettings) {
+    state.ui.specbotSettings = normalizedPayload.specbotSettings;
   }
   if (state.activeSpecNo) {
     await ensureClauseCatalog(state.activeSpecNo);
@@ -5626,23 +3567,12 @@ async function applyWorkspaceSnapshot(payload) {
 }
 
 async function resetWorkspace() {
-  await applyWorkspaceSnapshot({
-    activeSpecNo: "",
-    loadedRoots: [],
-    expandedKeys: [],
-    focusedKey: "",
-    viewportKey: "",
-    collapsedSpecs: [],
-    collapsedLoadedSpecs: [],
-    clauseQuery: "",
-    specbotQueryText: "",
-    specbotResultsCollapsed: false,
-    notes: [],
-    highlights: [],
-    specbotResults: [],
-    specbotSettings: state.ui.specbotSettings,
-    boardScope: state.ui.boardScope,
-  });
+  await applyWorkspaceSnapshot(
+    createEmptyWorkspaceSnapshot({
+      specbotSettings: state.ui.specbotSettings,
+      boardScope: state.ui.boardScope,
+    })
+  );
 }
 
 export {

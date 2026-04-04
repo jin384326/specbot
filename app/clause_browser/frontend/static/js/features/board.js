@@ -9,6 +9,12 @@ import {
   resetWorkspace,
   setBoardScope,
 } from "../core.js";
+import {
+  clearBoardEditorSession,
+  readBoardEditorSession,
+  shouldPreferSessionWorkspace,
+  writeBoardEditorSession,
+} from "../utils/board-session.js";
 
 const EDITOR_ID_KEY = "specbot-board-editor-id-v1";
 const EDITOR_LABEL_KEY = "specbot-board-editor-label-v1";
@@ -492,6 +498,7 @@ async function openDraftPost(options = {}) {
   showEditorScreen();
   applyEditorMode("edit");
   stopHeartbeat();
+  writeBoardEditorSession({ postId: "", mode: "draft" });
   await resetWorkspace();
   navigateBoard("draft", { replace: options.replace === true });
 }
@@ -505,15 +512,21 @@ async function openPostInEditor(post, options = {}) {
   boardState.currentBoardId = post.boardId || boardState.currentBoardId || "default";
   renderBoardSelector();
   boardState.isDraft = false;
+  const sessionSnapshot = getWorkspaceSnapshot();
+  const session = readBoardEditorSession();
+  const preferredWorkspaceState = shouldPreferSessionWorkspace(session, post.postId, "edit")
+    ? sessionSnapshot
+    : (post.workspaceState || {});
   boardElements().boardPostTitle.value = post.title || "";
   renderBoardScopeOptions({ releaseData: post.releaseData, release: post.release });
   showEditorScreen();
   applyEditorMode("edit");
   await resetWorkspace();
   await applyWorkspaceSnapshot({
-    ...(post.workspaceState || {}),
+    ...preferredWorkspaceState,
     boardScope: { releaseData: post.releaseData, release: post.release },
   });
+  writeBoardEditorSession({ postId: post.postId, mode: "edit" });
   startHeartbeat();
   navigateBoard("edit", { postId: post.postId, replace: options.replace === true });
 }
@@ -537,6 +550,7 @@ async function openPostInViewer(post, options = {}) {
     ...(post.workspaceState || {}),
     boardScope: { releaseData: post.releaseData, release: post.release },
   });
+  writeBoardEditorSession({ postId: post.postId, mode: "view" });
   navigateBoard("view", { postId: post.postId, replace: options.replace === true });
 }
 
@@ -632,6 +646,7 @@ async function deletePost(postId) {
     stopHeartbeat();
     boardState.currentPostId = "";
     boardState.currentLock = null;
+    clearBoardEditorSession();
     await resetWorkspace();
     showBoardScreen();
   }
@@ -658,6 +673,7 @@ async function closeEditor() {
   boardState.currentPostId = "";
   boardState.currentLock = null;
   boardState.isDraft = false;
+  clearBoardEditorSession();
   showBoardScreen();
   navigateBoard("list");
   await refreshBoardPosts();

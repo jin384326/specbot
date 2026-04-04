@@ -37,8 +37,8 @@ function initializeClauseEditors({
         hideNodeMenu();
         showSelectionMenu(event.clientX || 0, event.clientY || 0);
       },
-      onSelectionChange: () => {
-        updateSelectionStateFromEditorSelection();
+      onSelectionChange: (editor) => {
+        updateSelectionStateFromEditorSelection(editor);
       },
       onChange: (html) => {
         if (!readOnly) {

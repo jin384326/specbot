@@ -1383,6 +1383,18 @@ button:disabled {
   transition: outline-color 180ms ease, box-shadow 180ms ease;
 }
 
+.tox-tinymce-aux,
+.tox-silver-sink,
+.tox-pop {
+  z-index: 5000 !important;
+}
+
+body[data-board-mode="view"] .tox-tinymce-aux,
+body[data-board-mode="view"] .tox-silver-sink,
+body[data-board-mode="view"] .tox-pop {
+  display: none !important;
+}
+
 .editor-section {
   display: block;
 }

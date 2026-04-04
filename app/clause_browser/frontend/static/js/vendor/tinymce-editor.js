@@ -82409,9 +82409,15 @@ async function mountClauseEditor(element, { html = "", readOnly = false, onChang
   }
   const existing = editorMap.get(element);
   if (existing) {
-    existing.setContent(html || "");
-    existing.mode?.set?.(readOnly ? "readonly" : "design");
-    return existing;
+    const currentMode = existing.mode?.isReadOnly?.() ? "readonly" : "design";
+    if ((readOnly ? "readonly" : "design") !== currentMode) {
+      await existing.remove();
+      editorMap.delete(element);
+    } else {
+      existing.setContent(html || "");
+      existing.mode?.set?.(readOnly ? "readonly" : "design");
+      return existing;
+    }
   }
   const editors = await import_tinymce.default.init({
     target: element,
@@ -82436,7 +82442,7 @@ async function mountClauseEditor(element, { html = "", readOnly = false, onChang
     forced_root_block: "p",
     valid_elements: "*[*]",
     valid_children: "+body[style]",
-    table_toolbar: "tableprops tabledelete | tableinsertrowbefore tableinsertrowafter tabledeleterow | tableinsertcolbefore tableinsertcolafter tabledeletecol",
+    table_toolbar: readOnly ? false : "tableprops tabledelete | tableinsertrowbefore tableinsertrowafter tabledeleterow | tableinsertcolbefore tableinsertcolafter tabledeletecol",
     content_style: `
       body { font-family: inherit; font-size: 15px; line-height: 1.7; color: #1f3120; }
       p { margin: 0 0 10px; }
