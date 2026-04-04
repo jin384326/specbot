@@ -321,6 +321,143 @@ def test_documents_endpoint_can_filter_by_clause_and_body_text_before_document_s
     assert [item["specNo"] for item in by_table_text] == ["23502"]
 
 
+def test_clause_repository_sorts_clauses_by_clause_path_not_source_order(tmp_path: Path) -> None:
+    corpus_path = tmp_path / "browser-corpus.jsonl"
+    records = [
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2",
+            "clause_title": "Registration Management procedures",
+            "parent_clause_id": "",
+            "clause_path": ["4", "4.2", "4.2.2"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 115,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.2",
+            "clause_title": "Registration procedures",
+            "parent_clause_id": "4.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.2"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 118,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.1",
+            "clause_title": "General",
+            "parent_clause_id": "4.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.1"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 127,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.2.1",
+            "clause_title": "General",
+            "parent_clause_id": "4.2.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.2", "4.2.2.2.1"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 119,
+        },
+    ]
+    corpus_path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+    repository = ClauseRepository(corpus_path, load_workers=1)
+
+    payload = repository.list_clauses("23502", include_all=True, release_data="2025-12", release="Rel-18")
+    clause_ids = [item.clause_id for item in payload if item.clause_id.startswith("4.2.2")]
+
+    assert clause_ids == ["4.2.2", "4.2.2.1", "4.2.2.2", "4.2.2.2.1"]
+
+
+def test_clause_repository_subtree_children_follow_clause_path_order(tmp_path: Path) -> None:
+    corpus_path = tmp_path / "browser-corpus.jsonl"
+    records = [
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2",
+            "clause_title": "Registration Management procedures",
+            "parent_clause_id": "",
+            "clause_path": ["4", "4.2", "4.2.2"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 115,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.3",
+            "clause_title": "Deregistration procedures",
+            "parent_clause_id": "4.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.3"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 120,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.2",
+            "clause_title": "Registration procedures",
+            "parent_clause_id": "4.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.2"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 118,
+        },
+        {
+            "doc_type": "clause_doc",
+            "spec_no": "23502",
+            "spec_title": "Procedures for the 5G System (5GS); Stage 2",
+            "release": "Rel-18",
+            "release_data": "2025-12",
+            "clause_id": "4.2.2.1",
+            "clause_title": "General",
+            "parent_clause_id": "4.2.2",
+            "clause_path": ["4", "4.2", "4.2.2", "4.2.2.1"],
+            "text": "",
+            "source_file": str(tmp_path / "23502.docx"),
+            "order_in_source": 127,
+        },
+    ]
+    corpus_path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+    repository = ClauseRepository(corpus_path, load_workers=1)
+
+    payload = repository.get_subtree("23502", "4.2.2", release_data="2025-12", release="Rel-18").to_dict()
+
+    assert [item["clauseId"] for item in payload["children"]] == ["4.2.2.1", "4.2.2.2", "4.2.2.3"]
+
+
 def test_clause_list_search_matches_clause_body_text(tmp_path: Path) -> None:
     app = build_app(tmp_path)
     endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses")

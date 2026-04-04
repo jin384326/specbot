@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
@@ -116,7 +117,7 @@ class ClauseRepository:
             raise KeyError(f"Unknown document: {spec_no}")
 
         normalized = query.strip().casefold()
-        candidates = sorted(records.values(), key=lambda item: item.order_in_source)
+        candidates = sorted(records.values(), key=self._clause_sort_key)
         if normalized:
             candidates = [
                 item
@@ -283,7 +284,7 @@ class ClauseRepository:
                 if record.parent_clause_id and record.parent_clause_id in self._records_by_document[document_key]:
                     self._children_by_document[document_key][record.parent_clause_id].append(record.clause_id)
             for child_ids in self._children_by_document[document_key].values():
-                child_ids.sort(key=lambda clause_id: self._records_by_document[document_key][clause_id].order_in_source)
+                child_ids.sort(key=lambda clause_id: self._clause_sort_key(self._records_by_document[document_key][clause_id]))
 
             top_level_count = sum(
                 1
@@ -421,6 +422,25 @@ class ClauseRepository:
             blocks=record.blocks,
             children=children,
         )
+
+    @classmethod
+    def _clause_sort_key(cls, record: ClauseRecord) -> tuple[tuple[tuple[tuple[int, object], ...], ...], int, str]:
+        path = tuple(cls._normalize_clause_part(part) for part in (record.clause_path or (record.clause_id,)))
+        return (path, int(record.order_in_source or 0), str(record.clause_id or ""))
+
+    @staticmethod
+    def _normalize_clause_part(part: str) -> tuple[tuple[int, object], ...]:
+        normalized: list[tuple[int, object]] = []
+        for token in str(part).split("."):
+            match = re.match(r"^(\d+)(.*)$", token)
+            if match:
+                normalized.append((0, int(match.group(1))))
+                suffix = match.group(2)
+                if suffix:
+                    normalized.append((1, suffix))
+            else:
+                normalized.append((1, token))
+        return tuple(normalized)
 
     @staticmethod
     def _preview(text: str, max_chars: int = 180) -> str:
