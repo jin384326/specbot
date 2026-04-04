@@ -1199,6 +1199,14 @@ function renderTranslationStatus() {
   `;
 }
 
+function clearTransientActivityUi() {
+  state.ui.specbotQueryStatus = "";
+  state.ui.translationJob = null;
+  state.ui.translationTask = null;
+  setSpecbotQueryLoading(false);
+  renderTranslationStatus();
+}
+
 function renderBlocks(node) {
   const blocks = node.blocks || [];
   if (!blocks.length) {
@@ -3600,6 +3608,7 @@ export {
   exportDocx,
   openNoticeModal,
   clearMessage,
+  clearTransientActivityUi,
   clearSelectionNoteUiState,
   runSelectionAction,
   toggleSelectionHighlight,
@@ -3610,6 +3619,7 @@ export {
   handleSelectionChange,
   hideSelectionMenu,
   hideNodeMenu,
+  abortActiveRequests,
   addParentClause,
   setAllSpecbotDocuments,
   debounce,

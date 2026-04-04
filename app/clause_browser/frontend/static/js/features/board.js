@@ -1,6 +1,8 @@
 import {
   applyWorkspaceSnapshot,
+  abortActiveRequests,
   clearMessage,
+  clearTransientActivityUi,
   clearSelectionNoteUiState,
   state,
   getBoardScope,
@@ -484,7 +486,9 @@ async function openExistingPostReadOnly(postId, options = {}) {
 }
 
 async function openDraftPost(options = {}) {
+  abortActiveRequests();
   clearMessage();
+  clearTransientActivityUi();
   clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = "";
@@ -504,7 +508,9 @@ async function openDraftPost(options = {}) {
 }
 
 async function openPostInEditor(post, options = {}) {
+  abortActiveRequests();
   clearMessage();
+  clearTransientActivityUi();
   clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
@@ -532,7 +538,9 @@ async function openPostInEditor(post, options = {}) {
 }
 
 async function openPostInViewer(post, options = {}) {
+  abortActiveRequests();
   clearMessage();
+  clearTransientActivityUi();
   clearSelectionNoteUiState();
   clearAutosaveTimer();
   boardState.currentPostId = post.postId;
@@ -655,7 +663,9 @@ async function deletePost(postId) {
 }
 
 async function closeEditor() {
+  abortActiveRequests();
   clearMessage();
+  clearTransientActivityUi();
   clearSelectionNoteUiState();
   clearAutosaveTimer();
   stopHeartbeat();
