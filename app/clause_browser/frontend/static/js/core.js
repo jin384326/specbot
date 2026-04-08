@@ -492,8 +492,13 @@ function handleGlobalMouseup() {
 async function loadConfig() {
   const response = await apiGet("/api/clause-browser/config");
   state.config = response.data;
-  state.ui.specbotSettings = { ...response.data.specbotDefaults };
+  state.ui.specbotSettings = getDefaultSpecbotSettings();
   applySpecbotSettingsToForm();
+}
+
+function getDefaultSpecbotSettings() {
+  const defaults = state.config?.specbotDefaults;
+  return defaults && typeof defaults === "object" ? { ...defaults } : {};
 }
 
 function getBoardScope() {
@@ -3714,7 +3719,7 @@ async function applyWorkspaceSnapshot(payload) {
 async function resetWorkspace() {
   await applyWorkspaceSnapshot(
     createEmptyWorkspaceSnapshot({
-      specbotSettings: state.ui.specbotSettings,
+      specbotSettings: getDefaultSpecbotSettings(),
       boardScope: state.ui.boardScope,
     })
   );
