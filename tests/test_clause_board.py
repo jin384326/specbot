@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 
-from app.clause_browser.backend.board_api import BoardCreatePayload, create_board_router
+from app.clause_browser.backend.board_api import BoardAdminDeletePayload, BoardCreatePayload, BoardDeletePayload, create_board_router
 from app.clause_browser.backend.board_repository import BoardDeletionError, BoardLockManager, BoardPostRepository, LockConflictError
 
 
@@ -215,3 +215,118 @@ def test_board_router_rejects_deleting_non_empty_board(tmp_path: Path) -> None:
         delete_board_endpoint(created.board_id)
 
     assert getattr(exc_info.value, "status_code", None) == 409
+
+
+def test_board_router_rejects_deleting_post_without_admin_password(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CLAUSE_BROWSER_ADMIN_PASSWORD", raising=False)
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    locks = BoardLockManager(ttl_seconds=120)
+    router = create_board_router(repository=repository, locks=locks)
+    created = repository.create_post(
+        title="Delete me",
+        board_id="default",
+        release_data="2025-12",
+        release="Rel-18",
+    )
+    delete_post_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/board/posts/{post_id}/delete" and "POST" in route.methods
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        delete_post_endpoint(
+            created.post_id,
+            BoardDeletePayload(editorId="editor-a", editorLabel="Alice", adminPassword="secret"),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 503
+
+
+def test_board_router_rejects_deleting_post_with_wrong_admin_password(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUSE_BROWSER_ADMIN_PASSWORD", "correct-password")
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    locks = BoardLockManager(ttl_seconds=120)
+    router = create_board_router(repository=repository, locks=locks)
+    created = repository.create_post(
+        title="Delete me",
+        board_id="default",
+        release_data="2025-12",
+        release="Rel-18",
+    )
+    delete_post_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/board/posts/{post_id}/delete" and "POST" in route.methods
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        delete_post_endpoint(
+            created.post_id,
+            BoardDeletePayload(editorId="editor-a", editorLabel="Alice", adminPassword="wrong-password"),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+
+def test_board_router_deletes_post_with_valid_admin_password(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUSE_BROWSER_ADMIN_PASSWORD", "correct-password")
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    locks = BoardLockManager(ttl_seconds=120)
+    router = create_board_router(repository=repository, locks=locks)
+    created = repository.create_post(
+        title="Delete me",
+        board_id="default",
+        release_data="2025-12",
+        release="Rel-18",
+    )
+    delete_post_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/board/posts/{post_id}/delete" and "POST" in route.methods
+    )
+
+    response = delete_post_endpoint(
+        created.post_id,
+        BoardDeletePayload(editorId="editor-a", editorLabel="Alice", adminPassword="correct-password"),
+    )
+
+    assert response["data"]["deleted"] is True
+    with pytest.raises(KeyError):
+        repository.get_post(created.post_id)
+
+
+def test_board_router_rejects_deleting_board_with_wrong_admin_password(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUSE_BROWSER_ADMIN_PASSWORD", "correct-password")
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    locks = BoardLockManager(ttl_seconds=120)
+    router = create_board_router(repository=repository, locks=locks)
+    created = repository.create_board(name="To Delete")
+    delete_board_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/board/boards/{board_id}/delete" and "POST" in route.methods
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        delete_board_endpoint(created.board_id, BoardAdminDeletePayload(adminPassword="wrong-password"))
+
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+
+def test_board_router_deletes_board_with_valid_admin_password(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CLAUSE_BROWSER_ADMIN_PASSWORD", "correct-password")
+    repository = BoardPostRepository(tmp_path / "posts.json")
+    locks = BoardLockManager(ttl_seconds=120)
+    router = create_board_router(repository=repository, locks=locks)
+    created = repository.create_board(name="To Delete")
+    delete_board_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/clause-browser/board/boards/{board_id}/delete" and "POST" in route.methods
+    )
+
+    response = delete_board_endpoint(created.board_id, BoardAdminDeletePayload(adminPassword="correct-password"))
+
+    assert response["data"]["deleted"] is True
+    assert [item.board_id for item in repository.list_boards()] == ["default"]

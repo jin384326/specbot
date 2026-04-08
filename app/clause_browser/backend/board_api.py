@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -11,6 +12,14 @@ from app.clause_browser.backend.board_repository import BoardDeletionError, Boar
 class BoardLockPayload(BaseModel):
     editorId: str = Field(min_length=1, max_length=120)
     editorLabel: str = Field(default="Anonymous", min_length=1, max_length=120)
+
+
+class BoardAdminDeletePayload(BaseModel):
+    adminPassword: str = Field(min_length=1, max_length=200)
+
+
+class BoardDeletePayload(BoardLockPayload):
+    adminPassword: str = Field(min_length=1, max_length=200)
 
 
 class BoardCreatePayload(BoardLockPayload):
@@ -35,6 +44,13 @@ class BoardListCreatePayload(BaseModel):
 def create_board_router(*, repository: BoardPostRepository, locks: BoardLockManager) -> APIRouter:
     router = APIRouter(prefix="/api/clause-browser/board", tags=["clause-board"])
 
+    def require_admin_password(admin_password: str) -> None:
+        configured_password = str(os.environ.get("CLAUSE_BROWSER_ADMIN_PASSWORD") or "").strip()
+        if not configured_password:
+            raise HTTPException(status_code=503, detail={"message": "관리자 삭제 비밀번호가 설정되지 않았습니다."})
+        if str(admin_password or "") != configured_password:
+            raise HTTPException(status_code=403, detail={"message": "관리자 비밀번호가 올바르지 않습니다."})
+
     @router.get("/posts")
     def list_posts(query: str = "", boardId: str = "") -> dict[str, Any]:
         items = []
@@ -58,7 +74,8 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
         return {"success": True, "data": board.to_dict()}
 
     @router.post("/boards/{board_id}/delete")
-    def delete_board(board_id: str) -> dict[str, Any]:
+    def delete_board(board_id: str, payload: BoardAdminDeletePayload) -> dict[str, Any]:
+        require_admin_password(payload.adminPassword)
         try:
             repository.delete_board(board_id)
         except KeyError as exc:
@@ -140,7 +157,8 @@ def create_board_router(*, repository: BoardPostRepository, locks: BoardLockMana
         return {"success": True, "data": {**post.to_dict(), "lock": lock.to_dict() if lock else None}}
 
     @router.post("/posts/{post_id}/delete")
-    def delete_post(post_id: str, payload: BoardLockPayload) -> dict[str, Any]:
+    def delete_post(post_id: str, payload: BoardDeletePayload) -> dict[str, Any]:
+        require_admin_password(payload.adminPassword)
         current_lock = locks.get_lock(post_id)
         if current_lock:
             raise HTTPException(

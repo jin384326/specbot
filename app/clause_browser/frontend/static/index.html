@@ -349,13 +349,17 @@
       <div class="modal-card board-delete-card">
         <header class="modal-header">
           <div>
-            <p class="eyebrow">Delete Post</p>
-            <h2>게시글을 삭제할까요?</h2>
+            <p id="board-delete-modal-eyebrow" class="eyebrow">Delete Post</p>
+            <h2 id="board-delete-modal-heading">게시글을 삭제할까요?</h2>
           </div>
           <button class="ghost" data-action="close-board-delete-modal">닫기</button>
         </header>
         <div class="notice-modal-text">
           <p id="board-delete-modal-text">삭제 후에는 되돌릴 수 없습니다.</p>
+          <label class="field">
+            <span>관리자 비밀번호</span>
+            <input id="board-delete-admin-password" type="password" placeholder="관리자 비밀번호" autocomplete="current-password" />
+          </label>
         </div>
         <div class="modal-footer">
           <button id="board-delete-cancel" class="ghost" type="button">취소</button>

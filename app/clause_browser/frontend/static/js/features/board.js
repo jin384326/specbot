@@ -18,6 +18,7 @@ import {
   shouldPreferSessionWorkspace,
   writeBoardEditorSession,
 } from "../utils/board-session.js";
+import { buildDeleteModalCopy, normalizeAdminDeletePassword } from "./board-delete-auth.js";
 
 const EDITOR_ID_KEY = "specbot-board-editor-id-v1";
 const EDITOR_LABEL_KEY = "specbot-board-editor-label-v1";
@@ -93,7 +94,10 @@ function boardElements() {
     openPickerButton: document.getElementById("open-picker-button"),
     exportButton: document.getElementById("export-button"),
     boardDeleteModal: document.getElementById("board-delete-modal"),
+    boardDeleteModalEyebrow: document.getElementById("board-delete-modal-eyebrow"),
+    boardDeleteModalHeading: document.getElementById("board-delete-modal-heading"),
     boardDeleteModalText: document.getElementById("board-delete-modal-text"),
+    boardDeleteAdminPassword: document.getElementById("board-delete-admin-password"),
     boardDeleteCancel: document.getElementById("board-delete-cancel"),
     boardDeleteConfirm: document.getElementById("board-delete-confirm"),
   };
@@ -145,16 +149,23 @@ function renderBoardSelector() {
   }
 }
 
-function showBoardError(error) {
+function formatBoardLockConflictMessage(message, actionLabel = "작업을 수행") {
+  const matchedEditorLabel = String(message || "").match(/already being edited by\s+(.+?)(?:[.]\s*|$)/i);
+  const editorLabel = String(matchedEditorLabel?.[1] || "").trim();
+  return editorLabel
+    ? `${editorLabel} 사용자가 편집 중이어서 ${actionLabel} 수 없습니다.`
+    : `다른 사용자가 편집 중이어서 ${actionLabel} 수 없습니다.`;
+}
+
+function showBoardError(error, options = {}) {
+  const { conflictActionLabel = "메모 변경을 완료할", mirrorToMainMessage = false } = options;
   const message = String(error?.message || error || "Request failed");
   if (/already being edited/i.test(message)) {
-    const matchedEditorLabel = message.match(/already being edited by\s+(.+?)(?:[.]\s*|$)/i);
-    const editorLabel = String(matchedEditorLabel?.[1] || "").trim();
-    const localizedMessage = editorLabel
-      ? `${editorLabel} 사용자가 편집 중이어서 메모 변경을 완료할 수 없습니다.`
-      : "다른 사용자가 편집 중이어서 메모 변경을 완료할 수 없습니다.";
+    const localizedMessage = formatBoardLockConflictMessage(message, conflictActionLabel);
     setBoardMessage(localizedMessage, true);
-    setMessage(localizedMessage, true);
+    if (mirrorToMainMessage) {
+      setMessage(localizedMessage, true);
+    }
     return;
   }
   setBoardMessage(message, true);
@@ -306,13 +317,15 @@ async function confirmCreateBoard() {
   await refreshBoardPosts();
 }
 
-async function deleteCurrentBoard() {
+async function deleteCurrentBoard(adminPassword) {
   const board = currentBoard();
   if (!board || board.boardId === "default") {
     throw new Error("기본 게시판은 삭제할 수 없습니다.");
   }
   await request(`/api/clause-browser/board/boards/${board.boardId}/delete`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ adminPassword }),
   });
   boardState.currentBoardId = "default";
   await refreshBoards();
@@ -397,13 +410,14 @@ function renderBoardPosts(items) {
       try {
         await openExistingPost(button.dataset.postId || "");
       } catch (error) {
-        showBoardError(error);
+        showBoardError(error, { conflictActionLabel: "편집 할" });
       }
     });
   });
   boardPostList.querySelectorAll("[data-action='delete-post']").forEach((button) => {
     button.addEventListener("click", () => {
       openDeleteModal({
+        kind: "post",
         postId: button.dataset.postId || "",
         title: button.dataset.postTitle || "Untitled post",
       });
@@ -655,7 +669,17 @@ function scheduleViewAutosave() {
 function openDeleteModal(target) {
   boardState.deleteTarget = target;
   const els = boardElements();
-  els.boardDeleteModalText.textContent = `"${target.title}" 게시글을 정말 삭제할까요?`;
+  const copy = buildDeleteModalCopy(target);
+  if (els.boardDeleteModalEyebrow) {
+    els.boardDeleteModalEyebrow.textContent = copy.eyebrow;
+  }
+  if (els.boardDeleteModalHeading) {
+    els.boardDeleteModalHeading.textContent = copy.heading;
+  }
+  els.boardDeleteModalText.textContent = copy.body;
+  if (els.boardDeleteAdminPassword) {
+    els.boardDeleteAdminPassword.value = "";
+  }
   els.boardDeleteModal.classList.remove("hidden");
   els.boardDeleteModal.setAttribute("aria-hidden", "false");
 }
@@ -663,15 +687,22 @@ function openDeleteModal(target) {
 function closeDeleteModal() {
   const els = boardElements();
   boardState.deleteTarget = null;
+  if (els.boardDeleteAdminPassword) {
+    els.boardDeleteAdminPassword.value = "";
+  }
   els.boardDeleteModal.classList.add("hidden");
   els.boardDeleteModal.setAttribute("aria-hidden", "true");
 }
 
-async function deletePost(postId) {
+function getAdminDeletePassword() {
+  return normalizeAdminDeletePassword(boardElements().boardDeleteAdminPassword?.value || "");
+}
+
+async function deletePost(postId, adminPassword) {
   await request(`/api/clause-browser/board/posts/${postId}/delete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ editorId: editorId(), editorLabel: editorLabel() }),
+    body: JSON.stringify({ editorId: editorId(), editorLabel: editorLabel(), adminPassword }),
   });
   if (boardState.currentPostId === postId) {
     stopHeartbeat();
@@ -796,7 +827,7 @@ export function bindBoardFeature() {
     try {
       await restoreBoardRoute();
     } catch (error) {
-      showBoardError(error);
+      showBoardError(error, { conflictActionLabel: "편집 할" });
     }
   });
   document.querySelectorAll("[data-action='close-board-delete-modal']").forEach((element) => {
@@ -820,12 +851,13 @@ export function bindBoardFeature() {
   els.boardCreateBoard.addEventListener("click", () => {
     openCreateBoardModal();
   });
-  els.boardDeleteBoard.addEventListener("click", async () => {
-    try {
-      await deleteCurrentBoard();
-    } catch (error) {
-      showBoardError(error);
-    }
+  els.boardDeleteBoard.addEventListener("click", () => {
+    const board = currentBoard();
+    openDeleteModal({
+      kind: "board",
+      boardId: board?.boardId || "",
+      title: board?.name || board?.boardId || "게시판",
+    });
   });
   els.boardCreatePost.addEventListener("click", async () => {
     try {
@@ -849,16 +881,23 @@ export function bindBoardFeature() {
   });
   els.boardDeleteConfirm.addEventListener("click", async () => {
     const target = boardState.deleteTarget;
-    if (!target?.postId) {
+    if (!target) {
       closeDeleteModal();
       return;
     }
     try {
-      await deletePost(target.postId);
+      const adminPassword = getAdminDeletePassword();
+      if (target.kind === "board") {
+        await deleteCurrentBoard(adminPassword);
+      } else if (target.postId) {
+        await deletePost(target.postId, adminPassword);
+      } else {
+        closeDeleteModal();
+        return;
+      }
       closeDeleteModal();
     } catch (error) {
-      closeDeleteModal();
-      showBoardError(error);
+      showBoardError(error, { conflictActionLabel: "삭제 할" });
     }
   });
   els.boardCreateConfirm.addEventListener("click", async () => {
