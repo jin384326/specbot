@@ -78,6 +78,7 @@ import {
   formatErrorMessage,
   isAbortedRequestError,
 } from "./utils/work-api.js";
+import { getExportRequestConfig, resolveDownloadFileName } from "./utils/export.js";
 
 const state = {
   config: null,
@@ -394,6 +395,10 @@ function bindElements() {
   elements.translationStatus = document.getElementById("translation-status");
   elements.exportTitle = document.getElementById("export-title");
   elements.exportButton = document.getElementById("export-button");
+  elements.exportModal = document.getElementById("export-modal");
+  elements.exportModalDocxButton = document.getElementById("export-modal-docx");
+  elements.exportModalMarkdownButton = document.getElementById("export-modal-markdown");
+  elements.exportModalMarkdownPackageButton = document.getElementById("export-modal-markdown-package");
   elements.selectionMenu = document.getElementById("selection-menu");
   elements.nodeMenu = document.getElementById("node-menu");
   elements.nodeMenuAddParent = document.getElementById("node-menu-add-parent");
@@ -452,6 +457,9 @@ function bindGlobalEvents() {
     }
     if (event.target.closest("[data-action='close-notice-modal']")) {
       closeNoticeModal();
+    }
+    if (event.target.closest("[data-action='close-export-modal']")) {
+      closeExportModal();
     }
     if (event.target.closest("[data-action='close-clause-note-modal']")) {
       void closeClauseNoteModal();
@@ -3433,8 +3441,43 @@ async function runSpecbotQuery() {
   await runSpecbotQueryWithController(SPECBOT_QUERY_BUSY_LABEL);
 }
 
+function openExportModal() {
+  if (state.ui.busy) {
+    setMessage(`다른 작업이 진행 중입니다: ${state.ui.busy}`, true);
+    return;
+  }
+  if (!elements.exportModal) {
+    return;
+  }
+  elements.exportModal.classList.remove("hidden");
+  elements.exportModal.setAttribute("aria-hidden", "false");
+}
+
+function closeExportModal() {
+  if (!elements.exportModal) {
+    return;
+  }
+  elements.exportModal.classList.add("hidden");
+  elements.exportModal.setAttribute("aria-hidden", "true");
+}
+
 async function exportDocx() {
-  if (!beginBusy("DOCX 저장 중입니다.")) {
+  closeExportModal();
+  await downloadExport(getExportRequestConfig("docx"));
+}
+
+async function exportMarkdown() {
+  closeExportModal();
+  await downloadExport(getExportRequestConfig("markdown"));
+}
+
+async function exportMarkdownPackage() {
+  closeExportModal();
+  await downloadExport(getExportRequestConfig("markdown-package"));
+}
+
+async function downloadExport({ busyLabel, endpoint, accept, fallbackExtension, preserveLargeTables = false }) {
+  if (!beginBusy(busyLabel)) {
     return;
   }
   if (!state.loadedRoots.length) {
@@ -3452,32 +3495,32 @@ async function exportDocx() {
   }
 
   try {
-    const response = await fetch("/api/clause-browser/exports/docx/download", {
+    const activeBusyLabel = preserveLargeTables && fallbackExtension === "docx"
+      ? `${busyLabel} 큰 표를 표 형태로 보존합니다.`
+      : busyLabel;
+    setMessage(activeBusyLabel, false);
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Accept: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Accept: accept,
       },
       body: JSON.stringify({
         title,
         roots: state.loadedRoots,
         notes: state.ui.notes || [],
         highlights: state.ui.highlights || [],
+        preserveLargeTables,
       }),
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      const detail = payload?.detail || "DOCX export failed";
+      const detail = payload?.detail || "Export failed";
       throw new Error(formatErrorMessage(detail));
     }
     const blob = await response.blob();
     const downloadUrl = window.URL.createObjectURL(blob);
-    const disposition = response.headers.get("Content-Disposition") || "";
-    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-    const asciiMatch = disposition.match(/filename="([^"]+)"/i);
-    const fileName = utf8Match?.[1]
-      ? decodeURIComponent(utf8Match[1])
-      : (asciiMatch?.[1] || `${title}.docx`);
+    const fileName = resolveDownloadFileName(response.headers.get("Content-Disposition"), `${title}.${fallbackExtension}`);
     const anchor = document.createElement("a");
     anchor.href = downloadUrl;
     anchor.download = fileName;
@@ -3537,6 +3580,15 @@ function updateBusyUi() {
   if (elements.exportButton) {
     elements.exportButton.disabled = isBusy;
   }
+  if (elements.exportModalDocxButton) {
+    elements.exportModalDocxButton.disabled = isBusy;
+  }
+  if (elements.exportModalMarkdownButton) {
+    elements.exportModalMarkdownButton.disabled = isBusy;
+  }
+  if (elements.exportModalMarkdownPackageButton) {
+    elements.exportModalMarkdownPackageButton.disabled = isBusy;
+  }
   elements.openSpecbotSettings.disabled = isBusy;
   elements.specbotQuery.disabled = isBusy;
 }
@@ -3550,7 +3602,7 @@ function setMessage(text, isError) {
   }
   elements.messageBar.innerHTML = message ? `<div class="message ${isError ? "error" : ""}">${escapeHtml(message)}</div>` : "";
   elements.messageBar.classList.toggle("has-message", Boolean(message));
-  if (message && !isError) {
+  if (message && !isError && !state.ui.busy) {
     messageHideTimer = window.setTimeout(() => {
       if (state.ui.message?.text === message && !state.ui.message?.isError) {
         clearMessage();
@@ -3747,7 +3799,10 @@ export {
   openSpecbotSettings,
   saveSpecbotSettings,
   clearRejectedSpecbotClauses,
+  openExportModal,
   exportDocx,
+  exportMarkdown,
+  exportMarkdownPackage,
   openNoticeModal,
   setMessage,
   clearMessage,

@@ -16,6 +16,7 @@ from app.clause_browser.backend.services import (
     LLMActionCancelledError,
     LLMActionQueueFullError,
     LLMActionService,
+    MarkdownExportService,
     SpecbotQueryService,
     sanitize_file_stem,
 )
@@ -44,6 +45,7 @@ class ExportRequest(BaseModel):
     roots: list[ClauseTreePayload] = Field(min_length=1)
     notes: list[dict[str, Any]] = Field(default_factory=list)
     highlights: list[dict[str, Any]] = Field(default_factory=list)
+    preserveLargeTables: bool = False
 
 
 class LLMActionRequest(BaseModel):
@@ -97,6 +99,7 @@ def create_router(
     *,
     repository: ClauseRepository,
     export_service: DocxExportService,
+    markdown_export_service: MarkdownExportService | None = None,
     llm_service,
     config: ClauseBrowserConfig,
     rich_document_service=None,
@@ -199,6 +202,7 @@ def create_router(
                 roots=[root.model_dump(mode="json") for root in request.roots],
                 notes=request.notes,
                 highlights=request.highlights,
+                preserve_large_tables=request.preserveLargeTables,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -214,6 +218,7 @@ def create_router(
                 roots=[root.model_dump(mode="json") for root in request.roots],
                 notes=request.notes,
                 highlights=request.highlights,
+                preserve_large_tables=request.preserveLargeTables,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -232,6 +237,68 @@ def create_router(
         return Response(
             content=payload,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers=headers,
+        )
+
+    @router.post("/exports/markdown/download")
+    def export_markdown_download(request: ExportRequest) -> Response:
+        if markdown_export_service is None:
+            raise HTTPException(status_code=501, detail="Markdown export is not configured.")
+        try:
+            file_name, payload = markdown_export_service.export_bytes(
+                title=request.title,
+                roots=[root.model_dump(mode="json") for root in request.roots],
+                notes=request.notes,
+                highlights=request.highlights,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Markdown export failed: {exc}") from exc
+        stem = file_name[:-3] if file_name.lower().endswith(".md") else file_name
+        ascii_stem = sanitize_file_stem(stem.encode("ascii", "ignore").decode("ascii"))
+        if not any(char.isalnum() for char in ascii_stem):
+            ascii_stem = "clause-export"
+        ascii_name = f"{ascii_stem}.md"
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(file_name)}'
+            )
+        }
+        return Response(
+            content=payload,
+            media_type="text/markdown",
+            headers=headers,
+        )
+
+    @router.post("/exports/markdown-package/download")
+    def export_markdown_package_download(request: ExportRequest) -> Response:
+        if markdown_export_service is None:
+            raise HTTPException(status_code=501, detail="Markdown export is not configured.")
+        try:
+            file_name, payload = markdown_export_service.export_package_bytes(
+                title=request.title,
+                roots=[root.model_dump(mode="json") for root in request.roots],
+                notes=request.notes,
+                highlights=request.highlights,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Markdown package export failed: {exc}") from exc
+        stem = file_name[:-4] if file_name.lower().endswith(".zip") else file_name
+        ascii_stem = sanitize_file_stem(stem.encode("ascii", "ignore").decode("ascii"))
+        if not any(char.isalnum() for char in ascii_stem):
+            ascii_stem = "clause-export"
+        ascii_name = f"{ascii_stem}.zip"
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(file_name)}'
+            )
+        }
+        return Response(
+            content=payload,
+            media_type="application/zip",
             headers=headers,
         )
 

@@ -19,6 +19,7 @@ from app.clause_browser.backend.services import (
     DocxExportService,
     LLMActionHttpService,
     LLMActionService,
+    MarkdownExportService,
     SpecbotQueryHttpService,
 )
 
@@ -57,6 +58,11 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
         export_dir=active_settings.export_dir,
         project_root=active_settings.project_root,
     )
+    markdown_export_service = MarkdownExportService(
+        export_dir=active_settings.export_dir,
+        project_root=active_settings.project_root,
+        media_root=active_settings.media_dir,
+    )
     rich_document_service = None
     if active_settings.corpus_path.name != "clause_browser_corpus.jsonl":
         rich_document_service = RichClauseDocumentService(
@@ -80,6 +86,7 @@ def create_app(settings: ClauseBrowserSettings | None = None, specbot_service=No
         create_router(
             repository=repository,
             export_service=export_service,
+            markdown_export_service=markdown_export_service,
             llm_service=active_llm_service,
             config=ClauseBrowserConfig(
                 languages=[{"code": code, "label": label} for code, label in active_settings.languages],

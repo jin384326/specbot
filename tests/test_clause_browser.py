@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import base64
+import zipfile
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,6 +32,7 @@ from app.clause_browser.services import (
     DocxExportService,
     LLMActionQueueFullError,
     LLMActionService,
+    MarkdownExportService,
     SpecbotQueryDefaults,
     SpecbotQueryService,
     sanitize_file_stem,
@@ -715,6 +717,63 @@ def test_docx_download_endpoint_uses_safe_ascii_fallback_for_non_ascii_title(tmp
     )
 
 
+def test_markdown_download_endpoint_returns_attachment(tmp_path: Path) -> None:
+    app = build_app(tmp_path)
+    subtree_endpoint = get_endpoint(app, "/api/clause-browser/documents/{spec_no}/clauses/{clause_id:path}/subtree")
+    export_endpoint = get_endpoint(app, "/api/clause-browser/exports/markdown/download")
+    subtree = subtree_endpoint("23501", "5")["data"]
+
+    response = export_endpoint(ExportRequest(title="Session Export", roots=[subtree]))
+
+    assert response.media_type == "text/markdown"
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="Session_Export.md"; '
+        "filename*=UTF-8''Session_Export.md"
+    )
+    text = response.body.decode("utf-8")
+    assert "# Session Export" in text
+    assert "## 23501 " in text
+    assert "### 5 Session management" in text
+
+
+def test_markdown_package_download_endpoint_returns_zip_with_assets(tmp_path: Path) -> None:
+    media_dir = tmp_path / "media" / "23501" / "5"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    image_path = media_dir / "tiny.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII="
+        )
+    )
+
+    app = build_app(tmp_path)
+    export_endpoint = get_endpoint(app, "/api/clause-browser/exports/markdown-package/download")
+    roots = [
+        {
+            "key": "23501:5",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {"type": "image", "src": "/clause-browser-media/23501/5/tiny.png", "alt": "Figure 1"},
+            ],
+            "children": [],
+        }
+    ]
+
+    response = export_endpoint(ExportRequest(title="Session Export", roots=[roots[0]]))
+
+    assert response.media_type == "application/zip"
+    archive = zipfile.ZipFile(BytesIO(response.body))
+    names = set(archive.namelist())
+    assert "document.md" in names
+    assert "assets/23501/5/tiny.png" in names
+    text = archive.read("document.md").decode("utf-8")
+    assert "![Figure 1](assets/23501/5/tiny.png)" in text
+
+
 def test_llm_action_endpoint_returns_mock_translation(tmp_path: Path) -> None:
     app = build_app(tmp_path)
     endpoint = get_endpoint(app, "/api/clause-browser/llm-actions")
@@ -1029,6 +1088,179 @@ def test_docx_export_service_adds_numeric_suffix(tmp_path: Path) -> None:
     assert second.file_name == "My_Export_2.docx"
 
 
+def test_markdown_export_service_serializes_tables_images_and_notes(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    service = MarkdownExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {"type": "paragraph", "text": "Paragraph body", "format": {}},
+                {
+                    "type": "table",
+                    "rows": [["Column A", "Column B"], ["Value 1", "Value 2"]],
+                },
+                {"type": "image", "src": "/clause-browser-media/23501/5/tiny.png", "alt": "Figure 1"},
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "selection:1",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "translation": "Selection memo translation",
+            "sourceText": "Paragraph body",
+        }
+    ]
+
+    file_name, payload = service.export_bytes("My Export", roots, notes=notes)
+    text = payload.decode("utf-8")
+
+    assert file_name == "My_Export.md"
+    assert "# My Export" in text
+    assert "## 23501 System architecture" in text
+    assert "### 5 Session management" in text
+    assert "Paragraph body" in text
+    assert "| Column A | Column B |" in text
+    assert "| --- | --- |" in text
+    assert "![Figure 1](/clause-browser-media/23501/5/tiny.png)" in text
+    assert "> Note: Selection memo translation" in text
+
+
+def test_markdown_export_service_includes_notes_below_table_image_and_clause(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    service = MarkdownExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [["Column A", "Column B"], ["Value 1", "Value 2"]],
+                },
+                {"type": "image", "src": "/clause-browser-media/23501/5/tiny.png", "alt": "Figure 1"},
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "23501:5:clause",
+            "type": "clause",
+            "clauseKey": "23501:5",
+            "translation": "Clause memo translation",
+            "sourceText": "Clause source",
+        },
+        {
+            "id": "selection:table",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "translation": "Table memo translation",
+            "sourceText": "Value 1",
+        },
+        {
+            "id": "selection:image",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 1,
+            "translation": "Image memo translation",
+            "sourceText": "Figure 1",
+        },
+    ]
+
+    _file_name, payload = service.export_bytes("My Export", roots, notes=notes)
+    text = payload.decode("utf-8")
+
+    assert "| Column A | Column B |" in text
+    assert "| Value 1 | Value 2 |" in text
+    assert "| Value 1 | Value 2 |\n\n> Note: Table memo translation" in text
+    assert "![Figure 1](/clause-browser-media/23501/5/tiny.png)\n\n> Note: Image memo translation" in text
+    assert "> Note: Clause memo translation" in text
+
+
+def test_markdown_export_service_packages_local_images_and_note_origins(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    media_dir = tmp_path / "artifacts" / "clause_browser_media" / "23501" / "5"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    image_path = media_dir / "tiny.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII="
+        )
+    )
+    service = MarkdownExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "specNo": "23501",
+            "specTitle": "System architecture",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [["Column A", "Column B"], ["Value 1", "Value 2"]],
+                },
+                {"type": "image", "src": "/clause-browser-media/23501/5/tiny.png", "alt": "Figure 1"},
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "selection:table",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 1,
+            "cellId": "cell-2",
+            "translation": "Table memo translation",
+            "sourceText": "Value 2",
+        },
+    ]
+
+    file_name, payload = service.export_package_bytes("My Export", roots, notes=notes)
+
+    assert file_name == "My_Export.zip"
+    archive = zipfile.ZipFile(BytesIO(payload))
+    assert set(archive.namelist()) == {"document.md", "assets/23501/5/tiny.png"}
+    text = archive.read("document.md").decode("utf-8")
+    assert "> Note (rowIndex=1, cellId=cell-2): Table memo translation" in text
+    assert "![Figure 1](assets/23501/5/tiny.png)" in text
+
+
+def test_docx_export_service_uses_simple_table_path_for_non_merged_cells(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    simple_cells = [
+        [
+            {"text": "H1", "rowspan": 1, "colspan": 1, "header": True},
+            {"text": "H2", "rowspan": 1, "colspan": 1, "header": True},
+        ],
+        [
+            {"text": "V1", "rowspan": 1, "colspan": 1, "header": False},
+            {"text": "V2", "rowspan": 1, "colspan": 1, "header": False},
+        ],
+    ]
+
+    assert service._extract_simple_rows_from_cells(simple_cells) == [["H1", "H2"], ["V1", "V2"]]
+
+
 def test_docx_export_service_includes_notes_and_images(tmp_path: Path) -> None:
     export_dir = tmp_path / "exports"
     media_dir = tmp_path / "artifacts" / "clause_browser_media" / "23501" / "5"
@@ -1158,6 +1390,233 @@ def test_docx_export_service_applies_paragraph_and_table_highlights(tmp_path: Pa
     plain_cell = exported.tables[0].cell(1, 0)
     assert 'w:fill="FFF59D"' in highlighted_cell._tc.xml
     assert 'w:fill="FFF59D"' not in plain_cell._tc.xml
+
+
+def test_docx_export_service_uses_compact_mode_for_large_tables(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_ROWS", "3")
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_CELLS", "6")
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        ["H1", "H2"],
+                        ["V1", "V2"],
+                        ["V3", "V4"],
+                        ["V5", "V6"],
+                    ],
+                },
+            ],
+            "children": [],
+        }
+    ]
+    highlights = [
+        {
+            "id": "manual:cell",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 2,
+            "cellIndex": 1,
+            "rowText": "V3 | V4",
+        },
+    ]
+    notes = [
+        {
+            "id": "selection:table-row",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 1,
+            "translation": "Row memo",
+            "sourceText": "V1 | V2",
+        },
+    ]
+
+    result = service.export("My Export", roots, notes=notes, highlights=highlights)
+
+    exported = Document(export_dir / result.file_name)
+    assert len(exported.tables) == 0
+    row_paragraph = next(item for item in exported.paragraphs if item.text == "V3 | V4")
+    assert 'w:highlight w:val="yellow"' in row_paragraph._p.xml
+    noted_paragraph = next(item for item in exported.paragraphs if item.text == "V1 | V2")
+    assert "commentRangeStart" in noted_paragraph._p.xml
+
+
+def test_docx_export_service_preserves_large_tables_when_requested(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_ROWS", "3")
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_CELLS", "6")
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        ["H1", "H2"],
+                        ["V1", "V2"],
+                        ["V3", "V4"],
+                        ["V5", "V6"],
+                    ],
+                },
+            ],
+            "children": [],
+        }
+    ]
+
+    result = service.export("My Export", roots, preserve_large_tables=True)
+
+    exported = Document(export_dir / result.file_name)
+    assert len(exported.tables) == 1
+    assert exported.tables[0].cell(3, 1).text == "V6"
+
+
+def test_docx_export_service_simplifies_large_preserved_table_annotations_to_row_level(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_ROWS", "3")
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_CELLS", "6")
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        ["H1", "H2"],
+                        ["V1", "V2"],
+                        ["V3", "V4"],
+                        ["V5", "V6"],
+                    ],
+                },
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "selection:table-cell-1",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 2,
+            "cellIndex": 0,
+            "translation": "Left cell memo",
+            "sourceText": "V3",
+        },
+        {
+            "id": "selection:table-cell-2",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 2,
+            "cellIndex": 1,
+            "translation": "Right cell memo",
+            "sourceText": "V4",
+        },
+    ]
+    highlights = [
+        {
+            "id": "manual:cell",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 2,
+            "cellIndex": 1,
+            "rowText": "V3 | V4",
+        },
+    ]
+
+    result = service.export("My Export", roots, notes=notes, highlights=highlights, preserve_large_tables=True)
+
+    exported_path = export_dir / result.file_name
+    exported = Document(exported_path)
+    assert len(exported.tables) == 1
+    table = exported.tables[0]
+    assert 'w:fill="FFF59D"' in table.cell(2, 0)._tc.xml
+    assert 'w:fill="FFF59D"' in table.cell(2, 1)._tc.xml
+    assert "commentRangeStart" in table.cell(2, 0).paragraphs[0]._p.xml
+    assert "commentRangeStart" not in table.cell(2, 1).paragraphs[0]._p.xml
+
+    with zipfile.ZipFile(exported_path) as archive:
+        comments_xml = archive.read("word/comments.xml").decode("utf-8")
+    assert "Cell 1: Left cell memo" in comments_xml
+    assert "Cell 2: Right cell memo" in comments_xml
+
+
+def test_docx_export_service_keeps_small_preserved_table_cell_level_annotations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_ROWS", "10")
+    monkeypatch.setenv("SPECBOT_DOCX_MAX_PRECISE_TABLE_CELLS", "100")
+    export_dir = tmp_path / "exports"
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+    roots = [
+        {
+            "key": "23501:5",
+            "clauseId": "5",
+            "clauseTitle": "Session management",
+            "text": "",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        ["H1", "H2"],
+                        ["V1", "V2"],
+                    ],
+                },
+            ],
+            "children": [],
+        }
+    ]
+    notes = [
+        {
+            "id": "selection:table-cell",
+            "type": "selection",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 1,
+            "cellIndex": 1,
+            "translation": "Right cell memo",
+            "sourceText": "V2",
+        },
+    ]
+    highlights = [
+        {
+            "id": "manual:cell",
+            "clauseKey": "23501:5",
+            "blockIndex": 0,
+            "rowIndex": 1,
+            "cellIndex": 1,
+            "rowText": "V1 | V2",
+        },
+    ]
+
+    result = service.export("My Export", roots, notes=notes, highlights=highlights, preserve_large_tables=True)
+
+    exported = Document(export_dir / result.file_name)
+    table = exported.tables[0]
+    assert 'w:fill="FFF59D"' not in table.cell(1, 0)._tc.xml
+    assert 'w:fill="FFF59D"' in table.cell(1, 1)._tc.xml
+    assert "commentRangeStart" not in table.cell(1, 0).paragraphs[0]._p.xml
+    assert "commentRangeStart" in table.cell(1, 1).paragraphs[0]._p.xml
 
 
 def test_docx_export_service_sorts_clauses_by_clause_order(tmp_path: Path) -> None:

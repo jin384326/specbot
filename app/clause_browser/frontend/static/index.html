@@ -344,6 +344,24 @@
       </div>
     </div>
 
+    <div id="export-modal" class="modal-shell hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-action="close-export-modal"></div>
+      <div class="modal-card compact-modal-card export-modal-card">
+        <header class="modal-header">
+          <div>
+            <p class="eyebrow">Export</p>
+            <h2>내보내기 형식 선택</h2>
+          </div>
+          <button class="ghost" data-action="close-export-modal">닫기</button>
+        </header>
+        <div class="compact-modal-body export-modal-body">
+          <button id="export-modal-docx" class="primary export-option-button" type="button">DOCX</button>
+          <button id="export-modal-markdown" class="ghost export-option-button" type="button">Markdown</button>
+          <button id="export-modal-markdown-package" class="ghost export-option-button" type="button">Markdown + Assets</button>
+        </div>
+      </div>
+    </div>
+
     <div id="board-delete-modal" class="modal-shell hidden" aria-hidden="true">
       <div class="modal-backdrop" data-action="close-board-delete-modal"></div>
       <div class="modal-card board-delete-card">

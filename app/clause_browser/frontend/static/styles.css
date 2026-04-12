@@ -1615,6 +1615,19 @@ body[data-board-mode="view"] .tox-pop {
   gap: 14px;
 }
 
+.export-modal-card {
+  width: min(460px, calc(100vw - 36px));
+}
+
+.export-modal-body {
+  padding-bottom: 24px;
+}
+
+.export-option-button {
+  justify-content: flex-start;
+  min-height: 48px;
+}
+
 .compact-modal-actions {
   display: flex;
   justify-content: flex-end;

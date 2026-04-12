@@ -7,6 +7,9 @@ import sys
 import json
 import asyncio
 import threading
+import base64
+import mimetypes
+import zipfile
 from io import BytesIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -64,6 +67,16 @@ class DocxExportService:
         self._project_root = Path(project_root)
         self._media_root = self._project_root / "artifacts" / "clause_browser_media"
         self._export_dir.mkdir(parents=True, exist_ok=True)
+        self._max_precise_table_rows = max(1, int(os.environ.get("SPECBOT_DOCX_MAX_PRECISE_TABLE_ROWS", "30")))
+        self._max_precise_table_cells = max(1, int(os.environ.get("SPECBOT_DOCX_MAX_PRECISE_TABLE_CELLS", "400")))
+        self._max_precise_annotation_rows = max(
+            1,
+            int(os.environ.get("SPECBOT_DOCX_MAX_PRECISE_ANNOTATION_ROWS", str(self._max_precise_table_rows))),
+        )
+        self._max_precise_annotation_cells = max(
+            1,
+            int(os.environ.get("SPECBOT_DOCX_MAX_PRECISE_ANNOTATION_CELLS", str(self._max_precise_table_cells))),
+        )
 
     def export(
         self,
@@ -71,12 +84,14 @@ class DocxExportService:
         roots: list[dict[str, Any]],
         notes: list[dict[str, Any]] | None = None,
         highlights: list[dict[str, Any]] | None = None,
+        preserve_large_tables: bool = False,
     ) -> ExportResult:
         cleaned_title, document, clause_count = self._build_document(
             title=title,
             roots=roots,
             notes=notes or [],
             highlights=highlights or [],
+            preserve_large_tables=preserve_large_tables,
         )
 
         file_name = self._allocate_file_name(cleaned_title)
@@ -101,12 +116,14 @@ class DocxExportService:
         roots: list[dict[str, Any]],
         notes: list[dict[str, Any]] | None = None,
         highlights: list[dict[str, Any]] | None = None,
+        preserve_large_tables: bool = False,
     ) -> tuple[str, bytes]:
         cleaned_title, document, _clause_count = self._build_document(
             title=title,
             roots=roots,
             notes=notes or [],
             highlights=highlights or [],
+            preserve_large_tables=preserve_large_tables,
         )
         file_name = f"{sanitize_file_stem(cleaned_title)}.docx"
         buffer = BytesIO()
@@ -120,6 +137,7 @@ class DocxExportService:
         roots: list[dict[str, Any]],
         notes: list[dict[str, Any]],
         highlights: list[dict[str, Any]],
+        preserve_large_tables: bool,
     ) -> tuple[str, Document, int]:
         cleaned_title = title.strip()
         if not cleaned_title:
@@ -152,6 +170,7 @@ class DocxExportService:
                     depth=1,
                     note_index=note_index,
                     highlight_index=highlight_index,
+                    preserve_large_tables=preserve_large_tables,
                 )
         return cleaned_title, document, clause_count
 
@@ -171,6 +190,7 @@ class DocxExportService:
         depth: int,
         note_index: dict[str, Any],
         highlight_index: dict[tuple[str, int], list[dict[str, Any]]],
+        preserve_large_tables: bool,
     ) -> int:
         clause_id = str(clause.get("clauseId") or "").strip()
         clause_title = str(clause.get("clauseTitle") or "").strip()
@@ -188,6 +208,7 @@ class DocxExportService:
                     block_index=block_index,
                     note_index=note_index,
                     highlight_index=highlight_index,
+                    preserve_large_tables=preserve_large_tables,
                 )
         else:
             body = str(clause.get("text") or "").strip()
@@ -204,7 +225,14 @@ class DocxExportService:
 
         total = 1
         for child in clause.get("children") or []:
-            total += self._write_clause(document, child, depth + 1, note_index=note_index, highlight_index=highlight_index)
+            total += self._write_clause(
+                document,
+                child,
+                depth + 1,
+                note_index=note_index,
+                highlight_index=highlight_index,
+                preserve_large_tables=preserve_large_tables,
+            )
         return total
 
     def _sort_clause_tree(self, clause: dict[str, Any]) -> dict[str, Any]:
@@ -221,6 +249,7 @@ class DocxExportService:
         block_index: int,
         note_index: dict[str, Any],
         highlight_index: dict[tuple[str, int], list[dict[str, Any]]],
+        preserve_large_tables: bool,
     ) -> None:
         block_type = str(block.get("type") or "")
         selection_notes = note_index.get("selection", {}).get((clause_key, block_index), [])
@@ -238,7 +267,7 @@ class DocxExportService:
                 if self._is_caption_paragraph(text, block.get("format") or {}):
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         elif block_type == "table":
-            self._write_table(document, block, selection_notes, block_highlights)
+            self._write_table(document, block, selection_notes, block_highlights, preserve_large_tables=preserve_large_tables)
         elif block_type == "image":
             self._write_image(document, block)
 
@@ -248,29 +277,35 @@ class DocxExportService:
         block: dict[str, Any],
         selection_notes: list[dict[str, Any]],
         block_highlights: list[dict[str, Any]],
+        *,
+        preserve_large_tables: bool,
     ) -> None:
+        if self._should_use_fast_table_mode(block, preserve_large_tables=preserve_large_tables):
+            self._write_table_compact(document, block, selection_notes, block_highlights)
+            return
+        simplify_annotations = preserve_large_tables and self._should_simplify_preserved_table_annotations(block)
         cells = list(block.get("cells") or [])
+        simple_rows = self._extract_simple_rows_from_cells(cells)
+        if simple_rows is not None:
+            self._write_plain_table(
+                document,
+                simple_rows,
+                selection_notes,
+                block_highlights,
+                simplify_annotations=simplify_annotations,
+            )
+            return
         if not cells:
             rows = list(block.get("rows") or [])
             if not rows:
                 return
-            table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
-            table.style = "Table Grid"
-            anchor_paragraphs: list[Paragraph] = []
-            row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
-            row_cells: dict[int, list[Any]] = {}
-            logical_cells: dict[tuple[int, int], Any] = {}
-            for row_idx, row in enumerate(rows):
-                for col_idx, value in enumerate(row):
-                    cell = table.cell(row_idx, col_idx)
-                    paragraph = cell.paragraphs[0]
-                    paragraph.text = str(value or "")
-                    anchor_paragraphs.append(paragraph)
-                    row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
-                    row_cells.setdefault(row_idx, []).append(cell)
-                    logical_cells[(row_idx, col_idx)] = cell
-            self._apply_table_highlights(row_cells, logical_cells, block_highlights)
-            self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+            self._write_plain_table(
+                document,
+                rows,
+                selection_notes,
+                block_highlights,
+                simplify_annotations=simplify_annotations,
+            )
             return
 
         row_count = len(cells)
@@ -304,8 +339,134 @@ class DocxExportService:
                     for col_offset in range(colspan):
                         occupied.add((row_idx + row_offset, col_idx + col_offset))
                 col_idx += colspan
-        self._apply_table_highlights(row_cells, logical_cells, block_highlights)
-        self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+        if simplify_annotations:
+            self._apply_table_row_highlights(row_cells, block_highlights)
+            self._attach_table_selection_notes_row_level(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+        else:
+            self._apply_table_highlights(row_cells, logical_cells, block_highlights)
+            self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+
+    def _write_plain_table(
+        self,
+        document: Document,
+        rows: list[list[Any]],
+        selection_notes: list[dict[str, Any]],
+        block_highlights: list[dict[str, Any]],
+        *,
+        simplify_annotations: bool = False,
+    ) -> None:
+        table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
+        table.style = "Table Grid"
+        anchor_paragraphs: list[Paragraph] = []
+        row_anchor_paragraphs: dict[int, list[Paragraph]] = {}
+        row_cells: dict[int, list[Any]] = {}
+        logical_cells: dict[tuple[int, int], Any] = {}
+        for row_idx, row in enumerate(rows):
+            for col_idx, value in enumerate(row):
+                cell = table.cell(row_idx, col_idx)
+                paragraph = cell.paragraphs[0]
+                paragraph.text = str(value or "")
+                anchor_paragraphs.append(paragraph)
+                row_anchor_paragraphs.setdefault(row_idx, []).append(paragraph)
+                row_cells.setdefault(row_idx, []).append(cell)
+                logical_cells[(row_idx, col_idx)] = cell
+        if simplify_annotations:
+            self._apply_table_row_highlights(row_cells, block_highlights)
+            self._attach_table_selection_notes_row_level(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+        else:
+            self._apply_table_highlights(row_cells, logical_cells, block_highlights)
+            self._attach_table_selection_notes(anchor_paragraphs, row_anchor_paragraphs, selection_notes)
+
+    def _write_table_compact(
+        self,
+        document: Document,
+        block: dict[str, Any],
+        selection_notes: list[dict[str, Any]],
+        block_highlights: list[dict[str, Any]],
+    ) -> None:
+        rows = self._table_rows_for_compact_export(block)
+        if not rows:
+            return
+        row_paragraphs: dict[int, list[Paragraph]] = {}
+        anchor_paragraphs: list[Paragraph] = []
+        highlighted_rows = self._collect_highlighted_rows(block_highlights)
+        for row_idx, row in enumerate(rows):
+            text = " | ".join(str(cell or "") for cell in row)
+            paragraph = document.add_paragraph(text)
+            row_paragraphs[row_idx] = [paragraph]
+            anchor_paragraphs.append(paragraph)
+            if row_idx in highlighted_rows or (-1 in highlighted_rows and row_idx == 0):
+                self._apply_paragraph_highlight(paragraph)
+        self._attach_table_selection_notes(anchor_paragraphs, row_paragraphs, selection_notes)
+
+    def _should_use_fast_table_mode(self, block: dict[str, Any], *, preserve_large_tables: bool) -> bool:
+        if preserve_large_tables:
+            return False
+        rows = self._table_rows_for_compact_export(block)
+        if not rows:
+            return False
+        row_count = len(rows)
+        cell_count = sum(len(row) for row in rows)
+        return row_count > self._max_precise_table_rows or cell_count > self._max_precise_table_cells
+
+    def _should_simplify_preserved_table_annotations(self, block: dict[str, Any]) -> bool:
+        rows = self._table_rows_for_compact_export(block)
+        if not rows:
+            return False
+        row_count = len(rows)
+        cell_count = sum(len(row) for row in rows)
+        return row_count > self._max_precise_annotation_rows or cell_count > self._max_precise_annotation_cells
+
+    @staticmethod
+    def _collect_highlighted_rows(block_highlights: list[dict[str, Any]]) -> set[int]:
+        rows: set[int] = set()
+        for item in block_highlights:
+            rows.add(int(item.get("rowIndex", -1)))
+        return rows
+
+    @staticmethod
+    def _table_rows_for_compact_export(block: dict[str, Any]) -> list[list[str]]:
+        rows = block.get("rows") or []
+        if rows:
+            normalized_rows = []
+            for row in rows:
+                if isinstance(row, list):
+                    normalized_rows.append([str(cell or "") for cell in row])
+            if normalized_rows:
+                return normalized_rows
+        cells = list(block.get("cells") or [])
+        simple_rows = DocxExportService._extract_simple_rows_from_cells(cells)
+        if simple_rows is not None:
+            return simple_rows
+        flattened_rows: list[list[str]] = []
+        for row in cells:
+            if not isinstance(row, list):
+                continue
+            flattened_rows.append([str((cell or {}).get("text") or "") for cell in row if isinstance(cell, dict)])
+        return flattened_rows
+
+    @staticmethod
+    def _extract_simple_rows_from_cells(cells: list[Any]) -> list[list[str]] | None:
+        if not cells:
+            return None
+        expected_width: int | None = None
+        normalized_rows: list[list[str]] = []
+        for row in cells:
+            if not isinstance(row, list) or not row:
+                return None
+            normalized_row: list[str] = []
+            for cell in row:
+                if not isinstance(cell, dict):
+                    return None
+                if int(cell.get("rowspan") or 1) != 1 or int(cell.get("colspan") or 1) != 1:
+                    return None
+                normalized_row.append(str(cell.get("text") or ""))
+            if expected_width is None:
+                expected_width = len(normalized_row)
+            elif len(normalized_row) != expected_width:
+                return None
+            normalized_rows.append(normalized_row)
+        return normalized_rows if expected_width else None
 
     def _apply_table_highlights(
         self,
@@ -326,6 +487,17 @@ class DocxExportService:
             for cell in row_cells.get(row_index, []):
                 self._apply_cell_highlight(cell)
 
+    def _apply_table_row_highlights(
+        self,
+        row_cells: dict[int, list[Any]],
+        block_highlights: list[dict[str, Any]],
+    ) -> None:
+        for row_index in self._collect_highlighted_rows(block_highlights):
+            if row_index < 0:
+                continue
+            for cell in row_cells.get(row_index, []):
+                self._apply_cell_highlight(cell)
+
     def _attach_table_selection_notes(
         self,
         anchor_paragraphs: list[Paragraph],
@@ -338,6 +510,46 @@ class DocxExportService:
                 self._attach_comment_to_paragraphs(row_anchor_paragraphs[row_index], note)
             else:
                 self._attach_comment_to_paragraphs(anchor_paragraphs, note)
+
+    def _attach_table_selection_notes_row_level(
+        self,
+        anchor_paragraphs: list[Paragraph],
+        row_anchor_paragraphs: dict[int, list[Paragraph]],
+        selection_notes: list[dict[str, Any]],
+    ) -> None:
+        grouped_notes: dict[int, list[dict[str, Any]]] = {}
+        global_notes: list[dict[str, Any]] = []
+        for note in selection_notes:
+            row_index = int(note.get("rowIndex", -1))
+            if row_index >= 0:
+                grouped_notes.setdefault(row_index, []).append(note)
+            else:
+                global_notes.append(note)
+
+        for row_index, notes in grouped_notes.items():
+            row_paragraphs = row_anchor_paragraphs.get(row_index) or anchor_paragraphs
+            if not row_paragraphs:
+                continue
+            self._attach_comment_to_paragraph(row_paragraphs[0], self._build_row_level_table_note(notes))
+
+        if global_notes and anchor_paragraphs:
+            self._attach_comment_to_paragraph(anchor_paragraphs[0], self._build_row_level_table_note(global_notes))
+
+    @staticmethod
+    def _build_row_level_table_note(notes: list[dict[str, Any]]) -> dict[str, Any]:
+        lines: list[str] = []
+        for note in notes:
+            translation = str(note.get("translation") or "").strip()
+            if not translation:
+                continue
+            cell_index = int(note.get("cellIndex", -1))
+            if cell_index >= 0:
+                lines.append(f"Cell {cell_index + 1}: {translation}")
+            else:
+                lines.append(translation)
+        return {
+            "translation": "\n".join(lines),
+        }
 
     def _write_image(self, document: Document, block: dict[str, Any]) -> None:
         image_path = self._resolve_image_path(str(block.get("src") or ""))
@@ -845,6 +1057,319 @@ def sanitize_file_stem(value: str) -> str:
     candidate = WHITESPACE_RUN.sub("_", candidate)
     candidate = candidate.strip(".- ")
     return candidate or "clause-export"
+
+
+class MarkdownExportService:
+    def __init__(self, export_dir: str | Path, project_root: str | Path, media_root: str | Path | None = None) -> None:
+        self._export_dir = Path(export_dir)
+        self._project_root = Path(project_root)
+        self._media_root = Path(media_root) if media_root is not None else self._project_root / "artifacts" / "clause_browser_media"
+        self._export_dir.mkdir(parents=True, exist_ok=True)
+
+    def export(
+        self,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]] | None = None,
+        highlights: list[dict[str, Any]] | None = None,
+    ) -> ExportResult:
+        cleaned_title, payload, clause_count, _assets = self._build_markdown(
+            title=title,
+            roots=roots,
+            notes=notes or [],
+            highlights=highlights or [],
+        )
+        file_name = self._allocate_file_name(cleaned_title)
+        absolute_path = self._export_dir / file_name
+        absolute_path.write_text(payload, encoding="utf-8")
+        try:
+            relative_path = absolute_path.relative_to(self._project_root)
+        except ValueError:
+            relative_path = absolute_path
+        return ExportResult(
+            title=cleaned_title,
+            file_name=file_name,
+            absolute_path=str(absolute_path),
+            relative_path=str(relative_path),
+            clause_count=clause_count,
+        )
+
+    def export_bytes(
+        self,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]] | None = None,
+        highlights: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, bytes]:
+        cleaned_title, payload, _clause_count, _assets = self._build_markdown(
+            title=title,
+            roots=roots,
+            notes=notes or [],
+            highlights=highlights or [],
+        )
+        return f"{sanitize_file_stem(cleaned_title)}.md", payload.encode("utf-8")
+
+    def export_package_bytes(
+        self,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]] | None = None,
+        highlights: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, bytes]:
+        cleaned_title, payload, _clause_count, assets = self._build_markdown(
+            title=title,
+            roots=roots,
+            notes=notes or [],
+            highlights=highlights or [],
+            package_assets=True,
+        )
+        file_name = f"{sanitize_file_stem(cleaned_title)}.zip"
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("document.md", payload.encode("utf-8"))
+            for relative_path, asset_bytes in sorted(assets.items()):
+                archive.writestr(relative_path, asset_bytes)
+        return file_name, buffer.getvalue()
+
+    def _build_markdown(
+        self,
+        *,
+        title: str,
+        roots: list[dict[str, Any]],
+        notes: list[dict[str, Any]],
+        highlights: list[dict[str, Any]],
+        package_assets: bool = False,
+    ) -> tuple[str, str, int, dict[str, bytes]]:
+        del highlights
+        cleaned_title = title.strip()
+        if not cleaned_title:
+            raise ValueError("Document title is required.")
+        if not roots:
+            raise ValueError("At least one loaded clause is required to export Markdown.")
+
+        note_index = DocxExportService._index_notes(notes)
+        lines: list[str] = [f"# {cleaned_title}", ""]
+        clause_count = 0
+        package_context = {"assets": {}} if package_assets else None
+        grouped_roots: dict[str, list[dict[str, Any]]] = {}
+        spec_titles: dict[str, str] = {}
+
+        for root in roots:
+            spec_no = str(root.get("specNo") or "").strip() or "Unknown Spec"
+            if spec_no not in grouped_roots:
+                grouped_roots[spec_no] = []
+                spec_titles[spec_no] = str(root.get("specTitle") or "").strip()
+            grouped_roots[spec_no].append(self._sort_clause_tree(root))
+
+        for spec_no in sorted(grouped_roots.keys(), key=cmp_to_key(DocxExportService._compare_mixed_token)):
+            spec_title = spec_titles.get(spec_no, "")
+            spec_heading = spec_no if not spec_title else f"{spec_no} {spec_title}"
+            lines.extend([f"## {spec_heading}", ""])
+            for root in sorted(grouped_roots.get(spec_no, []), key=cmp_to_key(DocxExportService._compare_clause_nodes)):
+                clause_count += self._write_clause_markdown(
+                    lines=lines,
+                    clause=root,
+                    depth=1,
+                    note_index=note_index,
+                    package_context=package_context,
+                )
+
+        while lines and not lines[-1]:
+            lines.pop()
+        return cleaned_title, "\n".join(lines) + "\n", clause_count, dict((package_context or {}).get("assets", {}))
+
+    def _allocate_file_name(self, title: str) -> str:
+        base_name = sanitize_file_stem(title)
+        candidate = f"{base_name}.md"
+        suffix = 2
+        while (self._export_dir / candidate).exists():
+            candidate = f"{base_name}_{suffix}.md"
+            suffix += 1
+        return candidate
+
+    def _sort_clause_tree(self, clause: dict[str, Any]) -> dict[str, Any]:
+        children = [self._sort_clause_tree(child) for child in clause.get("children") or []]
+        sorted_children = sorted(children, key=cmp_to_key(DocxExportService._compare_clause_nodes))
+        return {**clause, "children": sorted_children}
+
+    def _write_clause_markdown(
+        self,
+        *,
+        lines: list[str],
+        clause: dict[str, Any],
+        depth: int,
+        note_index: dict[str, Any],
+        package_context: dict[str, Any] | None,
+    ) -> int:
+        clause_id = str(clause.get("clauseId") or "").strip()
+        clause_title = str(clause.get("clauseTitle") or "").strip()
+        clause_key = str(clause.get("key") or "").strip()
+        heading_text = " ".join(part for part in [clause_id, clause_title] if part).strip() or clause_id or clause_title
+        lines.extend([f"{'#' * min(depth + 2, 6)} {heading_text}", ""])
+
+        blocks = list(clause.get("blocks") or [])
+        if blocks:
+            for block_index, block in enumerate(blocks):
+                self._write_block_markdown(
+                    lines=lines,
+                    block=block,
+                    clause_key=clause_key,
+                    block_index=block_index,
+                    note_index=note_index,
+                    package_context=package_context,
+                )
+        else:
+            body = str(clause.get("text") or "").strip()
+            if body:
+                for paragraph in [part.strip() for part in body.splitlines() if part.strip()]:
+                    lines.extend([paragraph, ""])
+
+        for note in note_index.get("clause", {}).get(clause_key, []):
+            translation = str(note.get("translation") or "").strip()
+            if translation:
+                lines.extend([f"> Note: {translation}", ""])
+
+        total = 1
+        for child in clause.get("children") or []:
+            total += self._write_clause_markdown(
+                lines=lines,
+                clause=child,
+                depth=depth + 1,
+                note_index=note_index,
+                package_context=package_context,
+            )
+        return total
+
+    def _write_block_markdown(
+        self,
+        *,
+        lines: list[str],
+        block: dict[str, Any],
+        clause_key: str,
+        block_index: int,
+        note_index: dict[str, Any],
+        package_context: dict[str, Any] | None,
+    ) -> None:
+        block_type = str(block.get("type") or "")
+        selection_notes = note_index.get("selection", {}).get((clause_key, block_index), [])
+        if block_type == "paragraph":
+            text = str(block.get("text") or "").strip()
+            if text:
+                lines.extend([text, ""])
+            self._append_selection_notes(lines, selection_notes)
+            return
+        if block_type == "table":
+            rows = self._table_rows_for_markdown(block)
+            if rows:
+                lines.extend(self._rows_to_gfm_table(rows))
+                lines.append("")
+            self._append_selection_notes(lines, selection_notes)
+            return
+        if block_type == "image":
+            src = str(block.get("src") or "").strip()
+            alt = str(block.get("alt") or "").strip() or "Image"
+            resolved_src = self._resolve_markdown_image_src(src, package_context=package_context)
+            lines.extend([f"![{alt}]({resolved_src})" if resolved_src else alt, ""])
+            self._append_selection_notes(lines, selection_notes)
+            return
+        self._append_selection_notes(lines, selection_notes)
+
+    @staticmethod
+    def _append_selection_notes(lines: list[str], selection_notes: list[dict[str, Any]]) -> None:
+        for note in selection_notes:
+            translation = str(note.get("translation") or "").strip()
+            if translation:
+                origin = MarkdownExportService._format_note_origin(note)
+                lines.extend([f"> Note{origin}: {translation}", ""])
+
+    @staticmethod
+    def _format_note_origin(note: dict[str, Any]) -> str:
+        parts: list[str] = []
+        row_index = note.get("rowIndex")
+        cell_id = str(note.get("cellId") or "").strip()
+        if row_index is not None and int(row_index) >= 0:
+            parts.append(f"rowIndex={int(row_index)}")
+        if cell_id:
+            parts.append(f"cellId={cell_id}")
+        return f" ({', '.join(parts)})" if parts else ""
+
+    @staticmethod
+    def _table_rows_for_markdown(block: dict[str, Any]) -> list[list[str]]:
+        rows = block.get("rows") or []
+        if rows:
+            return [[str(cell or "") for cell in row] for row in rows if isinstance(row, list)]
+        cells = block.get("cells") or []
+        simple_rows = DocxExportService._extract_simple_rows_from_cells(list(cells))
+        if simple_rows is not None:
+            return simple_rows
+        flattened_rows: list[list[str]] = []
+        for row in cells:
+            if not isinstance(row, list):
+                continue
+            flattened_rows.append([str((cell or {}).get("text") or "") for cell in row if isinstance(cell, dict)])
+        return flattened_rows
+
+    @staticmethod
+    def _rows_to_gfm_table(rows: list[list[str]]) -> list[str]:
+        normalized_rows = [row for row in rows if row]
+        if not normalized_rows:
+            return []
+        width = max(len(row) for row in normalized_rows)
+        padded_rows = [row + [""] * (width - len(row)) for row in normalized_rows]
+        body_rows = padded_rows[1:] or [[""] * width]
+        return [
+            "| " + " | ".join(padded_rows[0]) + " |",
+            "| " + " | ".join(["---"] * width) + " |",
+            *(("| " + " | ".join(row) + " |") for row in body_rows),
+        ]
+
+    def _resolve_markdown_image_src(self, src: str, *, package_context: dict[str, Any] | None) -> str:
+        candidate = self._resolve_image_path(src)
+        if candidate and candidate.exists():
+            if package_context is not None:
+                relative_path = self._add_packaged_image(candidate, package_context)
+                if relative_path:
+                    return relative_path
+            data_uri = self._image_path_to_data_uri(candidate)
+            if data_uri:
+                return data_uri
+        return src
+
+    def _add_packaged_image(self, path: Path, package_context: dict[str, Any]) -> str:
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return ""
+        assets = package_context.setdefault("assets", {})
+        relative_source = ""
+        try:
+            relative_source = str(path.relative_to(self._media_root)).replace("\\", "/")
+        except ValueError:
+            relative_source = path.name
+        archive_path = f"assets/{relative_source.lstrip('/')}"
+        assets[archive_path] = payload
+        return archive_path
+
+    def _resolve_image_path(self, src: str) -> Path | None:
+        if not src:
+            return None
+        if src.startswith("/clause-browser-media/"):
+            relative = src.removeprefix("/clause-browser-media/").lstrip("/")
+            return self._media_root / relative
+        candidate = Path(src)
+        if candidate.is_absolute():
+            return candidate
+        return self._project_root / src.lstrip("./")
+
+    @staticmethod
+    def _image_path_to_data_uri(path: Path) -> str:
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            return ""
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        encoded = base64.b64encode(payload).decode("ascii")
+        return f"data:{media_type};base64,{encoded}"
 
 
 @dataclass(frozen=True)
