@@ -82397,6 +82397,23 @@ require_plugin4();
 // node_modules/tinymce/plugins/link/index.js
 require_plugin5();
 
+// static/js/utils/image-blocks.js
+function shouldAllowNativeImageContextMenu(target) {
+  const isElementLike = (value) => Boolean(value && typeof value === "object" && typeof value.tagName === "string");
+  const hasHTMLElement = typeof HTMLElement !== "undefined";
+  const element = hasHTMLElement && target instanceof HTMLElement ? target : hasHTMLElement && target?.parentElement instanceof HTMLElement ? target.parentElement : isElementLike(target) ? target : isElementLike(target?.parentElement) ? target.parentElement : null;
+  if (!element) {
+    return false;
+  }
+  if (element.tagName?.toLowerCase?.() === "img") {
+    return true;
+  }
+  if (typeof element.closest === "function" && element.closest(".docx-figure[data-block-type='image']")) {
+    return true;
+  }
+  return false;
+}
+
 // src/tinymce-editor.js
 var editorMap = /* @__PURE__ */ new WeakMap();
 async function mountClauseEditor(element, { html = "", readOnly = false, onChange = () => {
@@ -82468,7 +82485,10 @@ async function mountClauseEditor(element, { html = "", readOnly = false, onChang
       .ephox-snooker-resizer-cols { cursor: col-resize; }
       .ephox-snooker-resizer-rows { cursor: row-resize; }
       .ephox-snooker-resizer-bar.ephox-snooker-resizer-bar-dragging { opacity: 1; }
-      img { max-width: 100%; height: auto; display: block; margin: 12px auto; }
+      img { max-width: 100%; min-width: min(100%, 1080px); height: auto; display: block; margin: 12px auto; }
+      @media (max-width: 720px) {
+        img { min-width: min(100%, 320px); }
+      }
     `,
     setup(editor2) {
       let changeTimer = 0;
@@ -82495,8 +82515,12 @@ async function mountClauseEditor(element, { html = "", readOnly = false, onChang
         onFocus(editor2);
       });
       editor2.on("contextmenu", (event) => {
-        event.preventDefault();
         const original = event?.originalEvent || event;
+        if (shouldAllowNativeImageContextMenu(original?.target)) {
+          onContextMenu(original, editor2, { native: true });
+          return;
+        }
+        event.preventDefault();
         onContextMenu(original, editor2);
       });
       editor2.on("NodeChange SelectionChange TableSelectionChange click mouseup keyup", () => {

@@ -7,6 +7,7 @@ import "tinymce/plugins/lists";
 import "tinymce/plugins/image";
 import "tinymce/plugins/autoresize";
 import "tinymce/plugins/link";
+import { shouldAllowNativeImageContextMenu } from "../static/js/utils/image-blocks.js";
 
 const editorMap = new WeakMap();
 
@@ -83,7 +84,10 @@ export async function mountClauseEditor(
       .ephox-snooker-resizer-cols { cursor: col-resize; }
       .ephox-snooker-resizer-rows { cursor: row-resize; }
       .ephox-snooker-resizer-bar.ephox-snooker-resizer-bar-dragging { opacity: 1; }
-      img { max-width: 100%; height: auto; display: block; margin: 12px auto; }
+      img { max-width: 100%; min-width: min(100%, 1080px); height: auto; display: block; margin: 12px auto; }
+      @media (max-width: 720px) {
+        img { min-width: min(100%, 320px); }
+      }
     `,
     setup(editor) {
       let changeTimer = 0;
@@ -110,8 +114,12 @@ export async function mountClauseEditor(
         onFocus(editor);
       });
       editor.on("contextmenu", (event) => {
-        event.preventDefault();
         const original = event?.originalEvent || event;
+        if (shouldAllowNativeImageContextMenu(original?.target)) {
+          onContextMenu(original, editor, { native: true });
+          return;
+        }
+        event.preventDefault();
         onContextMenu(original, editor);
       });
       editor.on("NodeChange SelectionChange TableSelectionChange click mouseup keyup", () => {

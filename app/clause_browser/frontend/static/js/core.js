@@ -62,6 +62,10 @@ import {
   compareMixedToken,
   groupRootsBySpec,
 } from "./utils/clause-tree-ui.js";
+import {
+  buildImageDisplayAttributes,
+  extractImageDisplayDimensionsFromElement,
+} from "./utils/image-blocks.js";
 import { createSpecbotController } from "./controllers/specbot-controller.js";
 import { createEditorDeleteController } from "./controllers/editor-delete-controller.js";
 import { createSelectionNoteController } from "./controllers/selection-note-controller.js";
@@ -1332,18 +1336,19 @@ function renderBlocks(node) {
       if (block.type === "image") {
         const src = block.src || "";
         const extension = src.split(".").pop()?.toLowerCase() || "";
+        const imageAttributes = buildImageDisplayAttributes(block);
         if (extension === "wmf" || extension === "emf") {
           const svgSrc = src.replace(/\.wmf$/i, ".svg").replace(/\.emf$/i, ".svg");
           return `
             <figure class="docx-figure" tabindex="0" data-block-type="image" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
-              <img src="${escapeHtml(svgSrc)}" alt="${escapeHtml(block.alt || "")}" />
+              <img src="${escapeHtml(svgSrc)}" alt="${escapeHtml(block.alt || "")}"${imageAttributes} />
               <figcaption class="muted">${escapeHtml(block.alt || "Image")}</figcaption>
             </figure>
           `;
         }
         return `
           <figure class="docx-figure" tabindex="0" data-block-type="image" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
-            <img src="${escapeHtml(src)}" alt="${escapeHtml(block.alt || "")}" />
+            <img src="${escapeHtml(src)}" alt="${escapeHtml(block.alt || "")}"${imageAttributes} />
             <figcaption class="muted">${escapeHtml(block.alt || "Image")}</figcaption>
           </figure>
         `;
@@ -1368,7 +1373,10 @@ function buildEditorHtmlFromBlocks(clauseKey, blocks) {
         const alt = String(block.alt || "").trim();
         const blockHighlighted = hasBlockHighlight(clauseKey, blockIndex);
         const className = blockHighlighted ? ' class="editor-block is-highlighted"' : ' class="editor-block"';
-        return src ? `<p${className} data-editor-block-index="${blockIndex}" data-editor-block-id="${escapeHtml(blockId)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" /></p>` : "";
+        const imageAttributes = buildImageDisplayAttributes(block);
+        return src
+          ? `<p${className} data-editor-block-index="${blockIndex}" data-editor-block-id="${escapeHtml(blockId)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}"${imageAttributes} /></p>`
+          : "";
       }
       if (block.type === "table") {
         return buildEditorHtmlForTable(clauseKey, blockIndex, block);
@@ -1443,7 +1451,13 @@ function parseEditorHtmlToBlocks(html) {
     if (tag === "img") {
       const src = String(node.getAttribute("src") || "").trim();
       if (src) {
-        blocks.push({ id: createStableBlockId(), type: "image", src, alt: String(node.getAttribute("alt") || "").trim() });
+        blocks.push({
+          id: createStableBlockId(),
+          type: "image",
+          src,
+          alt: String(node.getAttribute("alt") || "").trim(),
+          ...extractImageDisplayDimensionsFromElement(node),
+        });
       }
       return;
     }
@@ -1453,7 +1467,13 @@ function parseEditorHtmlToBlocks(html) {
         const image = node.firstElementChild;
         const src = String(image?.getAttribute("src") || "").trim();
         if (src) {
-          blocks.push({ id: String(node.getAttribute("data-editor-block-id") || "") || createStableBlockId(), type: "image", src, alt: String(image?.getAttribute("alt") || "").trim() });
+          blocks.push({
+            id: String(node.getAttribute("data-editor-block-id") || "") || createStableBlockId(),
+            type: "image",
+            src,
+            alt: String(image?.getAttribute("alt") || "").trim(),
+            ...extractImageDisplayDimensionsFromElement(image),
+          });
         }
         return;
       }
@@ -2022,6 +2042,7 @@ function bindTreeEvents(scope = elements.treeContainer) {
     ensureBlocksHaveStableIds,
     updateSelectionStateFromEditorSelection,
     hideNodeMenu,
+    hideSelectionMenu,
     showSelectionMenu,
     syncEditorHtmlToNode,
   });
@@ -2137,6 +2158,10 @@ function bindTreeEvents(scope = elements.treeContainer) {
     figure.addEventListener("click", () => {
       figure.focus();
       updateSelectionStateFromElement(figure, "", false);
+    });
+    figure.addEventListener("contextmenu", () => {
+      hideNodeMenu();
+      hideSelectionMenu();
     });
   });
 

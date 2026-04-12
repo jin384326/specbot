@@ -1,4 +1,5 @@
 import { mountClauseEditor } from "../vendor/tinymce-editor.js";
+import { shouldAllowNativeImageContextMenu } from "../utils/image-blocks.js";
 
 function initializeClauseEditors({
   scope,
@@ -10,6 +11,7 @@ function initializeClauseEditors({
   ensureBlocksHaveStableIds,
   updateSelectionStateFromEditorSelection,
   hideNodeMenu,
+  hideSelectionMenu,
   showSelectionMenu,
   syncEditorHtmlToNode,
 }) {
@@ -32,7 +34,12 @@ function initializeClauseEditors({
         state.ui.viewportKey = nodeKey;
         updateSelectedClauseActiveState();
       },
-      onContextMenu: (event, editor) => {
+      onContextMenu: (event, editor, options = {}) => {
+        if (options.native || shouldAllowNativeImageContextMenu(event?.target)) {
+          hideNodeMenu();
+          hideSelectionMenu();
+          return;
+        }
         updateSelectionStateFromEditorSelection(editor);
         hideNodeMenu();
         showSelectionMenu(event.clientX || 0, event.clientY || 0);

@@ -1453,6 +1453,7 @@ body[data-board-mode="view"] .tox-pop {
 .docx-figure img {
   display: block;
   max-width: 100%;
+  min-width: min(100%, 1080px);
   height: auto;
   margin: 0 auto;
 }
@@ -1480,9 +1481,17 @@ body[data-board-mode="view"] .tox-pop {
 .docx-figure canvas {
   display: block;
   max-width: 100%;
+  min-width: min(100%, 1080px);
   height: auto;
   margin: 0 auto;
   background: white;
+}
+
+@media (max-width: 720px) {
+  .docx-figure img,
+  .docx-figure canvas {
+    min-width: min(100%, 320px);
+  }
 }
 
 .tree-children {

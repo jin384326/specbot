@@ -13,7 +13,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Inches, Pt
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
@@ -214,6 +214,22 @@ def write_docx_with_indented_paragraph(tmp_path: Path) -> Path:
     paragraph.paragraph_format.left_indent = Pt(18)
     paragraph.paragraph_format.first_line_indent = Pt(-18)
     path = tmp_path / "23501-indented-paragraph.docx"
+    doc.save(path)
+    return path
+
+
+def write_docx_with_sized_image(tmp_path: Path) -> Path:
+    image_path = tmp_path / "sized.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7VQAAAAASUVORK5CYII="
+        )
+    )
+    doc = Document()
+    doc.add_paragraph("5 Session management", style="Heading 1")
+    doc.add_paragraph("Sized image example.")
+    doc.add_paragraph().add_run().add_picture(str(image_path), width=Inches(4))
+    path = tmp_path / "sized-image.docx"
     doc.save(path)
     return path
 
@@ -537,6 +553,22 @@ def test_subtree_endpoint_returns_descendants(tmp_path: Path) -> None:
     assert payload["children"][0]["clauseId"] == "5.1"
     assert payload["children"][0]["children"][0]["clauseId"] == "5.1.1"
     assert payload["blocks"][1]["rows"][1][1] == "SSC1"
+
+
+def test_clause_browser_corpus_preserves_docx_image_display_size(tmp_path: Path) -> None:
+    source_path = write_docx_with_sized_image(tmp_path)
+    browser_corpus_path = tmp_path / "browser-corpus.jsonl"
+
+    build_clause_browser_corpus(
+        inputs=[str(source_path)],
+        output_path=browser_corpus_path,
+        media_dir=tmp_path / "media",
+    )
+
+    records = [json.loads(line) for line in browser_corpus_path.open(encoding="utf-8")]
+    image_block = next(block for block in records[0]["blocks"] if block["type"] == "image")
+    assert image_block["displayWidthPx"] == 384
+    assert image_block["displayHeightPx"] == 384
 
 
 def test_numbered_body_paragraph_does_not_become_clause(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ IMAGE_CONTENT_TYPES = {
     "image/tiff": ".tiff",
     "image/webp": ".webp",
 }
+
+EMU_PER_PIXEL = 9525
 
 
 @dataclass
@@ -223,18 +226,18 @@ class RichDocxClauseParser:
 
     def _extract_paragraph_images(self, paragraph: Paragraph, spec_no: str, clause_id: str) -> list[dict[str, Any]]:
         image_blocks: list[dict[str, Any]] = []
-        relationship_ids: list[str] = []
+        relationship_refs: list[tuple[str, dict[str, int]]] = []
         for blip in paragraph._p.xpath(".//a:blip"):
             embed = blip.get(qn("r:embed"))
             if embed:
-                relationship_ids.append(embed)
+                relationship_refs.append((embed, self._extract_drawing_display_size(blip)))
         for imagedata in paragraph._p.xpath(".//*[local-name()='imagedata']"):
             rel_id = imagedata.get(qn("r:id"))
             if rel_id:
-                relationship_ids.append(rel_id)
+                relationship_refs.append((rel_id, self._extract_vml_display_size(imagedata)))
 
         seen: set[str] = set()
-        for rel_id in relationship_ids:
+        for rel_id, display_size in relationship_refs:
             if rel_id in seen:
                 continue
             seen.add(rel_id)
@@ -249,14 +252,82 @@ class RichDocxClauseParser:
             if not output_path.exists():
                 output_path.write_bytes(image_part.blob)
             served_path = self._convert_vector_image_if_needed(output_path)
-            image_blocks.append(
-                {
-                    "type": "image",
-                    "src": f"{self._media_mount_prefix}/{spec_no}/{clause_id.replace('/', '_')}/{served_path.name}",
-                    "alt": normalize_whitespace(paragraph.text) or f"{clause_id} image",
-                }
-            )
+            image_block = {
+                "type": "image",
+                "src": f"{self._media_mount_prefix}/{spec_no}/{clause_id.replace('/', '_')}/{served_path.name}",
+                "alt": normalize_whitespace(paragraph.text) or f"{clause_id} image",
+            }
+            image_block.update(display_size)
+            image_blocks.append(image_block)
         return image_blocks
+
+    @staticmethod
+    def _extract_drawing_display_size(blip: Any) -> dict[str, int]:
+        container = next(
+            (
+                ancestor
+                for ancestor in blip.iterancestors()
+                if ancestor.tag.endswith("}inline") or ancestor.tag.endswith("}anchor")
+            ),
+            None,
+        )
+        if container is None:
+            return {}
+        extent = next((child for child in container if child.tag.endswith("}extent")), None)
+        if extent is None:
+            return {}
+        width = RichDocxClauseParser._emu_to_pixels(extent.get("cx"))
+        height = RichDocxClauseParser._emu_to_pixels(extent.get("cy"))
+        payload: dict[str, int] = {}
+        if width:
+            payload["displayWidthPx"] = width
+        if height:
+            payload["displayHeightPx"] = height
+        return payload
+
+    @staticmethod
+    def _extract_vml_display_size(imagedata: Any) -> dict[str, int]:
+        shape = next((ancestor for ancestor in imagedata.iterancestors() if ancestor.tag.endswith("}shape")), None)
+        style = str(shape.get("style") or "") if shape is not None else ""
+        if not style:
+            return {}
+        width = RichDocxClauseParser._style_length_to_pixels(style, "width")
+        height = RichDocxClauseParser._style_length_to_pixels(style, "height")
+        payload: dict[str, int] = {}
+        if width:
+            payload["displayWidthPx"] = width
+        if height:
+            payload["displayHeightPx"] = height
+        return payload
+
+    @staticmethod
+    def _emu_to_pixels(value: Any) -> int:
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if numeric <= 0:
+            return 0
+        return int(round(numeric / EMU_PER_PIXEL))
+
+    @staticmethod
+    def _style_length_to_pixels(style: str, property_name: str) -> int:
+        match = re.search(rf"{re.escape(property_name)}\s*:\s*([0-9.]+)(pt|px|in|cm|mm)", style, flags=re.IGNORECASE)
+        if not match:
+            return 0
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit == "px":
+            return int(round(value))
+        if unit == "pt":
+            return int(round(value * 96 / 72))
+        if unit == "in":
+            return int(round(value * 96))
+        if unit == "cm":
+            return int(round(value * 96 / 2.54))
+        if unit == "mm":
+            return int(round(value * 96 / 25.4))
+        return 0
 
     @staticmethod
     def _extract_paragraph_format(paragraph: Paragraph) -> dict[str, float | int]:
