@@ -43,6 +43,9 @@ IMAGE_CONTENT_TYPES = {
 }
 
 EMU_PER_PIXEL = 9525
+VECTOR_IMAGE_SUFFIXES = {".wmf", ".emf"}
+DEFAULT_VECTOR_EXPORT_DPI = 192
+DEFAULT_VECTOR_EXPORT_SCALE = 3
 
 
 @dataclass
@@ -251,7 +254,7 @@ class RichDocxClauseParser:
             output_path = output_dir / f"{digest}{extension}"
             if not output_path.exists():
                 output_path.write_bytes(image_part.blob)
-            served_path = self._convert_vector_image_if_needed(output_path)
+            served_path = self._prepare_browser_image(output_path)
             image_block = {
                 "type": "image",
                 "src": f"{self._media_mount_prefix}/{spec_no}/{clause_id.replace('/', '_')}/{served_path.name}",
@@ -260,6 +263,13 @@ class RichDocxClauseParser:
             image_block.update(display_size)
             image_blocks.append(image_block)
         return image_blocks
+
+    def _prepare_browser_image(self, path: Path) -> Path:
+        converted_path = self._convert_vector_image_if_needed(path)
+        browser_path = self._prepare_browser_raster_image(path)
+        if browser_path is not None:
+            return browser_path
+        return converted_path
 
     @staticmethod
     def _extract_drawing_display_size(blip: Any) -> dict[str, int]:
@@ -441,7 +451,7 @@ class RichDocxClauseParser:
 
     def _convert_vector_image_if_needed(self, path: Path) -> Path:
         suffix = path.suffix.lower()
-        if suffix not in {".wmf", ".emf"}:
+        if suffix not in VECTOR_IMAGE_SUFFIXES:
             return path
 
         description = self._describe_file(path)
@@ -468,6 +478,16 @@ class RichDocxClauseParser:
             return svg_path if svg_path.exists() else path
 
         return path
+
+    def _prepare_browser_raster_image(self, path: Path) -> Path | None:
+        suffix = path.suffix.lower()
+        if suffix not in VECTOR_IMAGE_SUFFIXES:
+            return None
+        png_path = path.with_suffix(".export.png")
+        if png_path.exists():
+            return png_path
+        self._run_inkscape_png_export(path, png_path)
+        return png_path if png_path.exists() else None
 
     @staticmethod
     def _describe_file(path: Path) -> str:
@@ -507,6 +527,36 @@ class RichDocxClauseParser:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+        )
+
+    @staticmethod
+    def _run_inkscape_png_export(source_path: Path, output_path: Path) -> None:
+        env = dict(os.environ)
+        env.setdefault("HOME", "/tmp/specbothome")
+        env.setdefault("XDG_RUNTIME_DIR", "/tmp/specbotruntime")
+        Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+        Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
+        base_dpi = max(96, int(os.environ.get("SPECBOT_CLAUSE_BROWSER_VECTOR_EXPORT_DPI", str(DEFAULT_VECTOR_EXPORT_DPI))))
+        export_scale = max(
+            1,
+            int(os.environ.get("SPECBOT_CLAUSE_BROWSER_VECTOR_EXPORT_SCALE", str(DEFAULT_VECTOR_EXPORT_SCALE))),
+        )
+        dpi = str(base_dpi * export_scale)
+        subprocess.run(
+            [
+                "inkscape",
+                str(source_path),
+                "--export-type=png",
+                f"--export-filename={output_path}",
+                f"--export-dpi={dpi}",
+                "--export-background=white",
+                "--export-background-opacity=1",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
         )
 
     @staticmethod

@@ -1335,17 +1335,7 @@ function renderBlocks(node) {
       }
       if (block.type === "image") {
         const src = block.src || "";
-        const extension = src.split(".").pop()?.toLowerCase() || "";
         const imageAttributes = buildImageDisplayAttributes(block);
-        if (extension === "wmf" || extension === "emf") {
-          const svgSrc = src.replace(/\.wmf$/i, ".svg").replace(/\.emf$/i, ".svg");
-          return `
-            <figure class="docx-figure" tabindex="0" data-block-type="image" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
-              <img src="${escapeHtml(svgSrc)}" alt="${escapeHtml(block.alt || "")}"${imageAttributes} />
-              <figcaption class="muted">${escapeHtml(block.alt || "Image")}</figcaption>
-            </figure>
-          `;
-        }
         return `
           <figure class="docx-figure" tabindex="0" data-block-type="image" data-clause-key="${escapeHtml(node.key)}" data-block-index="${index}">
             <img src="${escapeHtml(src)}" alt="${escapeHtml(block.alt || "")}"${imageAttributes} />

@@ -578,6 +578,11 @@ class DocxExportService:
         return self._project_root / src.lstrip("./")
 
     def _prepare_export_image(self, path: Path) -> Path:
+        if path.suffix.lower() in {".wmf", ".emf"}:
+            png_path = path.with_suffix(".export.png")
+            if png_path.exists():
+                return png_path
+            return path
         if path.suffix.lower() != ".svg":
             return path
         png_path = path.with_suffix(".export.png")

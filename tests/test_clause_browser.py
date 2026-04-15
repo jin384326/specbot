@@ -24,6 +24,7 @@ from app.clause_browser.api import (
     SpecbotQueryRequest,
     create_router,
 )
+from app.clause_browser.backend.render_parser import RichDocxClauseParser
 from app.clause_browser.backend.board_api import BoardCreatePayload, BoardLockPayload, BoardUpdatePayload
 from app.clause_browser.preprocess import build_clause_browser_corpus
 from app.clause_browser.repository import ClauseRepository
@@ -569,6 +570,57 @@ def test_clause_browser_corpus_preserves_docx_image_display_size(tmp_path: Path)
     image_block = next(block for block in records[0]["blocks"] if block["type"] == "image")
     assert image_block["displayWidthPx"] == 384
     assert image_block["displayHeightPx"] == 384
+
+
+def test_rich_docx_clause_parser_prefers_png_for_vector_browser_images(tmp_path: Path, monkeypatch) -> None:
+    parser = RichDocxClauseParser(media_root=tmp_path / "media")
+    vector_path = tmp_path / "media" / "23501" / "5" / "diagram.wmf"
+    vector_path.parent.mkdir(parents=True, exist_ok=True)
+    vector_path.write_bytes(b"wmf")
+
+    def fake_convert(self, path: Path) -> Path:
+        svg_path = path.with_suffix(".svg")
+        svg_path.write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8")
+        return svg_path
+
+    def fake_export(self, source_path: Path, output_path: Path) -> None:
+        output_path.write_bytes(
+            base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII=")
+        )
+
+    monkeypatch.setattr(RichDocxClauseParser, "_convert_vector_image_if_needed", fake_convert)
+    monkeypatch.setattr(RichDocxClauseParser, "_run_inkscape_png_export", fake_export)
+
+    browser_path = parser._prepare_browser_image(vector_path)
+
+    assert browser_path.suffix == ".png"
+    assert browser_path.name == "diagram.export.png"
+    assert browser_path.exists()
+    assert vector_path.with_suffix(".svg").exists()
+
+
+def test_rich_docx_clause_parser_uses_configured_vector_export_dpi(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command, check, stdout, stderr, text, env):  # type: ignore[no-untyped-def]
+        captured["command"] = command
+        output_path = next(Path(part.split("=", 1)[1]) for part in command if part.startswith("--export-filename="))
+        output_path.write_bytes(
+            base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII=")
+        )
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return Result()
+
+    monkeypatch.setenv("SPECBOT_CLAUSE_BROWSER_VECTOR_EXPORT_DPI", "288")
+    monkeypatch.setenv("SPECBOT_CLAUSE_BROWSER_VECTOR_EXPORT_SCALE", "2")
+    monkeypatch.setattr("app.clause_browser.backend.render_parser.subprocess.run", fake_run)
+
+    RichDocxClauseParser._run_inkscape_png_export(tmp_path / "diagram.wmf", tmp_path / "diagram.export.png")
+
+    assert "--export-dpi=576" in captured["command"]
 
 
 def test_numbered_body_paragraph_does_not_become_clause(tmp_path: Path) -> None:
@@ -1360,6 +1412,23 @@ def test_docx_export_service_includes_notes_and_images(tmp_path: Path) -> None:
     assert len(exported.inline_shapes) == 1
     assert len(exported.tables) == 1
     assert exported.tables[0].style.name == "Table Grid"
+
+
+def test_docx_export_service_prefers_prebuilt_png_for_svg_images(tmp_path: Path) -> None:
+    export_dir = tmp_path / "exports"
+    media_dir = tmp_path / "artifacts" / "clause_browser_media" / "23501" / "5"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svg_path = media_dir / "diagram.svg"
+    svg_path.write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8")
+    png_path = media_dir / "diagram.export.png"
+    png_path.write_bytes(
+        base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn9l5QAAAAASUVORK5CYII=")
+    )
+    service = DocxExportService(export_dir=export_dir, project_root=tmp_path)
+
+    resolved = service._prepare_export_image(svg_path)
+
+    assert resolved == png_path
 
 
 def test_docx_export_service_applies_paragraph_and_table_highlights(tmp_path: Path) -> None:
