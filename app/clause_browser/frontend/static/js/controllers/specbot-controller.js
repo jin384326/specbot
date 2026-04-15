@@ -18,6 +18,7 @@ export function createSpecbotController(dependencies) {
     getSpecbotQueryLoadingLabel,
     compareSpecbotHits,
     compareMixedToken,
+    mergeSpecbotHits,
     escapeHtml,
     persistSessionState,
     setMessage,
@@ -243,14 +244,12 @@ export function createSpecbotController(dependencies) {
     try {
       const exclusions = buildSpecbotExclusions();
       const queryDepth = getSelectedSpecbotDepth();
-      state.ui.specbotResults = [];
       state.ui.specbotSettings = {
         ...state.ui.specbotSettings,
         iterations: getIterationsForDepth(queryDepth),
         queryDepth,
       };
       persistSessionState();
-      renderSpecbotResults();
       const scope = getBoardScope();
       const response = await streamSpecbotQuery({
         query,
@@ -264,7 +263,11 @@ export function createSpecbotController(dependencies) {
         excludeSpecs: exclusions.excludeSpecs,
         excludeClauses: exclusions.excludeClauses,
       });
-      state.ui.specbotResults = filterSpecbotHitsByExclusions(response.hits || [], exclusions).sort(compareSpecbotHits);
+      state.ui.specbotResults = mergeSpecbotHits(state.ui.specbotResults, response.hits || [], {
+        exclusions,
+        filterHitsByExclusions: filterSpecbotHitsByExclusions,
+        compareHits: compareSpecbotHits,
+      });
       persistSessionState();
       renderSpecbotResults();
       setMessage(`SpecBot query 완료: ${query}`, false);

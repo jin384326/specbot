@@ -166,6 +166,16 @@ function createControllerFixture() {
     getSpecbotQueryLoadingLabel: () => "loading",
     compareSpecbotHits: (left, right) => `${left.specNo}:${left.clauseId}`.localeCompare(`${right.specNo}:${right.clauseId}`),
     compareMixedToken: (left, right) => String(left).localeCompare(String(right)),
+    mergeSpecbotHits: (existingHits, incomingHits, { exclusions, filterHitsByExclusions, compareHits }) => {
+      const merged = new Map((existingHits || []).map((item) => [`${item.specNo}:${item.clauseId}`, item]));
+      for (const hit of filterHitsByExclusions(incomingHits || [], exclusions)) {
+        const key = `${hit.specNo}:${hit.clauseId}`;
+        if (!merged.has(key)) {
+          merged.set(key, hit);
+        }
+      }
+      return [...merged.values()].sort(compareHits);
+    },
     escapeHtml: (value) => String(value),
     persistSessionState: () => {
       events.persisted += 1;
@@ -176,7 +186,7 @@ function createControllerFixture() {
     beginBusy: () => true,
     endBusy: () => {},
     getBoardScope: () => ({ releaseData: "", release: "" }),
-    streamSpecbotQuery: async () => ({ hits: [] }),
+    streamSpecbotQuery: async () => ({ hits: [{ specNo: "600", clauseId: "7.2" }] }),
     isAbortedRequestError: () => false,
     loadClauseFromSpec: async () => {},
     renderLoadedTree: () => {},
@@ -214,4 +224,16 @@ test("specbot controller saves settings and prunes current results", () => {
     { specNo: "200", clauseId: "9.1" },
   ]);
   assert.ok(events.persisted >= 1);
+});
+
+test("specbot controller accumulates hits across queries", async () => {
+  const { controller, state } = createControllerFixture();
+
+  await controller.runSpecbotQuery("busy");
+
+  assert.deepEqual(state.ui.specbotResults, [
+    { specNo: "100", clauseId: "1.1" },
+    { specNo: "200", clauseId: "9.1" },
+    { specNo: "600", clauseId: "7.2" },
+  ]);
 });

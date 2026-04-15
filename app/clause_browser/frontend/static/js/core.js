@@ -81,6 +81,7 @@ import {
   createWorkApi,
   formatErrorMessage,
   isAbortedRequestError,
+  mergeSpecbotHits,
 } from "./utils/work-api.js";
 import { getExportRequestConfig, resolveDownloadFileName } from "./utils/export.js";
 
@@ -207,6 +208,7 @@ const specbotController = createSpecbotController({
   getSpecbotQueryLoadingLabel,
   compareSpecbotHits,
   compareMixedToken,
+  mergeSpecbotHits,
   escapeHtml,
   persistSessionState: () => persistSessionState(),
   setMessage: (text, isError) => setMessage(text, isError),
