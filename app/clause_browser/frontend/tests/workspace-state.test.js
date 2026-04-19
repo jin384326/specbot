@@ -18,6 +18,7 @@ test("createWorkspaceSnapshot preserves the current serializable workspace field
       collapsedSpecs: new Set(["23502"]),
       collapsedLoadedSpecs: new Set(["23501"]),
       clauseQuery: "session",
+      pickerSelectedClauseIdsBySpec: { "23501": ["5.1", "5.2"] },
       specbotQueryText: "PDU session",
       specbotSettings: { limit: 4 },
       boardScope: { releaseData: "2025-12", release: "Rel-18" },
@@ -37,6 +38,7 @@ test("createWorkspaceSnapshot preserves the current serializable workspace field
     collapsedSpecs: ["23502"],
     collapsedLoadedSpecs: ["23501"],
     clauseQuery: "session",
+    pickerSelectedClauseIdsBySpec: { "23501": ["5.1", "5.2"] },
     specbotQueryText: "PDU session",
     specbotSettings: { limit: 4 },
     boardScope: { releaseData: "2025-12", release: "Rel-18" },
@@ -59,6 +61,7 @@ test("normalizeWorkspacePayload applies the same fallback and normalization rule
       collapsedSpecs: ["23502"],
       collapsedLoadedSpecs: ["23501"],
       clauseQuery: "query",
+      pickerSelectedClauseIdsBySpec: { "23501": ["5.1", "5.2", "5.2"], "": ["1"] },
       specbotQueryText: "specbot",
       specbotResultsCollapsed: 1,
       notes: [{ id: "note-1" }],
@@ -79,6 +82,10 @@ test("normalizeWorkspacePayload applies the same fallback and normalization rule
         calls.push(["normalizeRejectedClauses", value]);
         return [{ specNo: "23501", clauseId: "5.1" }];
       },
+      normalizePickerSelectedClauseIdsBySpec(value) {
+        calls.push(["normalizePickerSelectedClauseIdsBySpec", value]);
+        return { "23501": ["5.1", "5.2"] };
+      },
       sortSpecbotHits(value) {
         calls.push(["sortSpecbotHits", value]);
         return [...value].reverse();
@@ -86,7 +93,7 @@ test("normalizeWorkspacePayload applies the same fallback and normalization rule
     }
   );
 
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.deepEqual(normalized, {
     activeSpecNo: "23501",
     loadedRoots: [{ key: "normalized" }],
@@ -96,6 +103,7 @@ test("normalizeWorkspacePayload applies the same fallback and normalization rule
     collapsedSpecs: new Set(["23502"]),
     collapsedLoadedSpecs: new Set(["23501"]),
     clauseQuery: "query",
+    pickerSelectedClauseIdsBySpec: { "23501": ["5.1", "5.2"] },
     specbotQueryText: "specbot",
     specbotResultsCollapsed: true,
     notes: [{ id: "note-1" }],
@@ -124,6 +132,7 @@ test("createEmptyWorkspaceSnapshot resets runtime fields but preserves caller-ow
       collapsedSpecs: [],
       collapsedLoadedSpecs: [],
       clauseQuery: "",
+      pickerSelectedClauseIdsBySpec: {},
       specbotQueryText: "",
       specbotResultsCollapsed: false,
       notes: [],

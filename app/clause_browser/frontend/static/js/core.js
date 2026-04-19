@@ -36,6 +36,16 @@ import {
   normalizeWorkspacePayload,
 } from "./utils/workspace-state.js";
 import {
+  clearPickerClauseSelection,
+  getPickerSelectedClauseIds,
+  getSelectedClauseRootIds,
+  mergeLoadedClauseRoot,
+  nodeIncludesDescendants,
+  normalizePickerSelectedClauseIdsBySpec,
+  pruneClauseSubtreeToSelection,
+  togglePickerClauseSelection,
+} from "./utils/clause-picker-state.js";
+import {
   buildSpecbotExclusions as buildSpecbotExclusionsFromState,
   dedupeClausePairs,
   filterSpecbotHitsByExclusions as filterSpecbotHitsByExclusionsFromState,
@@ -101,6 +111,7 @@ const state = {
     collapsedLoadedSpecs: new Set(),
     message: null,
     clauseQuery: "",
+    pickerSelectedClauseIdsBySpec: {},
     specbotQueryText: "",
     specbotSettings: {},
     boardScope: {
@@ -395,6 +406,8 @@ function bindElements() {
   elements.activeDocumentLabel = document.getElementById("active-document-label");
   elements.clauseSearch = document.getElementById("clause-search");
   elements.clauseTreeList = document.getElementById("clause-tree-list");
+  elements.pickerSelectedCount = document.getElementById("picker-selected-count");
+  elements.loadSelectedClausesButton = document.getElementById("load-selected-clauses");
   elements.treeContainer = document.getElementById("tree-container");
   elements.loadedSummary = document.getElementById("loaded-summary");
   elements.messageBar = document.getElementById("message-bar");
@@ -445,6 +458,9 @@ function bindElements() {
 
 function bindGlobalEvents() {
   elements.treeContainer.addEventListener("scroll", debounce(syncViewportSelection, 40));
+  elements.loadSelectedClausesButton?.addEventListener("click", async () => {
+    await loadSelectedClausesFromPicker();
+  });
   document.addEventListener("keydown", handleTreeDeleteKeydown);
   document.addEventListener("mouseup", handleGlobalMouseup);
   window.addEventListener("resize", debounce(handleViewportLayoutChange, 80));
@@ -828,6 +844,9 @@ async function selectDocument(specNo) {
   if (!beginBusy("문서를 불러오는 중입니다.", { allowDuringSpecbotQuery: true })) {
     return;
   }
+  if (state.activeSpecNo !== specNo) {
+    state.ui.pickerSelectedClauseIdsBySpec = clearPickerClauseSelection(state.ui.pickerSelectedClauseIdsBySpec);
+  }
   state.activeSpecNo = specNo;
   elements.activeDocumentLabel.textContent = specNo;
   elements.pickerTitle.textContent = `${specNo} 문서 검색`;
@@ -889,12 +908,14 @@ function renderClauseTree() {
       state.ui.clauseQuery
         ? '<div class="muted">현재 검색어와 일치하는 문서를 왼쪽에서 선택하세요. 절 번호, 절 제목, 본문으로 문서를 먼저 추릴 수 있습니다.</div>'
         : '<div class="muted">먼저 왼쪽에서 문서를 선택하세요. 절 검색은 문서 선택 전에도 절 번호, 절 제목, 본문 기준으로 문서를 좁히는 데 사용할 수 있습니다.</div>';
+    renderPickerSelectionControls();
     return;
   }
 
   const catalog = state.clauseCatalogBySpec[state.activeSpecNo];
   if (!catalog) {
     elements.clauseTreeList.innerHTML = '<div class="muted">절 트리를 불러오는 중입니다.</div>';
+    renderPickerSelectionControls();
     return;
   }
 
@@ -902,44 +923,79 @@ function renderClauseTree() {
   const visibleRootIds = query
     ? catalog.rootIds.filter((clauseId) => branchMatchesQuery(clauseId, catalog, query))
     : catalog.rootIds;
+  const visibleClauseIds = new Set();
 
   if (!visibleRootIds.length) {
     elements.clauseTreeList.innerHTML = '<div class="muted">일치하는 절이 없습니다.</div>';
+    renderPickerSelectionControls();
     return;
   }
 
+  const selectedClauseIds = new Set(getPickerSelectedClauseIds(state.ui.pickerSelectedClauseIdsBySpec, state.activeSpecNo));
   elements.clauseTreeList.innerHTML = `
     <div class="clause-branch">
-      ${visibleRootIds.map((clauseId) => renderClauseBranch(clauseId, catalog, query)).join("")}
+      ${visibleRootIds.map((clauseId) => renderClauseBranch(clauseId, catalog, query, selectedClauseIds, visibleClauseIds)).join("")}
     </div>
   `;
 
-  elements.clauseTreeList.querySelectorAll("[data-action='load-clause']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await loadClause(button.dataset.clauseId);
+  elements.clauseTreeList.querySelectorAll("[data-action='toggle-clause-pick']").forEach((input) => {
+    input.addEventListener("change", () => {
+      setPickerClauseSelected(input.dataset.clauseId || "", input.checked, visibleClauseIds);
     });
   });
 
   updateClauseTreeSummary(visibleRootIds.length);
+  renderPickerSelectionControls();
 }
 
-function renderClauseBranch(clauseId, catalog, query) {
+function renderClauseBranch(clauseId, catalog, query, selectedClauseIds, visibleClauseIds) {
   const item = catalog.byId[clauseId];
   const childIds = (catalog.childrenByParent[clauseId] || []).filter((childId) => !query || branchMatchesQuery(childId, catalog, query));
   const loaded = Boolean(findNodeByKey(`${state.activeSpecNo}:${clauseId}`));
+  const checked = selectedClauseIds.has(item.clauseId);
+  visibleClauseIds.add(item.clauseId);
 
   return `
     <div class="clause-branch">
       <div class="clause-line">
         <span class="clause-bullet">-</span>
-        <button class="clause-link" data-action="load-clause" data-clause-id="${escapeHtml(item.clauseId)}">
-          ${escapeHtml(item.clauseId)} ${escapeHtml(item.clauseTitle)}
-        </button>
+        <label class="clause-picker-label">
+          <input
+            class="clause-picker-checkbox"
+            type="checkbox"
+            data-action="toggle-clause-pick"
+            data-clause-id="${escapeHtml(item.clauseId)}"
+            ${checked ? "checked" : ""}
+          />
+          <span class="clause-link">${escapeHtml(item.clauseId)} ${escapeHtml(item.clauseTitle)}</span>
+        </label>
         <span class="muted">${loaded ? "loaded" : ""}</span>
       </div>
-      ${childIds.length ? `<div class="clause-children">${childIds.map((childId) => renderClauseBranch(childId, catalog, query)).join("")}</div>` : ""}
+      ${childIds.length ? `<div class="clause-children">${childIds.map((childId) => renderClauseBranch(childId, catalog, query, selectedClauseIds, visibleClauseIds)).join("")}</div>` : ""}
     </div>
   `;
+}
+
+function setPickerClauseSelected(clauseId, checked, visibleClauseIds = null) {
+  state.ui.pickerSelectedClauseIdsBySpec = togglePickerClauseSelection(
+    state.ui.pickerSelectedClauseIdsBySpec,
+    state.activeSpecNo,
+    clauseId,
+    checked,
+    state.clauseCatalogBySpec[state.activeSpecNo] || null,
+    visibleClauseIds
+  );
+  persistSessionState();
+  renderClauseTree();
+}
+
+function renderPickerSelectionControls() {
+  if (!elements.pickerSelectedCount || !elements.loadSelectedClausesButton) {
+    return;
+  }
+  const selectedCount = getPickerSelectedClauseIds(state.ui.pickerSelectedClauseIdsBySpec, state.activeSpecNo).length;
+  elements.pickerSelectedCount.textContent = `${selectedCount} selected`;
+  elements.loadSelectedClausesButton.disabled = Boolean(state.ui.busy) || selectedCount === 0;
 }
 
 function branchMatchesQuery(clauseId, catalog, query) {
@@ -966,11 +1022,25 @@ function updateClauseTreeSummary(visibleRootCount = null) {
   elements.pickerSelectionSummary.textContent =
     visibleRootCount === null
       ? `${state.activeSpecNo} 문서 선택됨. "문서 검색" 버튼을 다시 눌러 다른 문서를 고를 수 있습니다.`
-      : `${state.activeSpecNo} 문서 선택됨. 현재 표시된 최상위 절 ${visibleRootCount}개. 제목 클릭 시 하위 절까지 함께 추가됩니다.`;
+      : `${state.activeSpecNo} 문서 선택됨. 현재 표시된 최상위 절 ${visibleRootCount}개. 체크박스로 여러 절을 고른 뒤 한 번에 불러올 수 있습니다.`;
 }
 
-async function loadClause(clauseId) {
-  return loadClauseWithSpec(state.activeSpecNo, clauseId);
+function normalizeLoadedSubtree(subtree) {
+  const normalized = ensureNodeStableBlockIds(subtree);
+  return {
+    ...normalized,
+    descendantsLoaded: true,
+  };
+}
+
+async function fetchClauseSubtree(specNo, clauseId) {
+  const scope = getBoardScope();
+  const releaseData = encodeURIComponent(scope.releaseData);
+  const release = encodeURIComponent(scope.release);
+  const response = await apiGet(
+    `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses/${encodeURIComponent(clauseId)}/subtree?releaseData=${releaseData}&release=${release}`
+  );
+  return response.data;
 }
 
 async function loadClauseWithSpec(specNo, clauseId) {
@@ -1001,15 +1071,9 @@ async function loadClauseWithSpec(specNo, clauseId) {
   }
 
   try {
-    const scope = getBoardScope();
-    const releaseData = encodeURIComponent(scope.releaseData);
-    const release = encodeURIComponent(scope.release);
-    const response = await apiGet(
-      `/api/clause-browser/documents/${encodeURIComponent(specNo)}/clauses/${encodeURIComponent(clauseId)}/subtree?releaseData=${releaseData}&release=${release}`
-    );
-    const subtree = ensureNodeStableBlockIds(response.data);
+    const subtree = normalizeLoadedSubtree(await fetchClauseSubtree(specNo, clauseId));
     expandAll(subtree);
-    state.loadedRoots = mergeLoadedRoot(state.loadedRoots, subtree);
+    state.loadedRoots = mergeLoadedClauseRoot(state.loadedRoots, subtree);
     syncClauseAnnotationBlockReferences(subtree.key);
     pruneSpecbotResultsByCurrentExclusions();
     state.ui.focusedKey = subtree.key;
@@ -1037,6 +1101,68 @@ async function loadClauseFromSpec(specNo, clauseId) {
   await loadClauseWithSpec(specNo, clauseId);
 }
 
+async function loadSelectedClausesFromPicker() {
+  const specNo = state.activeSpecNo;
+  const clauseIds = getPickerSelectedClauseIds(state.ui.pickerSelectedClauseIdsBySpec, specNo);
+  const catalog = state.clauseCatalogBySpec[specNo];
+  if (!specNo) {
+    setMessage("먼저 문서를 선택하세요.", true);
+    return;
+  }
+  if (!clauseIds.length) {
+    setMessage("불러올 절을 먼저 선택하세요.", true);
+    return;
+  }
+  if (!beginBusy("선택한 절을 불러오는 중입니다.", { allowDuringSpecbotQuery: true })) {
+    return;
+  }
+
+  let addedCount = 0;
+  let skippedCount = 0;
+  let lastAddedKey = "";
+  try {
+    for (const rootClauseId of getSelectedClauseRootIds(catalog, clauseIds)) {
+      const subtree = normalizeLoadedSubtree(await fetchClauseSubtree(specNo, rootClauseId));
+      const prunedTree = pruneClauseSubtreeToSelection(subtree, clauseIds);
+      if (!prunedTree) {
+        skippedCount += 1;
+        continue;
+      }
+      state.loadedRoots = mergeLoadedClauseRoot(state.loadedRoots, prunedTree);
+      syncClauseAnnotationBlockReferences(prunedTree.key);
+      state.ui.focusedKey = prunedTree.key;
+      lastAddedKey = prunedTree.key;
+      addedCount += 1;
+    }
+    pruneSpecbotResultsByCurrentExclusions();
+    state.ui.pickerSelectedClauseIdsBySpec = clearPickerClauseSelection(state.ui.pickerSelectedClauseIdsBySpec, specNo);
+    persistSessionState();
+    closePicker();
+    renderLoadedTree();
+    renderSelectedClauseList();
+    renderClauseTree();
+    if (lastAddedKey) {
+      focusNode(lastAddedKey);
+    }
+    if (addedCount && skippedCount) {
+      setMessage(`${addedCount}개 절을 불러왔고 ${skippedCount}개는 이미 로드된 범위라 건너뛰었습니다.`, false);
+      return;
+    }
+    if (addedCount) {
+      setMessage(`${addedCount}개 절을 불러왔습니다.`, false);
+      return;
+    }
+    setMessage("선택한 절은 이미 로드된 범위에 있어 추가하지 않았습니다.", false);
+  } catch (error) {
+    if (!isAbortedRequestError(error)) {
+      setMessage(error.message, true);
+    }
+  } finally {
+    endBusy({ allowDuringSpecbotQuery: true });
+    renderPickerSelectionControls();
+  }
+}
+
 function expandAll(node) {
   state.ui.expandedKeys = new Set([...state.ui.expandedKeys, node.key]);
   (node.children || []).forEach(expandAll);
@@ -1049,7 +1175,7 @@ function renderLoadedTree() {
   elements.loadedSummary.textContent = `${count} clauses loaded`;
   renderTranslationStatus();
   if (!sortedRoots.length) {
-    elements.treeContainer.innerHTML = '<div class="muted">왼쪽의 문서 검색 버튼으로 문서를 고른 뒤, 절 제목을 클릭해 추가하세요.</div>';
+    elements.treeContainer.innerHTML = '<div class="muted">왼쪽의 문서 검색 버튼으로 문서를 고른 뒤, 절을 체크하고 한 번에 추가하세요.</div>';
     state.ui.viewportKey = "";
     persistSessionState();
     return;
@@ -2373,30 +2499,14 @@ function updateNodeBlocks(nodeKey, transform) {
 
 function findLoadedAncestor(specNo, clauseId) {
   const clausePath = String(clauseId || "").split(".").filter(Boolean);
-  for (let index = clausePath.length - 1; index >= 0; index -= 1) {
+  for (let index = clausePath.length - 2; index >= 0; index -= 1) {
     const candidateId = clausePath.slice(0, index + 1).join(".");
     const candidate = findNodeByKey(`${specNo}:${candidateId}`);
-    if (candidate) {
+    if (candidate && nodeIncludesDescendants(candidate)) {
       return candidate;
     }
   }
   return null;
-}
-
-function isClausePathPrefix(ancestorPath, descendantPath) {
-  const left = ancestorPath || [];
-  const right = descendantPath || [];
-  if (left.length > right.length) {
-    return false;
-  }
-  return left.every((part, index) => part === right[index]);
-}
-
-function mergeLoadedRoot(roots, subtree) {
-  const prunedRoots = (roots || []).filter(
-    (root) => !(root.specNo === subtree.specNo && isClausePathPrefix(subtree.clausePath || [], root.clausePath || []))
-  );
-  return [...prunedRoots, subtree];
 }
 
 function focusNode(key) {
@@ -3594,6 +3704,10 @@ function updateBusyUi() {
   elements.openPickerButton.disabled = isBusy && !allowsDocumentBrowsing;
   elements.documentSearch.disabled = isBusy && !allowsDocumentBrowsing;
   elements.clauseSearch.disabled = isBusy && !allowsDocumentBrowsing;
+  if (elements.loadSelectedClausesButton) {
+    elements.loadSelectedClausesButton.disabled =
+      isBusy || getPickerSelectedClauseIds(state.ui.pickerSelectedClauseIdsBySpec, state.activeSpecNo).length === 0;
+  }
   if (elements.exportButton) {
     elements.exportButton.disabled = isBusy;
   }
@@ -3706,6 +3820,7 @@ function restoreSessionState() {
     const payload = normalizeWorkspacePayload(JSON.parse(raw), {
       ensureForestStableBlockIds,
       normalizeRejectedClauses: getNormalizedRejectedClauses,
+      normalizePickerSelectedClauseIdsBySpec,
       sortSpecbotHits: (items) => [...items].sort(compareSpecbotHits),
     });
     state.activeSpecNo = payload.activeSpecNo;
@@ -3716,6 +3831,7 @@ function restoreSessionState() {
     state.ui.collapsedSpecs = payload.collapsedSpecs;
     state.ui.collapsedLoadedSpecs = payload.collapsedLoadedSpecs;
     state.ui.clauseQuery = payload.clauseQuery;
+    state.ui.pickerSelectedClauseIdsBySpec = payload.pickerSelectedClauseIdsBySpec;
     state.ui.specbotQueryText = payload.specbotQueryText;
     state.ui.specbotResultsCollapsed = payload.specbotResultsCollapsed;
     state.ui.notes = payload.notes;
@@ -3742,6 +3858,7 @@ async function applyWorkspaceSnapshot(payload) {
   const normalizedPayload = normalizeWorkspacePayload(payload, {
     ensureForestStableBlockIds,
     normalizeRejectedClauses: getNormalizedRejectedClauses,
+    normalizePickerSelectedClauseIdsBySpec,
     sortSpecbotHits: (items) => [...items].sort(compareSpecbotHits),
   });
   state.activeSpecNo = normalizedPayload.activeSpecNo;
@@ -3752,6 +3869,7 @@ async function applyWorkspaceSnapshot(payload) {
   state.ui.collapsedSpecs = normalizedPayload.collapsedSpecs;
   state.ui.collapsedLoadedSpecs = normalizedPayload.collapsedLoadedSpecs;
   state.ui.clauseQuery = normalizedPayload.clauseQuery;
+  state.ui.pickerSelectedClauseIdsBySpec = normalizedPayload.pickerSelectedClauseIdsBySpec;
   state.ui.specbotQueryText = normalizedPayload.specbotQueryText;
   state.ui.specbotResultsCollapsed = normalizedPayload.specbotResultsCollapsed;
   state.ui.notes = normalizedPayload.notes;

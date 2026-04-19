@@ -794,6 +794,18 @@ button:disabled {
   gap: 8px;
 }
 
+.picker-batch-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.picker-batch-toolbar button {
+  flex: 0 0 auto;
+}
+
 .clause-children {
   margin-left: 18px;
   padding-left: 14px;
@@ -809,6 +821,19 @@ button:disabled {
   gap: 8px;
 }
 
+.clause-picker-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.clause-picker-checkbox {
+  margin-top: 3px;
+  flex: 0 0 auto;
+}
+
 .clause-bullet {
   color: var(--muted);
   line-height: 1.9;
@@ -822,9 +847,11 @@ button:disabled {
   border-radius: 0;
   text-align: left;
   line-height: 1.5;
+  flex: 1 1 auto;
 }
 
-.clause-link:hover {
+.clause-link:hover,
+.clause-picker-label:hover .clause-link {
   color: var(--accent);
 }
 
